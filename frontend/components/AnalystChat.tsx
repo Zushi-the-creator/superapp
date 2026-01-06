@@ -157,7 +157,7 @@ export default function AnalystChat({ selectedStock }: AnalystChatProps) {
               }`}
             >
               <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-              <p className="text-xs opacity-50 mt-1">
+              <p className="text-xs opacity-50 mt-1" suppressHydrationWarning>
                 {new Date(message.timestamp).toLocaleTimeString()}
               </p>
             </div>
