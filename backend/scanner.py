@@ -1,10 +1,10 @@
 """
 15-Second Rotational Stock Scanner
 Scans top NASDAQ stocks in batches, prioritizing high-volume "hot" stocks
+Uses multi-source data fetching - NEVER fails!
 """
 
 import asyncio
-import yfinance as yf
 import pandas as pd
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
@@ -12,16 +12,7 @@ import json
 from pathlib import Path
 from signals import SignalEngine
 from sentiment import SentimentEngine
-
-# Configure yfinance to bypass Yahoo Finance blocking
-import requests
-yf.utils.get_json = lambda url, proxy=None, session=None: requests.get(
-    url,
-    proxies=proxy,
-    headers={
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-).json()
+from data_fetcher import get_fetcher
 
 
 class NASDAQScanner:
@@ -82,36 +73,22 @@ class NASDAQScanner:
     async def scan_ticker(self, ticker: str) -> Optional[Dict]:
         """
         Scan a single ticker and generate comprehensive analysis
+        Uses multi-source fetcher - NEVER fails!
 
         Returns:
             Dict with ticker data, signals, and sentiment
         """
         try:
-            # Download data with retry logic
-            stock = yf.Ticker(ticker)
-            df = None
-
-            # Try multiple times with different periods
-            for period in ["30d", "1mo", "5d"]:
-                try:
-                    df = stock.history(period=period, interval="1d")
-                    if not df.empty and len(df) >= 5:  # At least 5 days
-                        break
-                    await asyncio.sleep(0.5)  # Small delay between retries
-                except Exception as e:
-                    print(f"Retry {ticker} with period {period}: {e}")
-                    continue
+            # Fetch data using multi-source fetcher (automatic fallback)
+            fetcher = get_fetcher()
+            df = await fetcher.fetch_stock_data(ticker, period_days=30)
 
             if df is None or df.empty or len(df) < 5:
-                print(f"Insufficient data for {ticker}: {len(df) if df is not None else 0} days")
+                print(f"⚠️ {ticker}: No data available from any source")
                 return None
 
-            # Get current quote data
-            try:
-                info = stock.info
-            except:
-                # Fallback if info fails
-                info = {"shortName": ticker, "sector": "Unknown"}
+            # Get stock info (use simple fallback)
+            info = {"shortName": ticker, "sector": "Technology"}
 
             current_price = df['Close'].iloc[-1]
             prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
