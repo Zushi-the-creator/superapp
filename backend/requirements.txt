@@ -5,11 +5,12 @@ python-multipart==0.0.6
 websockets==12.0
 
 # Data & Analysis
-yfinance==0.2.36
+yfinance==0.2.48
 pandas==2.2.0
 numpy==1.26.3
 ta==0.11.0
 python-dateutil==2.8.2
+requests-cache==1.1.1
 
 # News & Sentiment
 beautifulsoup4==4.12.3

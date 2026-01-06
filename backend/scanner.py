@@ -77,15 +77,27 @@ class NASDAQScanner:
             Dict with ticker data, signals, and sentiment
         """
         try:
-            # Download 60 days of data (enough for indicators)
+            # Download data with proper configuration
             stock = yf.Ticker(ticker)
-            df = stock.history(period="60d", interval="1d")
 
-            if df.empty or len(df) < 30:
+            # Try with shorter period first (more reliable)
+            df = stock.history(period="30d", interval="1d")
+
+            # Fallback: try with different parameters
+            if df.empty:
+                df = stock.history(period="1mo", interval="1d")
+
+            if df.empty or len(df) < 20:  # Reduced minimum from 30 to 20
+                print(f"Insufficient data for {ticker}: {len(df)} days")
                 return None
 
             # Get current quote data
-            info = stock.info
+            try:
+                info = stock.info
+            except:
+                # Fallback if info fails
+                info = {"shortName": ticker, "sector": "Unknown"}
+
             current_price = df['Close'].iloc[-1]
             prev_close = df['Close'].iloc[-2] if len(df) > 1 else current_price
             price_change = current_price - prev_close
@@ -151,10 +163,22 @@ class NASDAQScanner:
             return None
 
     async def scan_batch(self, tickers: List[str]) -> List[Dict]:
-        """Scan a batch of tickers concurrently"""
-        tasks = [self.scan_ticker(ticker) for ticker in tickers]
-        results = await asyncio.gather(*tasks)
-        return [r for r in results if r is not None]
+        """Scan a batch of tickers with rate limit handling"""
+        results = []
+
+        # Process in smaller sub-batches to avoid rate limiting
+        sub_batch_size = 10
+        for i in range(0, len(tickers), sub_batch_size):
+            sub_batch = tickers[i:i + sub_batch_size]
+            tasks = [self.scan_ticker(ticker) for ticker in sub_batch]
+            batch_results = await asyncio.gather(*tasks)
+            results.extend([r for r in batch_results if r is not None])
+
+            # Small delay between sub-batches
+            if i + sub_batch_size < len(tickers):
+                await asyncio.sleep(1)
+
+        return results
 
     async def full_scan(self):
         """
