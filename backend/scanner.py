@@ -13,6 +13,16 @@ from pathlib import Path
 from signals import SignalEngine
 from sentiment import SentimentEngine
 
+# Configure yfinance to bypass Yahoo Finance blocking
+import requests
+yf.utils.get_json = lambda url, proxy=None, session=None: requests.get(
+    url,
+    proxies=proxy,
+    headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+).json()
+
 
 class NASDAQScanner:
     """
@@ -77,18 +87,23 @@ class NASDAQScanner:
             Dict with ticker data, signals, and sentiment
         """
         try:
-            # Download data with proper configuration
+            # Download data with retry logic
             stock = yf.Ticker(ticker)
+            df = None
 
-            # Try with shorter period first (more reliable)
-            df = stock.history(period="30d", interval="1d")
+            # Try multiple times with different periods
+            for period in ["30d", "1mo", "5d"]:
+                try:
+                    df = stock.history(period=period, interval="1d")
+                    if not df.empty and len(df) >= 5:  # At least 5 days
+                        break
+                    await asyncio.sleep(0.5)  # Small delay between retries
+                except Exception as e:
+                    print(f"Retry {ticker} with period {period}: {e}")
+                    continue
 
-            # Fallback: try with different parameters
-            if df.empty:
-                df = stock.history(period="1mo", interval="1d")
-
-            if df.empty or len(df) < 20:  # Reduced minimum from 30 to 20
-                print(f"Insufficient data for {ticker}: {len(df)} days")
+            if df is None or df.empty or len(df) < 5:
+                print(f"Insufficient data for {ticker}: {len(df) if df is not None else 0} days")
                 return None
 
             # Get current quote data
