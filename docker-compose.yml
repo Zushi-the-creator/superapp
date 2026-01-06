@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # Backend API & Scanner
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OLLAMA_HOST=http://ollama:11434
+    volumes:
+      - ./backend:/app
+      - stock_data:/app/data
+    depends_on:
+      - ollama
+      - chromadb
+    restart: unless-stopped
+    networks:
+      - nasdaq_network
+
+  # Ollama for Local LLM (Llama 3.2)
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - nasdaq_network
+    command: serve
+
+  # ChromaDB for Vector Storage
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    networks:
+      - nasdaq_network
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+      - NEXT_PUBLIC_WS_URL=ws://backend:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - nasdaq_network
+    command: npm run dev
+
+volumes:
+  ollama_data:
+  chroma_data:
+  stock_data:
+
+networks:
+  nasdaq_network:
+    driver: bridge
