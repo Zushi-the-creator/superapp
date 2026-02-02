@@ -108,20 +108,45 @@ class SentimentAnalyzer:
         'lawsuit', 'sued', 'fraud', 'investigation', 'sec probe',
         'downgrade', 'miss', 'disappoints', 'warning', 'cuts guidance',
         'layoffs', 'restructuring', 'default', 'bankruptcy', 'recall',
-        'hack', 'breach', 'scandal', 'resign', 'fired', 'crash'
+        'hack', 'breach', 'scandal', 'resign', 'fired', 'crash',
+        'fall', 'drop', 'plunge', 'tumble', 'decline', 'lose', 'risk',
+        'concern', 'fear', 'weak', 'slow', 'cut', 'sell'
     ]
 
     # Positive keywords (less weight - we don't use for entry)
     POSITIVE_KEYWORDS = [
         'upgrade', 'beat', 'exceeds', 'raises guidance', 'record',
-        'breakthrough', 'partnership', 'contract', 'approval', 'launch'
+        'breakthrough', 'partnership', 'contract', 'approval', 'launch',
+        'surge', 'jump', 'rise', 'soar', 'rally', 'gain', 'growth',
+        'profit', 'strong', 'buy', 'bullish', 'outperform', 'top'
     ]
+
+    def fetch_news(self, ticker: str) -> List[str]:
+        """Fetch real news headlines from Google News RSS"""
+        import requests
+        import re
+
+        try:
+            url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+            response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+
+            if response.status_code != 200:
+                return []
+
+            # Extract headlines from RSS
+            headlines = re.findall(r'<title>(.*?)</title>', response.text)[2:12]
+            headlines = [h.replace('&amp;', '&').replace('&quot;', '"') for h in headlines]
+            return headlines
+
+        except Exception:
+            return []
 
     def analyze(
         self,
         ticker: str,
         headlines: List[str] = None,
-        days_to_earnings: int = None
+        days_to_earnings: int = None,
+        fetch_if_none: bool = True
     ) -> SentimentResult:
         """
         Analyze sentiment for a ticker.
@@ -130,6 +155,7 @@ class SentimentAnalyzer:
             ticker: Stock symbol
             headlines: List of recent news headlines
             days_to_earnings: Days until next earnings
+            fetch_if_none: If True, fetch news from Google if headlines not provided
 
         Returns:
             SentimentResult with veto decision
@@ -145,7 +171,11 @@ class SentimentAnalyzer:
             veto = True
             veto_reason = f"Earnings in {days_to_earnings} days - binary event risk"
 
-        # Analyze headlines if provided
+        # Fetch real news if not provided
+        if headlines is None and fetch_if_none:
+            headlines = self.fetch_news(ticker)
+
+        # Analyze headlines if available
         score = 0
         if headlines:
             positive_count = 0
