@@ -22,6 +22,8 @@ from .exit import ExitEngine, ExitSignal
 from .regime import RegimeDetector, MarketRegime
 from .learner import ThompsonSamplingLearner
 from .validator import WalkForwardValidator
+from .sector_strategies import SectorStrategyEngine, Sector, StrategyType
+from .sentiment_analyst import CombinedScorer, SentimentAnalyzer, AnalystIntegration
 
 __all__ = [
     'ATLASV2Model',
@@ -30,6 +32,12 @@ __all__ = [
     'RegimeDetector',
     'ThompsonSamplingLearner',
     'WalkForwardValidator',
+    'SectorStrategyEngine',
+    'Sector',
+    'StrategyType',
+    'CombinedScorer',
+    'SentimentAnalyzer',
+    'AnalystIntegration',
 ]
 
 __version__ = "2.0.0"
