@@ -24,6 +24,7 @@ from .learner import ThompsonSamplingLearner
 from .validator import WalkForwardValidator
 from .sector_strategies import SectorStrategyEngine, Sector, StrategyType
 from .sentiment_analyst import CombinedScorer, SentimentAnalyzer, AnalystIntegration
+from .expert_analyst import ExpertAnalyst, StockAnalysis, PortfolioAction, create_expert_analyst
 
 __all__ = [
     'ATLASV2Model',
@@ -38,6 +39,10 @@ __all__ = [
     'CombinedScorer',
     'SentimentAnalyzer',
     'AnalystIntegration',
+    'ExpertAnalyst',
+    'StockAnalysis',
+    'PortfolioAction',
+    'create_expert_analyst',
 ]
 
 __version__ = "2.0.0"
