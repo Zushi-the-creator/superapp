@@ -1210,17 +1210,41 @@ async def _broadcast_alert(alert: Dict):
 
 # ── Background Monitor ──
 
-# Track previously sent alerts to avoid duplicates
-_last_sent_signals: Dict[str, str] = {}     # ticker -> last sent signal
-_last_sent_health: set = set()               # set of alert keys already sent
-_last_sent_upgrades: set = set()             # set of upgrade tickers already sent
+# Track previously sent alerts to avoid duplicates (persisted to disk)
+_DEDUP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "alert_dedup.json")
+
+def _load_dedup() -> dict:
+    """Load dedup state from disk. Resets if date changed."""
+    try:
+        with open(_DEDUP_FILE, "r") as f:
+            state = json.load(f)
+        if state.get("date") != datetime.now().strftime("%Y-%m-%d"):
+            return {"date": datetime.now().strftime("%Y-%m-%d"), "signals": {}, "health": [], "upgrades": [], "price_alerts": {}}
+        return state
+    except Exception:
+        return {"date": datetime.now().strftime("%Y-%m-%d"), "signals": {}, "health": [], "upgrades": [], "price_alerts": {}}
+
+def _save_dedup(state: dict):
+    """Persist dedup state to disk."""
+    try:
+        os.makedirs(os.path.dirname(_DEDUP_FILE), exist_ok=True)
+        state["date"] = datetime.now().strftime("%Y-%m-%d")
+        with open(_DEDUP_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"[Dedup] Failed to save: {e}")
+
+_dedup = _load_dedup()
 
 async def background_monitor():
-    """Runs every 15 minutes: health check + email alerts only on CHANGES."""
-    global _last_sent_signals, _last_sent_health, _last_sent_upgrades
+    """Runs every 15 minutes: health check + email alerts only on CHANGES (persisted to disk)."""
+    global _dedup
     await asyncio.sleep(60)  # Wait for startup and warmup to finish first
     while True:
         try:
+            # Reload dedup state (resets daily)
+            _dedup = _load_dedup()
+
             print(f"\n[Monitor] Running health check at {datetime.now().strftime('%H:%M')}")
             health = await _run_health_check()
 
@@ -1235,18 +1259,22 @@ async def background_monitor():
                             "timestamp": datetime.now().isoformat(),
                         })
 
-            # Email alerts — only send on CHANGES
+            # Email alerts — only send on CHANGES (deduped + persisted)
             try:
                 from email_alerts import send_health_alert, send_signal_alert, send_upgrade_alert
+
+                sent_health = set(_dedup.get("health", []))
+                sent_signals = _dedup.get("signals", {})
+                sent_upgrades = set(_dedup.get("upgrades", []))
 
                 # Health alerts: only send new ones
                 if health.get("alerts"):
                     new_health = [a for a in health["alerts"]
-                                  if f"{a.get('ticker','')}-{a.get('type','')}" not in _last_sent_health]
+                                  if f"{a.get('ticker','')}-{a.get('type','')}" not in sent_health]
                     if new_health:
                         send_health_alert(new_health)
                         for a in new_health:
-                            _last_sent_health.add(f"{a.get('ticker','')}-{a.get('type','')}")
+                            sent_health.add(f"{a.get('ticker','')}-{a.get('type','')}")
 
                 # Signal alerts: only send when signal CHANGES for a ticker
                 new_signals = []
@@ -1256,7 +1284,7 @@ async def background_monitor():
                     signal = pos.get("signal", "HOLD")
                     current_signals[ticker] = signal
                     if signal in ("SELL", "ROTATION"):
-                        prev = _last_sent_signals.get(ticker)
+                        prev = sent_signals.get(ticker)
                         if prev != signal:
                             new_signals.append({
                                 "ticker": ticker,
@@ -1266,7 +1294,6 @@ async def background_monitor():
                             })
                 if new_signals:
                     send_signal_alert(new_signals)
-                _last_sent_signals = current_signals
 
                 # Upgrade alerts: only send new upgrade tickers
                 if _scan_cache:
@@ -1276,12 +1303,19 @@ async def background_monitor():
                          "zone_return": o.get("zone_return", 0)}
                         for o in _scan_cache.get("opportunities", [])
                         if o.get("is_upgrade") and not o.get("vetoed")
-                        and o["ticker"] not in _last_sent_upgrades
+                        and o["ticker"] not in sent_upgrades
                     ]
                     if upgrades:
                         send_upgrade_alert(upgrades)
                         for u in upgrades:
-                            _last_sent_upgrades.add(u["ticker"])
+                            sent_upgrades.add(u["ticker"])
+
+                # Persist dedup state to disk
+                _dedup["health"] = list(sent_health)
+                _dedup["signals"] = current_signals
+                _dedup["upgrades"] = list(sent_upgrades)
+                _save_dedup(_dedup)
+
             except Exception as e:
                 print(f"[Monitor] Email alert error: {e}")
 
@@ -1294,21 +1328,16 @@ async def background_monitor():
 
 # ── Price Level Monitor (Stop Loss / Target) ──
 
-_price_alerts_sent: Dict[str, str] = {}  # ticker -> last alert type sent (reset daily)
-_price_alerts_date: str = ""             # date string to reset daily
-
 async def price_level_monitor():
-    """Check live prices against stop loss and target levels every 60s. Email on breach."""
-    global _price_alerts_sent, _price_alerts_date
+    """Check live prices against stop loss and target levels every 60s. Email on breach. Dedup persisted."""
+    global _dedup
     await asyncio.sleep(45)  # Wait for startup + warmup
     print("[PriceMonitor] Started - checking stops/targets every 60s")
 
     while True:
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            if _price_alerts_date != today:
-                _price_alerts_sent = {}
-                _price_alerts_date = today
+            _dedup = _load_dedup()
+            price_alerts = _dedup.get("price_alerts", {})
 
             positions = _position_mgr._get_open_positions_sync()
             if not positions:
@@ -1337,7 +1366,7 @@ async def price_level_monitor():
                     target_2 = entry * (1 + t2_pct / 100)
                     pnl_pct = (price - entry) / entry * 100
 
-                    prev_alert = _price_alerts_sent.get(ticker)
+                    prev_alert = price_alerts.get(ticker)
 
                     if price <= stop_price and prev_alert != "STOP_LOSS":
                         triggered.append({
@@ -1345,23 +1374,27 @@ async def price_level_monitor():
                             "price": price, "level": stop_price,
                             "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
                         })
-                        _price_alerts_sent[ticker] = "STOP_LOSS"
+                        price_alerts[ticker] = "STOP_LOSS"
                     elif price >= target_2 and prev_alert != "TARGET_2":
                         triggered.append({
                             "ticker": ticker, "alert_type": "TARGET_2",
                             "price": price, "level": target_2,
                             "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
                         })
-                        _price_alerts_sent[ticker] = "TARGET_2"
+                        price_alerts[ticker] = "TARGET_2"
                     elif price >= target_1 and prev_alert not in ("TARGET_1", "TARGET_2"):
                         triggered.append({
                             "ticker": ticker, "alert_type": "TARGET_1",
                             "price": price, "level": target_1,
                             "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
                         })
-                        _price_alerts_sent[ticker] = "TARGET_1"
+                        price_alerts[ticker] = "TARGET_1"
 
                     await asyncio.sleep(0.3)  # Rate limit
+
+            # Persist price alert dedup
+            _dedup["price_alerts"] = price_alerts
+            _save_dedup(_dedup)
 
             if triggered:
                 try:
