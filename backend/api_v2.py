@@ -1456,7 +1456,7 @@ async def warmup_signal_cache():
                 elif not above_sma50:
                     signal = "CAUTION"
                     issues.append("Below SMA50")
-                _signal_cache[ticker] = {"signal": signal, "issues": issues, "ts": datetime.now()}
+                _signal_cache[ticker] = (signal, issues, datetime.now())
                 print(f"[Warmup] {ticker}: {signal} (RSI={rsi2:.0f})")
             except Exception as e:
                 print(f"[Warmup] {ticker} error: {e}")
