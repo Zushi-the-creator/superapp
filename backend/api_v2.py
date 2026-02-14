@@ -1239,14 +1239,19 @@ _dedup = _load_dedup()
 async def background_monitor():
     """Runs every 15 minutes: health check + email alerts only on CHANGES (persisted to disk)."""
     global _dedup
-    await asyncio.sleep(60)  # Wait for startup and warmup to finish first
+    await asyncio.sleep(120 if _is_prod else 60)  # Production: wait longer for worker stability
     while True:
         try:
             # Reload dedup state (resets daily)
             _dedup = _load_dedup()
 
             print(f"\n[Monitor] Running health check at {datetime.now().strftime('%H:%M')}")
-            health = await _run_health_check()
+            try:
+                health = await asyncio.wait_for(_run_health_check(), timeout=90 if _is_prod else 300)
+            except asyncio.TimeoutError:
+                print("[Monitor] Health check timed out, skipping this cycle")
+                await asyncio.sleep(900)
+                continue
 
             # Broadcast critical alerts via WebSocket
             if health.get("has_critical"):
@@ -1267,14 +1272,14 @@ async def background_monitor():
                 sent_signals = _dedup.get("signals", {})
                 sent_upgrades = set(_dedup.get("upgrades", []))
 
-                # Health alerts: only send new ones
+                # Health alerts: only send when signal CHANGES (keyed by ticker-signal)
                 if health.get("alerts"):
                     new_health = [a for a in health["alerts"]
-                                  if f"{a.get('ticker','')}-{a.get('type','')}" not in sent_health]
+                                  if f"{a.get('ticker','')}-{a.get('signal','')}" not in sent_health]
                     if new_health:
                         send_health_alert(new_health)
                         for a in new_health:
-                            sent_health.add(f"{a.get('ticker','')}-{a.get('type','')}")
+                            sent_health.add(f"{a.get('ticker','')}-{a.get('signal','')}")
 
                 # Signal alerts: only send when signal CHANGES for a ticker
                 new_signals = []
@@ -1423,23 +1428,51 @@ async def price_level_monitor():
 
 
 async def warmup_signal_cache():
-    """Pre-cache signals for all positions at startup so first request is fast."""
+    """Pre-cache signals for all positions at startup so first request is fast.
+    On production: only cache technicals (no network calls) to avoid worker timeout."""
     await asyncio.sleep(15)  # Wait for app to be fully ready
     positions = _position_mgr._get_open_positions_sync()
     if not positions:
         return
-    print(f"[Warmup] Pre-caching signals for {len(positions)} positions...")
-    async with aiohttp.ClientSession() as session:
+
+    if _is_prod:
+        # Production: just warm technicals cache, skip network-heavy signal computation
+        print(f"[Warmup] Production mode - caching technicals for {len(positions)} positions...")
         for pos in positions:
             ticker = pos["ticker"]
             try:
-                quote = await _get_finnhub_quote(session, ticker)
-                live_price = quote["price"] if quote else pos["entry_price"]
-                day_chg = quote["day_chg"] if quote else 0
                 tech = _get_technicals(ticker)
-                await _compute_signal(session, ticker, tech, live_price, day_chg)
-                print(f"[Warmup] {ticker} cached")
+                # Pre-fill signal cache with basic signal (no network rules)
+                signal = "HOLD"
+                issues = []
+                rsi2 = tech.get("rsi2", 50)
+                above_sma50 = tech.get("above_sma50", True)
+                if rsi2 < 20 and above_sma50:
+                    signal = "BUY"
+                elif rsi2 > 80:
+                    signal = "OVERBOUGHT"
+                elif not above_sma50:
+                    signal = "CAUTION"
+                    issues.append("Below SMA50")
+                _signal_cache[ticker] = {"signal": signal, "issues": issues, "ts": datetime.now()}
+                print(f"[Warmup] {ticker}: {signal} (RSI={rsi2:.0f})")
             except Exception as e:
                 print(f"[Warmup] {ticker} error: {e}")
-            await asyncio.sleep(0.5)
-    print("[Warmup] Signal cache ready")
+        print("[Warmup] Technicals cached - ready to serve requests")
+    else:
+        # Local dev: full warmup with network calls
+        print(f"[Warmup] Pre-caching signals for {len(positions)} positions...")
+        async with aiohttp.ClientSession() as session:
+            for pos in positions:
+                ticker = pos["ticker"]
+                try:
+                    quote = await _get_finnhub_quote(session, ticker)
+                    live_price = quote["price"] if quote else pos["entry_price"]
+                    day_chg = quote["day_chg"] if quote else 0
+                    tech = _get_technicals(ticker)
+                    await _compute_signal(session, ticker, tech, live_price, day_chg)
+                    print(f"[Warmup] {ticker} cached")
+                except Exception as e:
+                    print(f"[Warmup] {ticker} error: {e}")
+                await asyncio.sleep(0.5)
+        print("[Warmup] Signal cache ready")
