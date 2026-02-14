@@ -522,15 +522,21 @@ async def run_scanner_loop(scanner: NASDAQScanner):
     print("API is ready, starting background scan...")
 
     if scanner.is_production:
-        full_scan_interval = 3600   # 60 minutes in production
-        hot_scan_interval = 60      # 60 seconds in production
+        full_scan_interval = 7200   # 2 hours in production (cached data is fine)
+        hot_scan_interval = 120     # 2 minutes in production
         print(f"🏭 Production intervals: full={full_scan_interval}s, hot={hot_scan_interval}s")
+        # In production, DON'T run full scan at startup - use cached data
+        # The 687 cached stocks from scan_results.json are already loaded
+        if scanner.scan_results:
+            print(f"🏭 Using {len(scanner.scan_results)} cached stocks, skipping initial full scan")
+        else:
+            # No cache available, do a small scan
+            asyncio.create_task(scanner.full_scan())
     else:
         full_scan_interval = 1800   # 30 minutes local
         hot_scan_interval = 15      # 15 seconds local
-
-    # Start full scan in background (don't block startup)
-    asyncio.create_task(scanner.full_scan())
+        # Start full scan in background (don't block startup)
+        asyncio.create_task(scanner.full_scan())
 
     last_full_scan_time = datetime.now()
 
