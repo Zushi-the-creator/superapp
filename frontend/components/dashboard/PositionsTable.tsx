@@ -156,6 +156,49 @@ function PositionRow({
                 <span className="text-neutral-500">Cost Basis</span>
                 <div className="text-neutral-200 font-medium">{formatCurrency(pos.cost_basis)}</div>
               </div>
+              {/* Stop Loss & Targets */}
+              <div className="col-span-2 md:col-span-4 mt-1 pt-2 border-t border-neutral-800/50">
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <span className="text-neutral-500">Stop Loss ({pos.stop_pct}%)</span>
+                    <div className={cn("font-medium", pos.current_price <= pos.stop_loss ? "text-signal-sell animate-pulse" : "text-signal-sell/60")}>
+                      {formatCurrency(pos.stop_loss)}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="text-neutral-500">Target 1 (+{pos.target_1_pct}%)</span>
+                    <div className={cn("font-medium", pos.current_price >= pos.target_1 ? "text-signal-buy animate-pulse" : "text-signal-buy/60")}>
+                      {formatCurrency(pos.target_1)}
+                    </div>
+                  </div>
+                  <div>
+                    <span className="text-neutral-500">Target 2 (+{pos.target_2_pct}%)</span>
+                    <div className={cn("font-medium", pos.current_price >= pos.target_2 ? "text-signal-buy animate-pulse" : "text-signal-buy/60")}>
+                      {formatCurrency(pos.target_2)}
+                    </div>
+                  </div>
+                </div>
+                {/* Visual price bar */}
+                <div className="mt-2 relative h-2 bg-neutral-800 rounded-full overflow-hidden">
+                  {(() => {
+                    const range = pos.target_2 - pos.stop_loss;
+                    const pricePct = Math.max(0, Math.min(100, ((pos.current_price - pos.stop_loss) / range) * 100));
+                    const t1Pct = ((pos.target_1 - pos.stop_loss) / range) * 100;
+                    return (
+                      <>
+                        <div className="absolute left-0 top-0 h-full bg-signal-sell/30 rounded-l-full" style={{width: `${t1Pct * 0.2}%`}} />
+                        <div className={cn("absolute top-0 h-full rounded-full transition-all", pos.pnl >= 0 ? "bg-signal-buy" : "bg-signal-sell")} style={{width: `${pricePct}%`}} />
+                        <div className="absolute top-0 h-full w-px bg-neutral-500" style={{left: `${t1Pct}%`}} title="Target 1" />
+                      </>
+                    );
+                  })()}
+                </div>
+                <div className="flex justify-between text-[10px] text-neutral-600 mt-0.5">
+                  <span>Stop</span>
+                  <span>Current</span>
+                  <span>Target</span>
+                </div>
+              </div>
               {pos.issues.length > 0 && (
                 <div className="col-span-2 md:col-span-4">
                   <span className="text-neutral-500">Issues</span>

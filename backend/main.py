@@ -21,7 +21,7 @@ from macro_policy import (
     adjust_signal_for_macro,
     full_macro_analysis
 )
-from api_v2 import router as v2_router, background_monitor, price_level_monitor
+from api_v2 import router as v2_router, background_monitor, price_level_monitor, warmup_signal_cache
 
 # Optional: RAG/LLM (not installed in production slim build)
 try:
@@ -103,6 +103,9 @@ async def startup_event():
 
     # Start price level monitor (stop loss / target alerts every 60s)
     asyncio.create_task(price_level_monitor())
+
+    # Warmup signal cache so first portfolio request is fast
+    asyncio.create_task(warmup_signal_cache())
 
     print("Backend started successfully!")
 

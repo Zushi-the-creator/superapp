@@ -67,9 +67,10 @@ def _exit_targets_by_regime(regime: str) -> tuple:
 
 async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Optional[Dict]:
     """Get live quote from Finnhub. Caches last known good price to prevent P&L=0 on failures."""
+    _timeout = 4 if os.environ.get("FLY_APP_NAME") else 8
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=_timeout)) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data.get("c", 0) > 0:
@@ -210,36 +211,39 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
     if day_chg < -8:
         issues.append(f"CRASH ({day_chg:.1f}% today)")
 
+    # Network-dependent rules (5-7) — wrap each with timeout for production
+    _net_timeout = 3.0 if os.environ.get("FLY_APP_NAME") else 8.0
+
     # Rule 5: Earnings check (Finnhub)
     try:
         from deep_scanner import DeepScanner
         ds = DeepScanner()
-        earnings = await ds._check_earnings(session, ticker)
+        earnings = await asyncio.wait_for(ds._check_earnings(session, ticker), timeout=_net_timeout)
         if earnings:
             issues.append(f"Earnings on {earnings['date']} (<7 days)")
-    except Exception:
+    except (asyncio.TimeoutError, Exception):
         pass
 
     # Rule 6: Sentiment check (Google News + VADER)
     try:
         from sentiment import SentimentEngine
         se = SentimentEngine()
-        sdata = await se.get_ticker_sentiment(ticker)
+        sdata = await asyncio.wait_for(se.get_ticker_sentiment(ticker), timeout=_net_timeout)
         if sdata and sdata.get("sentiment_score", 0) < -0.3:
             issues.append(f"Negative sentiment ({sdata['sentiment_score']:.2f})")
-    except Exception:
+    except (asyncio.TimeoutError, Exception):
         pass
 
     # Rule 7: Analyst overvaluation check
     try:
         from analyst_data import AnalystDataFetcher
         af = AnalystDataFetcher()
-        adata = await af.fetch_analyst_data(ticker)
+        adata = await asyncio.wait_for(af.fetch_analyst_data(ticker), timeout=_net_timeout)
         if adata and adata.get("price_target_avg", 0) > 0:
             target = adata["price_target_avg"]
             if live_price > target:
                 issues.append(f"Overvalued (${live_price:.0f} > target ${target:.0f})")
-    except Exception:
+    except (asyncio.TimeoutError, Exception):
         pass
 
     # Rule 8: RSI zone expected return analysis (CRITICAL for exit decisions)
@@ -1369,3 +1373,26 @@ async def price_level_monitor():
             print(f"[PriceMonitor] Error: {e}")
 
         await asyncio.sleep(60)  # Check every 60 seconds
+
+
+async def warmup_signal_cache():
+    """Pre-cache signals for all positions at startup so first request is fast."""
+    await asyncio.sleep(5)
+    positions = _position_mgr._get_open_positions_sync()
+    if not positions:
+        return
+    print(f"[Warmup] Pre-caching signals for {len(positions)} positions...")
+    async with aiohttp.ClientSession() as session:
+        for pos in positions:
+            ticker = pos["ticker"]
+            try:
+                quote = await _get_finnhub_quote(session, ticker)
+                live_price = quote["price"] if quote else pos["entry_price"]
+                day_chg = quote["day_chg"] if quote else 0
+                tech = _get_technicals(ticker)
+                await _compute_signal(session, ticker, tech, live_price, day_chg)
+                print(f"[Warmup] {ticker} cached")
+            except Exception as e:
+                print(f"[Warmup] {ticker} error: {e}")
+            await asyncio.sleep(0.5)
+    print("[Warmup] Signal cache ready")

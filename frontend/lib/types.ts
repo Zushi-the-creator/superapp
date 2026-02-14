@@ -35,6 +35,13 @@ export interface PositionDetail {
   issues: string[];
   // Sparkline
   sparkline: number[];
+  // Exit targets
+  stop_loss: number;
+  target_1: number;
+  target_2: number;
+  stop_pct: number;
+  target_1_pct: number;
+  target_2_pct: number;
 }
 
 export interface PortfolioSummary {
