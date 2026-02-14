@@ -216,6 +216,80 @@ def send_upgrade_alert(upgrades: List[Dict]):
     _notify(f"Upgrade: {', '.join(u['ticker'] for u in upgrades)}", html, wa_text, cfg)
 
 
+# ── Price Level Alerts (Stop Loss / Target Hit) ──
+
+def send_price_level_alert(alerts: List[Dict]):
+    """
+    Send alert when price hits stop loss or target.
+    Each alert: {ticker, alert_type, price, level, entry_price, pnl_pct, shares}
+    alert_type: "STOP_LOSS", "TARGET_1", "TARGET_2"
+    """
+    cfg = load_config()
+    if not cfg.get("enabled"):
+        return
+
+    rows = ""
+    for a in alerts:
+        at = a.get("alert_type", "")
+        if at == "STOP_LOSS":
+            color = "#ef4444"
+            icon = "STOP LOSS"
+        elif at == "TARGET_2":
+            color = "#10b981"
+            icon = "TARGET 2 HIT"
+        else:
+            color = "#f59e0b"
+            icon = "TARGET 1 HIT"
+
+        pnl_pct = a.get("pnl_pct", 0)
+        pnl_color = "#10b981" if pnl_pct >= 0 else "#ef4444"
+        rows += f"""
+        <tr>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#fff;font-weight:bold">{a['ticker']}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:{color};font-weight:bold">{icon}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#fff">${a.get('price', 0):.2f}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#aaa">Level: ${a.get('level', 0):.2f}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:{pnl_color}">{'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%</td>
+        </tr>"""
+
+    stop_alerts = [a for a in alerts if a["alert_type"] == "STOP_LOSS"]
+    target_alerts = [a for a in alerts if a["alert_type"] != "STOP_LOSS"]
+
+    html = f"""
+    <div style="background:#0a0a0a;padding:24px;font-family:monospace;max-width:600px">
+        <h2 style="color:{'#ef4444' if stop_alerts else '#10b981'};margin:0 0 16px">
+            {'STOP LOSS' if stop_alerts else 'TARGET'} Alert
+        </h2>
+        <table style="width:100%;border-collapse:collapse">
+            <tr style="color:#666">
+                <th style="padding:8px;text-align:left">Ticker</th>
+                <th style="padding:8px;text-align:left">Alert</th>
+                <th style="padding:8px;text-align:left">Price</th>
+                <th style="padding:8px;text-align:left">Level</th>
+                <th style="padding:8px;text-align:left">P&L</th>
+            </tr>
+            {rows}
+        </table>
+        <p style="color:#aaa;font-size:13px;margin-top:16px">
+            {'Sell immediately to limit losses.' if stop_alerts else 'Consider taking profit.'}
+        </p>
+        <p style="color:#666;font-size:12px;margin-top:8px">
+            {datetime.now().strftime('%Y-%m-%d %H:%M')} | ATLAS V2 Price Monitor
+        </p>
+    </div>"""
+
+    tickers = ", ".join(a["ticker"] for a in alerts)
+    types = "STOP LOSS" if stop_alerts else "TARGET HIT"
+    lines = []
+    for a in alerts:
+        at = a.get("alert_type", "")
+        emoji = "🔴" if at == "STOP_LOSS" else "🟢"
+        lines.append(f"{emoji} {a['ticker']} ${a.get('price',0):.2f} ({'+' if a.get('pnl_pct',0) >= 0 else ''}{a.get('pnl_pct',0):.1f}%)")
+    wa_text = f"{'🚨' if stop_alerts else '🎯'} *{types}*\n" + "\n".join(lines)
+
+    _notify(f"{types}: {tickers}", html, wa_text, cfg)
+
+
 # ── Portfolio Report ──
 
 def send_portfolio_report(positions: List[Dict], buy_signals: List[Dict], upgrades: List[Dict]) -> bool:

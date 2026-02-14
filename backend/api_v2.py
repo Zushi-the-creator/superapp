@@ -55,6 +55,16 @@ _ws_connections: List[WebSocket] = []
 
 # ── Helpers ──
 
+def _exit_targets_by_regime(regime: str) -> tuple:
+    """Return (stop_pct, target_1_pct, target_2_pct) based on regime."""
+    if regime == "BULL":
+        return (-8.0, 10.0, 20.0)
+    elif regime == "SIDEWAYS":
+        return (-5.0, 5.0, 10.0)
+    else:  # BEAR
+        return (-4.0, 3.0, 6.0)
+
+
 async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Optional[Dict]:
     """Get live quote from Finnhub. Caches last known good price to prevent P&L=0 on failures."""
     try:
@@ -320,6 +330,13 @@ async def get_portfolio():
             # Real signal using ATLAS V2 rules + sentiment + analyst + earnings
             signal, issues = await _compute_signal(session, ticker, tech, live_price, day_chg)
 
+            # Exit targets based on regime
+            regime = tech.get("regime", "BULL")
+            stop_pct, t1_pct, t2_pct = _exit_targets_by_regime(regime)
+            stop_price = round(entry_price * (1 + stop_pct / 100), 2)
+            target_1 = round(entry_price * (1 + t1_pct / 100), 2)
+            target_2 = round(entry_price * (1 + t2_pct / 100), 2)
+
             detail = PositionDetail(
                 id=pos["id"],
                 ticker=ticker,
@@ -335,7 +352,7 @@ async def get_portfolio():
                 rsi2=tech.get("rsi2", -1),
                 sma50=tech.get("sma50", 0),
                 above_sma50=tech.get("above_sma50", True),
-                regime=tech.get("regime", ""),
+                regime=regime,
                 win_rate=tech.get("win_rate", 0),
                 total_trades=tech.get("total_trades", 0),
                 avg_return=tech.get("avg_return", 0),
@@ -349,6 +366,12 @@ async def get_portfolio():
                 sparkline=tech.get("sparkline", []),
                 signal=signal,
                 issues=issues,
+                stop_loss=stop_price,
+                target_1=target_1,
+                target_2=target_2,
+                stop_pct=stop_pct,
+                target_1_pct=t1_pct,
+                target_2_pct=t2_pct,
             )
             details.append(detail)
             await asyncio.sleep(0.3)  # Finnhub rate limit
@@ -1097,6 +1120,48 @@ async def get_cache_stats():
     )
 
 
+# ── Price Levels Endpoint ──
+
+@router.get("/portfolio/levels")
+async def get_price_levels():
+    """Get stop loss and target prices for all positions."""
+    positions = _position_mgr._get_open_positions_sync()
+    if not positions:
+        return {"levels": []}
+
+    levels = []
+    async with aiohttp.ClientSession() as session:
+        for pos in positions:
+            ticker = pos["ticker"]
+            entry = pos["entry_price"]
+            quote = await _get_finnhub_quote(session, ticker)
+            price = quote["price"] if quote else entry
+
+            tech = _get_technicals(ticker)
+            regime = tech.get("regime", "BULL")
+            stop_pct, t1_pct, t2_pct = _exit_targets_by_regime(regime)
+
+            levels.append({
+                "ticker": ticker,
+                "entry_price": entry,
+                "current_price": round(price, 2),
+                "regime": regime,
+                "stop_loss": round(entry * (1 + stop_pct / 100), 2),
+                "target_1": round(entry * (1 + t1_pct / 100), 2),
+                "target_2": round(entry * (1 + t2_pct / 100), 2),
+                "stop_pct": stop_pct,
+                "target_1_pct": t1_pct,
+                "target_2_pct": t2_pct,
+                "pnl_pct": round((price - entry) / entry * 100, 2),
+                "stop_triggered": price <= entry * (1 + stop_pct / 100),
+                "target_1_hit": price >= entry * (1 + t1_pct / 100),
+                "target_2_hit": price >= entry * (1 + t2_pct / 100),
+            })
+            await asyncio.sleep(0.3)
+
+    return {"levels": levels, "timestamp": datetime.now().isoformat()}
+
+
 # ── WebSocket for alerts ──
 
 @router.websocket("/ws/alerts")
@@ -1207,3 +1272,100 @@ async def background_monitor():
             print(f"[Monitor] Error: {e}")
 
         await asyncio.sleep(900)  # 15 minutes
+
+
+# ── Price Level Monitor (Stop Loss / Target) ──
+
+_price_alerts_sent: Dict[str, str] = {}  # ticker -> last alert type sent (reset daily)
+_price_alerts_date: str = ""             # date string to reset daily
+
+async def price_level_monitor():
+    """Check live prices against stop loss and target levels every 60s. Email on breach."""
+    global _price_alerts_sent, _price_alerts_date
+    await asyncio.sleep(30)  # Wait for startup + first quotes
+    print("[PriceMonitor] Started - checking stops/targets every 60s")
+
+    while True:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            if _price_alerts_date != today:
+                _price_alerts_sent = {}
+                _price_alerts_date = today
+
+            positions = _position_mgr._get_open_positions_sync()
+            if not positions:
+                await asyncio.sleep(60)
+                continue
+
+            triggered = []
+            async with aiohttp.ClientSession() as session:
+                for pos in positions:
+                    ticker = pos["ticker"]
+                    entry = pos["entry_price"]
+                    shares = pos["shares"]
+
+                    quote = await _get_finnhub_quote(session, ticker)
+                    if not quote:
+                        continue
+                    price = quote["price"]
+
+                    # Get regime for this ticker
+                    tech = _get_technicals(ticker)
+                    regime = tech.get("regime", "BULL")
+                    stop_pct, t1_pct, t2_pct = _exit_targets_by_regime(regime)
+
+                    stop_price = entry * (1 + stop_pct / 100)
+                    target_1 = entry * (1 + t1_pct / 100)
+                    target_2 = entry * (1 + t2_pct / 100)
+                    pnl_pct = (price - entry) / entry * 100
+
+                    prev_alert = _price_alerts_sent.get(ticker)
+
+                    if price <= stop_price and prev_alert != "STOP_LOSS":
+                        triggered.append({
+                            "ticker": ticker, "alert_type": "STOP_LOSS",
+                            "price": price, "level": stop_price,
+                            "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
+                        })
+                        _price_alerts_sent[ticker] = "STOP_LOSS"
+                    elif price >= target_2 and prev_alert != "TARGET_2":
+                        triggered.append({
+                            "ticker": ticker, "alert_type": "TARGET_2",
+                            "price": price, "level": target_2,
+                            "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
+                        })
+                        _price_alerts_sent[ticker] = "TARGET_2"
+                    elif price >= target_1 and prev_alert not in ("TARGET_1", "TARGET_2"):
+                        triggered.append({
+                            "ticker": ticker, "alert_type": "TARGET_1",
+                            "price": price, "level": target_1,
+                            "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
+                        })
+                        _price_alerts_sent[ticker] = "TARGET_1"
+
+                    await asyncio.sleep(0.3)  # Rate limit
+
+            if triggered:
+                try:
+                    from email_alerts import send_price_level_alert
+                    send_price_level_alert(triggered)
+                    for t in triggered:
+                        print(f"[PriceMonitor] {t['alert_type']} {t['ticker']} @ ${t['price']:.2f} (level ${t['level']:.2f})")
+                    # Broadcast via WebSocket too
+                    for t in triggered:
+                        await _broadcast_alert({
+                            "type": "price_level_alert",
+                            "alert_type": t["alert_type"],
+                            "ticker": t["ticker"],
+                            "price": t["price"],
+                            "level": t["level"],
+                            "pnl_pct": t["pnl_pct"],
+                            "timestamp": datetime.now().isoformat(),
+                        })
+                except Exception as e:
+                    print(f"[PriceMonitor] Alert error: {e}")
+
+        except Exception as e:
+            print(f"[PriceMonitor] Error: {e}")
+
+        await asyncio.sleep(60)  # Check every 60 seconds

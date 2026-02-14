@@ -21,7 +21,7 @@ from macro_policy import (
     adjust_signal_for_macro,
     full_macro_analysis
 )
-from api_v2 import router as v2_router, background_monitor
+from api_v2 import router as v2_router, background_monitor, price_level_monitor
 
 # Optional: RAG/LLM (not installed in production slim build)
 try:
@@ -100,6 +100,9 @@ async def startup_event():
 
     # Start V2 background monitor (health check every 15 min)
     asyncio.create_task(background_monitor())
+
+    # Start price level monitor (stop loss / target alerts every 60s)
+    asyncio.create_task(price_level_monitor())
 
     print("Backend started successfully!")
 

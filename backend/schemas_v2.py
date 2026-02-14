@@ -60,6 +60,13 @@ class PositionDetail(BaseModel):
     issues: List[str] = []
     # Sparkline (last 20 closes)
     sparkline: List[float] = []
+    # Exit targets (based on regime)
+    stop_loss: float = 0
+    target_1: float = 0
+    target_2: float = 0
+    stop_pct: float = 0    # e.g. -8.0
+    target_1_pct: float = 0  # e.g. +10.0
+    target_2_pct: float = 0  # e.g. +20.0
 
 
 class PortfolioSummary(BaseModel):
