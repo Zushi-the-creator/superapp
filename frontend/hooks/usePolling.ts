@@ -39,23 +39,23 @@ export function usePolling<T>({
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const lastErrorRef = useRef(false);
+  const errorCountRef = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
-      setLoading(true);
+      setLoading((prev) => data === null ? true : prev); // Only show loading on first fetch
       const result = await fetcherRef.current();
       setData(result);
       setError(null);
       setLastUpdated(new Date());
-      lastErrorRef.current = false;
+      errorCountRef.current = 0;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
-      lastErrorRef.current = true;
+      errorCountRef.current = Math.min(errorCountRef.current + 1, 6);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [data]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -68,11 +68,13 @@ export function usePolling<T>({
       return isUSMarketOpen() ? interval : offHoursInterval;
     };
 
-    // Re-evaluate interval every tick; retry faster (10s) on error
+    // Exponential backoff on errors: 30s, 60s, 120s, 240s... capped at normal interval
     let timeoutId: ReturnType<typeof setTimeout>;
     const tick = () => {
       refresh();
-      const nextInterval = lastErrorRef.current ? 10_000 : getInterval();
+      const normalInterval = getInterval();
+      const errorBackoff = Math.min(30_000 * Math.pow(2, errorCountRef.current - 1), normalInterval);
+      const nextInterval = errorCountRef.current > 0 ? errorBackoff : normalInterval;
       timeoutId = setTimeout(tick, nextInterval);
     };
     timeoutId = setTimeout(tick, getInterval());

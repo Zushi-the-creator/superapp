@@ -30,14 +30,8 @@ export const api = {
       method: "POST",
     }),
 
-  // Scanner — if scan is still running (total_scanned=0), throw so polling retries quickly
-  getOpportunities: async (): Promise<ScanResponse> => {
-    const data = await fetchJson<ScanResponse & { scanning?: boolean }>("/api/v2/scan/opportunities");
-    if (data.scanning && data.total_scanned === 0) {
-      throw new Error("Scan in progress");
-    }
-    return data;
-  },
+  // Scanner — return data even if scan is in progress (empty results are fine)
+  getOpportunities: () => fetchJson<ScanResponse>("/api/v2/scan/opportunities"),
   refreshScan: () =>
     fetchJson<ScanResponse>("/api/v2/scan/refresh", { method: "POST" }),
 
