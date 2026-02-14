@@ -517,7 +517,8 @@ async def run_scanner_loop(scanner: NASDAQScanner):
     print("Starting scanner loop...")
 
     # Wait for API to be responsive before scanning
-    await asyncio.sleep(5)
+    _delay = 30 if scanner.is_production else 5
+    await asyncio.sleep(_delay)
     print("API is ready, starting background scan...")
 
     if scanner.is_production:

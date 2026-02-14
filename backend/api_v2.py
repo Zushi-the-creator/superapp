@@ -211,40 +211,54 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
     if day_chg < -8:
         issues.append(f"CRASH ({day_chg:.1f}% today)")
 
-    # Network-dependent rules (5-7) — wrap each with timeout for production
-    _net_timeout = 3.0 if os.environ.get("FLY_APP_NAME") else 8.0
+    # Network-dependent rules (5-7)
+    # In production: only run these from background warmup (skip_network=False).
+    # In the request path: skip them to keep the endpoint fast.
+    _is_prod = bool(os.environ.get("FLY_APP_NAME"))
+    _net_timeout = 3.0 if _is_prod else 8.0
 
-    # Rule 5: Earnings check (Finnhub)
-    try:
-        from deep_scanner import DeepScanner
-        ds = DeepScanner()
-        earnings = await asyncio.wait_for(ds._check_earnings(session, ticker), timeout=_net_timeout)
-        if earnings:
-            issues.append(f"Earnings on {earnings['date']} (<7 days)")
-    except (asyncio.TimeoutError, Exception):
-        pass
+    # Only run network rules if called from warmup (not from HTTP request)
+    # The signal cache check at the top means cached signals skip all of this
+    if not _is_prod:
+        # Local dev: always run network rules
+        _run_network = True
+    else:
+        # Production: only run if this is background warmup (no active HTTP request)
+        # Heuristic: if there's no cached signal yet, we're in warmup
+        _run_network = ticker not in _signal_cache
 
-    # Rule 6: Sentiment check (Google News + VADER)
-    try:
-        from sentiment import SentimentEngine
-        se = SentimentEngine()
-        sdata = await asyncio.wait_for(se.get_ticker_sentiment(ticker), timeout=_net_timeout)
-        if sdata and sdata.get("sentiment_score", 0) < -0.3:
-            issues.append(f"Negative sentiment ({sdata['sentiment_score']:.2f})")
-    except (asyncio.TimeoutError, Exception):
-        pass
+    if _run_network:
+        # Rule 5: Earnings check (Finnhub)
+        try:
+            from deep_scanner import DeepScanner
+            ds = DeepScanner()
+            earnings = await asyncio.wait_for(ds._check_earnings(session, ticker), timeout=_net_timeout)
+            if earnings:
+                issues.append(f"Earnings on {earnings['date']} (<7 days)")
+        except (asyncio.TimeoutError, Exception):
+            pass
 
-    # Rule 7: Analyst overvaluation check
-    try:
-        from analyst_data import AnalystDataFetcher
-        af = AnalystDataFetcher()
-        adata = await asyncio.wait_for(af.fetch_analyst_data(ticker), timeout=_net_timeout)
-        if adata and adata.get("price_target_avg", 0) > 0:
-            target = adata["price_target_avg"]
-            if live_price > target:
-                issues.append(f"Overvalued (${live_price:.0f} > target ${target:.0f})")
-    except (asyncio.TimeoutError, Exception):
-        pass
+        # Rule 6: Sentiment check (Google News + VADER)
+        try:
+            from sentiment import SentimentEngine
+            se = SentimentEngine()
+            sdata = await asyncio.wait_for(se.get_ticker_sentiment(ticker), timeout=_net_timeout)
+            if sdata and sdata.get("sentiment_score", 0) < -0.3:
+                issues.append(f"Negative sentiment ({sdata['sentiment_score']:.2f})")
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+        # Rule 7: Analyst overvaluation check
+        try:
+            from analyst_data import AnalystDataFetcher
+            af = AnalystDataFetcher()
+            adata = await asyncio.wait_for(af.fetch_analyst_data(ticker), timeout=_net_timeout)
+            if adata and adata.get("price_target_avg", 0) > 0:
+                target = adata["price_target_avg"]
+                if live_price > target:
+                    issues.append(f"Overvalued (${live_price:.0f} > target ${target:.0f})")
+        except (asyncio.TimeoutError, Exception):
+            pass
 
     # Rule 8: RSI zone expected return analysis (CRITICAL for exit decisions)
     # "When this stock was at this RSI zone historically, what was the 7-day forward return?"
@@ -1204,7 +1218,7 @@ _last_sent_upgrades: set = set()             # set of upgrade tickers already se
 async def background_monitor():
     """Runs every 15 minutes: health check + email alerts only on CHANGES."""
     global _last_sent_signals, _last_sent_health, _last_sent_upgrades
-    await asyncio.sleep(10)  # Wait for startup
+    await asyncio.sleep(60)  # Wait for startup and warmup to finish first
     while True:
         try:
             print(f"\n[Monitor] Running health check at {datetime.now().strftime('%H:%M')}")
@@ -1286,7 +1300,7 @@ _price_alerts_date: str = ""             # date string to reset daily
 async def price_level_monitor():
     """Check live prices against stop loss and target levels every 60s. Email on breach."""
     global _price_alerts_sent, _price_alerts_date
-    await asyncio.sleep(30)  # Wait for startup + first quotes
+    await asyncio.sleep(45)  # Wait for startup + warmup
     print("[PriceMonitor] Started - checking stops/targets every 60s")
 
     while True:
@@ -1377,7 +1391,7 @@ async def price_level_monitor():
 
 async def warmup_signal_cache():
     """Pre-cache signals for all positions at startup so first request is fast."""
-    await asyncio.sleep(5)
+    await asyncio.sleep(15)  # Wait for app to be fully ready
     positions = _position_mgr._get_open_positions_sync()
     if not positions:
         return
