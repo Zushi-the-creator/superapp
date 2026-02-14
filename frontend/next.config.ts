@@ -9,13 +9,12 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   async rewrites() {
+    // Only proxy in dev — in production, vercel.json rewrites handle this
+    if (process.env.NODE_ENV === "production") return [];
     return [
       {
         source: "/api/:path*",
-        destination:
-          process.env.NEXT_PUBLIC_API_URL
-            ? `${process.env.NEXT_PUBLIC_API_URL}/api/:path*`
-            : "http://localhost:8000/api/:path*",
+        destination: "http://localhost:8000/api/:path*",
       },
     ];
   },
