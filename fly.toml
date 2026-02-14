@@ -2,7 +2,6 @@ app = "superapp-ke5bhg"
 primary_region = "ams"
 
 [build]
-  dockerfile = "backend/Dockerfile.prod"
 
 [env]
   PYTHONUNBUFFERED = "1"
