@@ -1127,8 +1127,14 @@ async def _broadcast_alert(alert: Dict):
 
 # ── Background Monitor ──
 
+# Track previously sent alerts to avoid duplicates
+_last_sent_signals: Dict[str, str] = {}     # ticker -> last sent signal
+_last_sent_health: set = set()               # set of alert keys already sent
+_last_sent_upgrades: set = set()             # set of upgrade tickers already sent
+
 async def background_monitor():
-    """Runs every 15 minutes: health check + scan refresh + email alerts."""
+    """Runs every 15 minutes: health check + email alerts only on CHANGES."""
+    global _last_sent_signals, _last_sent_health, _last_sent_upgrades
     await asyncio.sleep(10)  # Wait for startup
     while True:
         try:
@@ -1146,27 +1152,40 @@ async def background_monitor():
                             "timestamp": datetime.now().isoformat(),
                         })
 
-            # Email alerts for health issues
+            # Email alerts — only send on CHANGES
             try:
                 from email_alerts import send_health_alert, send_signal_alert, send_upgrade_alert
+
+                # Health alerts: only send new ones
                 if health.get("alerts"):
-                    send_health_alert(health["alerts"])
+                    new_health = [a for a in health["alerts"]
+                                  if f"{a.get('ticker','')}-{a.get('type','')}" not in _last_sent_health]
+                    if new_health:
+                        send_health_alert(new_health)
+                        for a in new_health:
+                            _last_sent_health.add(f"{a.get('ticker','')}-{a.get('type','')}")
 
-                # Check signals on all positions for sell/rotation alerts
-                signals = []
+                # Signal alerts: only send when signal CHANGES for a ticker
+                new_signals = []
+                current_signals = {}
                 for pos in health.get("positions", []):
+                    ticker = pos.get("ticker", "?")
                     signal = pos.get("signal", "HOLD")
+                    current_signals[ticker] = signal
                     if signal in ("SELL", "ROTATION"):
-                        signals.append({
-                            "ticker": pos.get("ticker", "?"),
-                            "action": signal,
-                            "price": pos.get("price", 0),
-                            "reason": "; ".join(pos.get("issues", [])),
-                        })
-                if signals:
-                    send_signal_alert(signals)
+                        prev = _last_sent_signals.get(ticker)
+                        if prev != signal:
+                            new_signals.append({
+                                "ticker": ticker,
+                                "action": signal,
+                                "price": pos.get("price", 0),
+                                "reason": "; ".join(pos.get("issues", [])),
+                            })
+                if new_signals:
+                    send_signal_alert(new_signals)
+                _last_sent_signals = current_signals
 
-                # Check scan cache for upgrades
+                # Upgrade alerts: only send new upgrade tickers
                 if _scan_cache:
                     upgrades = [
                         {"ticker": o["ticker"], "beats": o.get("beats_holdings", []),
@@ -1174,9 +1193,12 @@ async def background_monitor():
                          "zone_return": o.get("zone_return", 0)}
                         for o in _scan_cache.get("opportunities", [])
                         if o.get("is_upgrade") and not o.get("vetoed")
+                        and o["ticker"] not in _last_sent_upgrades
                     ]
                     if upgrades:
                         send_upgrade_alert(upgrades)
+                        for u in upgrades:
+                            _last_sent_upgrades.add(u["ticker"])
             except Exception as e:
                 print(f"[Monitor] Email alert error: {e}")
 
