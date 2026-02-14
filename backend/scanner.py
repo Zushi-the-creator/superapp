@@ -5,6 +5,7 @@ Uses multi-source data fetching - NEVER fails!
 """
 
 import asyncio
+import os
 import pandas as pd
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
@@ -39,12 +40,29 @@ class NASDAQScanner:
         self.position_manager = PositionManager(f"{data_dir}/positions.db")
         self.alert_manager = AlertManager(f"{data_dir}/alerts.db")
 
+        # Detect production environment (Fly.io sets FLY_APP_NAME)
+        self.is_production = bool(os.environ.get("FLY_APP_NAME"))
+
         # Scanner state
         self.scan_results = {}
         self.hot_tickers = set()  # High-volume stocks to prioritize
         self.all_tickers = []
-        self.scan_batch_size = 100  # Increased for 1000 stocks
-        self.hot_batch_size = 50    # Scan more hot stocks
+
+        if self.is_production:
+            # Production: conservative settings to avoid rate limits and crashes
+            self.scan_batch_size = 20
+            self.hot_batch_size = 10
+            self._sub_batch_size = 5
+            self._sub_batch_delay = 2.0
+            self._batch_delay = 5.0
+            print("🏭 Production mode: conservative scan settings")
+        else:
+            # Local dev: aggressive scanning
+            self.scan_batch_size = 100
+            self.hot_batch_size = 50
+            self._sub_batch_size = 20
+            self._sub_batch_delay = 0.3
+            self._batch_delay = 0.5
 
         # Metadata
         self.last_full_scan = None
@@ -341,17 +359,15 @@ class NASDAQScanner:
         """Scan a batch of tickers with rate limit handling"""
         results = []
 
-        # Process in smaller sub-batches to avoid rate limiting
-        sub_batch_size = 20  # Increased for faster scanning
+        sub_batch_size = self._sub_batch_size
         for i in range(0, len(tickers), sub_batch_size):
             sub_batch = tickers[i:i + sub_batch_size]
             tasks = [self.scan_ticker(ticker) for ticker in sub_batch]
             batch_results = await asyncio.gather(*tasks)
             results.extend([r for r in batch_results if r is not None])
 
-            # Small delay between sub-batches
             if i + sub_batch_size < len(tickers):
-                await asyncio.sleep(0.3)  # Reduced delay for faster scanning
+                await asyncio.sleep(self._sub_batch_delay)
 
         return results
 
@@ -371,8 +387,7 @@ class NASDAQScanner:
 
             print(f"Scanned batch {i // self.scan_batch_size + 1}: {len(batch_results)} stocks")
 
-            # Small delay to avoid rate limiting
-            await asyncio.sleep(0.5)  # Reduced delay for faster scanning
+            await asyncio.sleep(self._batch_delay)
 
         # Update scan results
         for result in all_results:
@@ -496,36 +511,40 @@ class NASDAQScanner:
 async def run_scanner_loop(scanner: NASDAQScanner):
     """
     Main scanner loop:
-    - Full scan every 10 minutes
-    - Hot scan every 15 seconds
+    - Full scan periodically (30min local, 60min production)
+    - Hot scan between full scans (15s local, 60s production)
     """
     print("Starting scanner loop...")
 
-    # Wait 5 seconds to ensure API is fully responsive before starting scan
+    # Wait for API to be responsive before scanning
     await asyncio.sleep(5)
     print("API is ready, starting background scan...")
 
+    if scanner.is_production:
+        full_scan_interval = 3600   # 60 minutes in production
+        hot_scan_interval = 60      # 60 seconds in production
+        print(f"🏭 Production intervals: full={full_scan_interval}s, hot={hot_scan_interval}s")
+    else:
+        full_scan_interval = 1800   # 30 minutes local
+        hot_scan_interval = 15      # 15 seconds local
+
     # Start full scan in background (don't block startup)
     asyncio.create_task(scanner.full_scan())
-
-    full_scan_interval = 1800  # 30 minutes (1000 stocks takes longer)
-    hot_scan_interval = 15     # 15 seconds for faster updates
 
     last_full_scan_time = datetime.now()
 
     while True:
         try:
             # Check if we need a full scan
-            if (datetime.now() - last_full_scan_time).seconds >= full_scan_interval:
+            elapsed = (datetime.now() - last_full_scan_time).total_seconds()
+            if elapsed >= full_scan_interval:
                 await scanner.full_scan()
                 last_full_scan_time = datetime.now()
             else:
-                # Otherwise, do a hot scan
                 await scanner.hot_scan()
 
-            # Wait 15 seconds before next scan
             await asyncio.sleep(hot_scan_interval)
 
         except Exception as e:
             print(f"Error in scanner loop: {e}")
-            await asyncio.sleep(5)  # Wait a bit before retrying
+            await asyncio.sleep(10)
