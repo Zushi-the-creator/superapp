@@ -53,6 +53,9 @@ _price_cache: Dict[str, Dict] = {}
 _ws_connections: List[WebSocket] = []
 
 
+# ── Production Detection ──
+_is_prod = bool(os.environ.get("FLY_APP_NAME"))
+
 # ── Helpers ──
 
 def _exit_targets_by_regime(regime: str) -> tuple:
@@ -214,7 +217,6 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
     # Network-dependent rules (5-7)
     # In production: only run these from background warmup (skip_network=False).
     # In the request path: skip them to keep the endpoint fast.
-    _is_prod = bool(os.environ.get("FLY_APP_NAME"))
     _net_timeout = 3.0 if _is_prod else 8.0
 
     # Only run network rules if called from warmup (not from HTTP request)
