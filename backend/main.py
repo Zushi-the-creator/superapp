@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 
 from scanner import NASDAQScanner, run_scanner_loop
 from sentiment import SentimentEngine
-from rag_chat import RAGChatSystem, AnalystAgent
 from backtest import BacktestEngine
 from macro_policy import (
     calculate_policy_risk_score,
@@ -23,6 +22,13 @@ from macro_policy import (
     full_macro_analysis
 )
 from api_v2 import router as v2_router, background_monitor
+
+# Optional: RAG/LLM (not installed in production slim build)
+try:
+    from rag_chat import RAGChatSystem, AnalystAgent
+    _rag_available = True
+except ImportError:
+    _rag_available = False
 
 
 # FastAPI app
@@ -49,8 +55,12 @@ app.include_router(v2_router)
 # Global instances
 scanner = NASDAQScanner()
 sentiment_engine = SentimentEngine()
-rag_system = RAGChatSystem()
-analyst_agent = AnalystAgent(rag_system)
+if _rag_available:
+    rag_system = RAGChatSystem()
+    analyst_agent = AnalystAgent(rag_system)
+else:
+    rag_system = None
+    analyst_agent = None
 backtest_engine = BacktestEngine(scanner.historical_manager)
 
 # WebSocket connections
@@ -84,8 +94,9 @@ async def startup_event():
     # Start WebSocket broadcast task
     asyncio.create_task(broadcast_updates())
 
-    # Start RAG indexing task
-    asyncio.create_task(rag_indexing_loop())
+    # Start RAG indexing task (only if langchain/chromadb installed)
+    if _rag_available:
+        asyncio.create_task(rag_indexing_loop())
 
     # Start V2 background monitor (health check every 15 min)
     asyncio.create_task(background_monitor())
@@ -207,63 +218,41 @@ async def compare_sentiment(request: CompareRequest):
 
 @app.post("/api/chat")
 async def chat(message: ChatMessage):
-    """
-    Chat with AI analyst
-
-    Request body:
-        {
-            "message": "Why is NVDA a buy?"
-        }
-    """
+    """Chat with AI analyst"""
+    if not _rag_available:
+        raise HTTPException(status_code=503, detail="RAG system not available in production")
     scanner_stats = scanner.get_scanner_stats()
     response = await rag_system.chat(message.message, scanner_stats)
-
-    return ChatResponse(
-        response=response,
-        timestamp=datetime.now().isoformat()
-    )
+    return ChatResponse(response=response, timestamp=datetime.now().isoformat())
 
 
 @app.get("/api/chat/history")
 async def get_chat_history():
-    """Get chat history"""
+    if not _rag_available:
+        return {"history": []}
     return {"history": rag_system.get_chat_history()}
 
 
 @app.post("/api/chat/clear")
 async def clear_chat_history():
-    """Clear chat history"""
-    rag_system.clear_history()
+    if _rag_available:
+        rag_system.clear_history()
     return {"status": "cleared"}
 
 
 @app.get("/api/research/{ticker}")
 async def research_ticker(ticker: str):
-    """
-    Perform comprehensive research on a ticker using AI agent
-
-    This uses multi-step reasoning to analyze technical, sentiment, and news
-    """
+    if not _rag_available:
+        raise HTTPException(status_code=503, detail="Research agent not available in production")
     result = await analyst_agent.research_ticker(ticker.upper())
     return result
 
 
 @app.post("/api/research/compare")
 async def compare_stocks(request: CompareRequest):
-    """
-    Compare two stocks using AI agent
-
-    Request body:
-        {
-            "ticker1": "AAPL",
-            "ticker2": "MSFT"
-        }
-    """
-    result = await analyst_agent.compare_stocks(
-        request.ticker1.upper(),
-        request.ticker2.upper()
-    )
-
+    if not _rag_available:
+        raise HTTPException(status_code=503, detail="Research agent not available in production")
+    result = await analyst_agent.compare_stocks(request.ticker1.upper(), request.ticker2.upper())
     return {
         "ticker1": request.ticker1.upper(),
         "ticker2": request.ticker2.upper(),

@@ -4,14 +4,15 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y gcc g++ curl && rm -rf /var/lib/apt/lists/*
 
-# Copy only backend requirements and install
-COPY backend/requirements.txt .
+# Use slim requirements (no langchain/chromadb/sentence-transformers)
+COPY backend/requirements-prod.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 RUN python -c "import nltk; nltk.download('vader_lexicon'); nltk.download('punkt')"
 
-# Copy only the backend code
+# Copy backend code but NOT data files (they live on Fly.io volume)
 COPY backend/ .
+RUN rm -rf data/*.db data/*.png data/*.csv data/*.json __pycache__ *.pyc
 
 RUN mkdir -p /app/data
 
