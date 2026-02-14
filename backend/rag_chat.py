@@ -45,11 +45,20 @@ class RAGChatSystem:
             metadata={"description": "Stock news and sentiment"}
         )
 
-        # Embedding model (lightweight, runs locally)
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        # Embedding model (lightweight, runs locally) - lazy load
+        self._embedder = None
 
         # Chat history
         self.chat_history = []
+
+    @property
+    def embedder(self):
+        """Lazy load embedder to avoid blocking startup"""
+        if self._embedder is None:
+            print("Loading sentence transformer model...")
+            self._embedder = SentenceTransformer('all-MiniLM-L6-v2')
+            print("Sentence transformer loaded")
+        return self._embedder
 
     async def index_stock_data(self, stock_data: Dict):
         """Index stock scan results into vector DB"""
@@ -231,39 +240,58 @@ Respond professionally and focus on data-driven insights."""
         Falls back to rule-based response if Ollama is unavailable
         """
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 # Check if Ollama is available
                 try:
-                    await client.get(f"{self.ollama_host}/api/tags")
-                except Exception:
+                    tags_response = await client.get(f"{self.ollama_host}/api/tags")
+                    if tags_response.status_code != 200:
+                        print(f"Ollama health check failed: status {tags_response.status_code}")
+                        return self._fallback_response(user_message)
+                except Exception as e:
+                    print(f"Ollama not accessible: {type(e).__name__}: {e}")
                     return self._fallback_response(user_message)
 
                 # Generate response
                 payload = {
-                    "model": "llama3.2",  # or "llama3.1", "mistral", etc.
+                    "model": "llama3.2",
                     "prompt": f"{system_prompt}\n\nUser: {user_message}\n\nAssistant:",
                     "stream": False,
                     "options": {
                         "temperature": 0.7,
                         "top_p": 0.9,
-                        "max_tokens": 500
+                        "num_predict": 200
                     }
                 }
 
-                response = await client.post(
-                    f"{self.ollama_host}/api/generate",
-                    json=payload,
-                    timeout=30.0
-                )
+                try:
+                    response = await client.post(
+                        f"{self.ollama_host}/api/generate",
+                        json=payload,
+                        timeout=60.0
+                    )
 
-                if response.status_code == 200:
-                    result = response.json()
-                    return result.get("response", "").strip()
-                else:
+                    if response.status_code == 200:
+                        result = response.json()
+                        ai_response = result.get("response", "").strip()
+
+                        if ai_response:
+                            return ai_response
+                        else:
+                            print("Ollama returned empty response")
+                            return self._fallback_response(user_message)
+                    else:
+                        print(f"Ollama generate failed: status {response.status_code}, response: {response.text[:200]}")
+                        return self._fallback_response(user_message)
+
+                except httpx.ReadTimeout:
+                    print("Ollama request timed out")
+                    return self._fallback_response(user_message)
+                except Exception as e:
+                    print(f"Ollama generate error: {type(e).__name__}: {e}")
                     return self._fallback_response(user_message)
 
         except Exception as e:
-            print(f"Error calling Ollama: {e}")
+            print(f"Error calling Ollama (outer): {type(e).__name__}: {e}")
             return self._fallback_response(user_message)
 
     def _fallback_response(self, user_message: str) -> str:

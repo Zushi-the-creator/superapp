@@ -1,0 +1,59 @@
+# Priority fetch list - oversold stocks from ALL sectors discovered 2026-02-12
+# Fetch these FIRST when API quotas reset (tomorrow morning)
+# Source: Finviz oversold screener across all sectors
+#
+# Communication (10)
+EVER
+FOXA
+FOX
+FUBO
+ZG
+MAX
+Z
+SNAP
+TBLA
+GENI
+# Healthcare (7)
+DOCS
+ICLR
+HIMS
+MEDP
+WAY
+PHR
+MYGN
+# Industrials (6)
+TRI
+CBZ
+HURN
+NSP
+TNET
+RELX
+# Financial (4)
+MORN
+PYPL
+MCO
+NP
+# Consumer Cyclical (4)
+HRB
+CARG
+FLUT
+DASH
+# Real Estate (2)
+KRC
+HPP
+# Tech (15)
+HCKT
+PD
+RPD
+SPSC
+MNDY
+FRSH
+FIS
+NCNO
+KLAR
+PCTY
+BLND
+SMWB
+VERX
+EXLS
+INTA

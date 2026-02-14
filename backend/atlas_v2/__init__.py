@@ -16,8 +16,8 @@ Key Principles:
 4. VALIDATION: Walk-forward with overfitting detection
 """
 
-from .model import ATLASV2Model
-from .entry import EntryEngine, EntrySignal
+from .model import ATLASV2Model, AnalysisResult
+from .entry import EntryEngine, EntrySignal, SignalType, SignalStrength, SignalWarning
 from .exit import ExitEngine, ExitSignal
 from .regime import RegimeDetector, MarketRegime
 from .learner import ThompsonSamplingLearner
@@ -28,9 +28,16 @@ from .expert_analyst import ExpertAnalyst, StockAnalysis, PortfolioAction, creat
 
 __all__ = [
     'ATLASV2Model',
+    'AnalysisResult',
     'EntryEngine',
+    'EntrySignal',
+    'SignalType',
+    'SignalStrength',
+    'SignalWarning',
     'ExitEngine',
+    'ExitSignal',
     'RegimeDetector',
+    'MarketRegime',
     'ThompsonSamplingLearner',
     'WalkForwardValidator',
     'SectorStrategyEngine',

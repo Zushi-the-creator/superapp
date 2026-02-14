@@ -1,0 +1,127 @@
+======================================================================
+POSITION SIGNAL REPORT - 2026-01-17 10:27:44
+======================================================================
+
+## CURRENT SIGNALS
+
+🔴 VST (V17.0): SELL
+   Reason: TIME STOP: 12 days held (max 7)
+   Price: $166.60
+   P&L: $-23.56 (-1.76%)
+   ➡️  REPLACE WITH: HOLD_HALF
+      Reason: Keep 50% - UBS target $233, Meta deal floor at $160
+      Target: +5%
+
+🔴 LLY (V15.0): SELL
+   Reason: TIME STOP: 9 days held (max 7)
+   Price: $1038.40
+   P&L: $-42.10 (-3.90%)
+   ➡️  REPLACE WITH: MU
+      Reason: Micron: $7.8M insider buy by Mark Liu (ex-TSMC CEO), AI memory demand
+      Limit: $110.50 | Target: +5-7%
+
+🔴 COIN (V20.0): SELL
+   Reason: TIME STOP: 7 days held (max 7)
+   Price: $241.15
+   P&L: $-42.55 (-5.94%)
+   ➡️  REPLACE WITH: CEG
+      Reason: Constellation Energy: Policy panic oversold (-10%), at -3 StdDev BB, BofA maintained Buy
+      Limit: $305.00 | Target: +8-10%
+
+🟡 QQQ (V15.0): HOLD
+   Reason: Price $621.26 is 0.31% below SMA(5) $623.20
+   Price: $621.26
+   P&L: $1.57 (+0.32%)
+
+
+## MISSED SIGNALS (Last 7 Days)
+
+❌ VST on 2026-01-10
+   Signal: SELL (RSI(2) > 60)
+   Value: 79.77
+   Price then: $166.37 → Now: $166.60
+   Impact: +0.14%
+
+❌ VST on 2026-01-11
+   Signal: SELL (RSI(2) > 60)
+   Value: 79.77
+   Price then: $166.37 → Now: $166.60
+   Impact: +0.14%
+
+❌ VST on 2026-01-12
+   Signal: SELL (RSI(2) > 60)
+   Value: 79.77
+   Price then: $166.37 → Now: $166.60
+   Impact: +0.14%
+
+❌ VST on 2026-01-13
+   Signal: SELL (RSI(2) > 60)
+   Value: 100.0
+   Price then: $172.58 → Now: $166.60
+   Impact: -3.47%
+
+❌ VST on 2026-01-14
+   Signal: SELL (RSI(2) > 60)
+   Value: 84.26
+   Price then: $171.42 → Now: $166.60
+   Impact: -2.81%
+
+❌ VST on 2026-01-16
+   Signal: SELL (RSI(2) > 60)
+   Value: 82.06
+   Price then: $180.18 → Now: $166.60
+   Impact: -7.54%
+
+❌ LLY on 2026-01-13
+   Signal: SELL (Price > SMA(5) ($1080.38))
+   Value: 1081.0
+   Price then: $1081.00 → Now: $1038.40
+   Impact: -3.94%
+
+❌ QQQ on 2026-01-10
+   Signal: SELL (Price > SMA(5) ($622.51))
+   Value: 626.65
+   Price then: $626.65 → Now: $621.26
+   Impact: -0.86%
+
+❌ QQQ on 2026-01-11
+   Signal: SELL (Price > SMA(5) ($622.51))
+   Value: 626.65
+   Price then: $626.65 → Now: $621.26
+   Impact: -0.86%
+
+❌ QQQ on 2026-01-12
+   Signal: SELL (Price > SMA(5) ($622.51))
+   Value: 626.65
+   Price then: $626.65 → Now: $621.26
+   Impact: -0.86%
+
+❌ QQQ on 2026-01-13
+   Signal: SELL (Price > SMA(5) ($624.35))
+   Value: 627.17
+   Price then: $627.17 → Now: $621.26
+   Impact: -0.94%
+
+❌ QQQ on 2026-01-14
+   Signal: SELL (Price > SMA(5) ($624.91))
+   Value: 626.24
+   Price then: $626.24 → Now: $621.26
+   Impact: -0.80%
+
+
+## BUY RECOMMENDATIONS (When Selling)
+
+🟢 CEG (replaces COIN)
+   Constellation Energy: Policy panic oversold (-10%), at -3 StdDev BB, BofA maintained Buy
+   Limit: $305.00 | Target: +8-10%
+
+🟢 MU (replaces LLY)
+   Micron: $7.8M insider buy by Mark Liu (ex-TSMC CEO), AI memory demand
+   Limit: $110.50 | Target: +5-7%
+
+======================================================================
+⚠️  ACTION REQUIRED: 3 SELL signal(s) active!
+📋 EXECUTION PLAN: Tuesday Jan 20, 2026 (Market closed Mon for MLK Day)
+   9:30 AM: Execute SELL orders
+   10:30 AM: Execute BUY orders (wait 1hr for volatility)
+📉 Estimated cost of missed signals: -22.08%

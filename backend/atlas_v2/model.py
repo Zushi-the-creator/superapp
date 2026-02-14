@@ -29,7 +29,7 @@ Usage:
     params = model.get_learned_params("BULL")
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
@@ -42,7 +42,7 @@ from .validator import WalkForwardValidator, WalkForwardResult
 
 @dataclass
 class AnalysisResult:
-    """Complete analysis output"""
+    """Complete analysis output with warnings"""
     ticker: str
     timestamp: str
     regime: RegimeInfo
@@ -51,6 +51,52 @@ class AnalysisResult:
     position_size_multiplier: float
     recommendation: str
     factors: List[str]
+
+    # NEW: Validation fields
+    backtest_win_rate: float = None  # Actual backtest WR
+    backtest_trades: int = 0  # Number of trades in backtest
+    is_valid_signal: bool = True  # False if backtest WR < 55%
+    validation_notes: List[str] = None  # Validation warnings
+
+    def has_warnings(self) -> bool:
+        """Check if signal has any warnings"""
+        return self.entry_signal.has_warnings()
+
+    def has_critical_warnings(self) -> bool:
+        """Check if signal has critical warnings"""
+        return self.entry_signal.has_critical_warnings()
+
+    def get_signal_quality(self) -> str:
+        """Get overall signal quality assessment"""
+        if self.has_critical_warnings():
+            return "POOR - Critical issues detected"
+        if not self.is_valid_signal:
+            return "INVALID - Below minimum win rate"
+        if self.entry_signal.signal_strength.value == "STRONG":
+            return "EXCELLENT - High confidence signal"
+        if self.entry_signal.signal_strength.value == "MODERATE":
+            return "GOOD - Acceptable signal"
+        return "WEAK - Proceed with caution"
+
+    def get_summary(self) -> str:
+        """Get human-readable summary"""
+        lines = [
+            f"=== {self.ticker} Analysis ===",
+            f"Signal: {self.entry_signal.signal.value}",
+            f"Strength: {self.entry_signal.signal_strength.value}",
+            f"Quality: {self.get_signal_quality()}",
+            f"RSI(2): {self.entry_signal.rsi2:.1f}",
+            f"Regime: {self.regime.regime.value}",
+            f"Expected Hold: {self.entry_signal.expected_hold_days} days",
+            f"RSI Flip Risk: {self.entry_signal.rsi_flip_risk}",
+        ]
+        if self.backtest_win_rate:
+            lines.append(f"Backtest WR: {self.backtest_win_rate:.1f}% ({self.backtest_trades} trades)")
+        if self.entry_signal.warnings:
+            lines.append("Warnings:")
+            for w in self.entry_signal.warnings:
+                lines.append(f"  - {w}")
+        return "\n".join(lines)
 
 
 class ATLASV2Model:
@@ -154,7 +200,151 @@ class ATLASV2Model:
             exit_params=exit_params,
             position_size_multiplier=position_multiplier,
             recommendation=recommendation,
-            factors=entry_signal.factors
+            factors=entry_signal.factors,
+            validation_notes=[]
+        )
+
+    def analyze_with_validation(
+        self,
+        ticker: str,
+        closes: List[float],
+        volumes: List[float] = None,
+        highs: List[float] = None,
+        lows: List[float] = None,
+        days_to_earnings: int = None,
+        sentiment_score: float = 0,
+        min_win_rate: float = 60.0
+    ) -> AnalysisResult:
+        """
+        Complete analysis WITH automatic backtest validation.
+
+        This method:
+        1. Runs backtest on historical data
+        2. Validates signal against backtest win rate
+        3. Flags weak signals (WR < 60%) and invalid signals (WR < 55%)
+        4. Adds all warnings to the result
+
+        Args:
+            ticker: Stock symbol
+            closes: List of closing prices (200+ recommended for backtest)
+            volumes: Optional volume data
+            highs: Optional high prices
+            lows: Optional low prices
+            days_to_earnings: Days until next earnings
+            sentiment_score: -1 (negative) to +1 (positive)
+            min_win_rate: Minimum required win rate (default 60%)
+
+        Returns:
+            AnalysisResult with validation data and warnings
+        """
+        validation_notes = []
+
+        # First, run backtest to get actual win rate
+        backtest_result = None
+        backtest_wr = None
+        backtest_trades = 0
+
+        if len(closes) >= 60:
+            # Build history for backtest
+            history = []
+            for i, close in enumerate(closes):
+                history.append({
+                    'date': f'day_{i}',
+                    'close': close,
+                    'open': close,
+                    'high': highs[i] if highs and i < len(highs) else close,
+                    'low': lows[i] if lows and i < len(lows) else close,
+                    'volume': volumes[i] if volumes and i < len(volumes) else 0
+                })
+
+            backtest_result = self.backtest(history, ticker)
+            backtest_wr = backtest_result.get('win_rate', 0)
+            backtest_trades = backtest_result.get('trades', 0)
+
+            if backtest_trades < 10:
+                validation_notes.append(f"⚠️ Only {backtest_trades} backtest trades - insufficient sample")
+            elif backtest_wr < 55:
+                validation_notes.append(f"❌ CRITICAL: Backtest WR {backtest_wr:.1f}% < 55% - INVALID SIGNAL")
+            elif backtest_wr < min_win_rate:
+                validation_notes.append(f"⚠️ Backtest WR {backtest_wr:.1f}% < {min_win_rate:.0f}% target")
+            else:
+                validation_notes.append(f"✓ Backtest WR {backtest_wr:.1f}% meets threshold")
+        else:
+            validation_notes.append("⚠️ Insufficient data for backtest (need 60+ days)")
+
+        # Detect regime
+        regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
+
+        # Get learned parameters for this regime
+        learned_params = self.learner.get_learned_params(regime_info.regime.value)
+
+        # Generate entry signal WITH backtest validation
+        entry_signal = self.entry_engine.generate_signal(
+            closes=closes,
+            volumes=volumes,
+            highs=highs,
+            lows=lows,
+            days_to_earnings=days_to_earnings,
+            sentiment_score=sentiment_score,
+            learned_params=learned_params,
+            backtest_win_rate=backtest_wr,
+            min_required_win_rate=min_win_rate
+        )
+
+        # Get exit parameters
+        regime_params = RegimeDetector.get_regime_params(regime_info.regime)
+        exit_params = {
+            'profit_target_pct': learned_params.get('profit_target_pct', regime_params['profit_target_pct']),
+            'stop_loss_pct': learned_params.get('stop_loss_pct', regime_params['stop_loss_pct']),
+            'max_days': int(learned_params.get('max_days', regime_params['exit_days'])),
+        }
+
+        # Calculate position size multiplier
+        position_multiplier = regime_params['position_multiplier']
+        if regime_info.volatility_ratio > 1.5:
+            position_multiplier *= 0.7
+
+        # Determine if signal is valid
+        is_valid = True
+        invalid_reason = ""
+        if backtest_wr is not None and backtest_wr < 55:
+            is_valid = False
+            invalid_reason = f"backtest WR {backtest_wr:.1f}% < 55% minimum"
+        if backtest_trades < 10:
+            is_valid = False
+            if not invalid_reason:
+                invalid_reason = f"only {backtest_trades} trades (need 10+)"
+            else:
+                invalid_reason += f", only {backtest_trades} trades"
+
+        # Build recommendation with validation context
+        if not is_valid:
+            recommendation = f"⛔ INVALID SIGNAL - {invalid_reason}"
+        elif entry_signal.signal == SignalType.BUY:
+            if entry_signal.signal_strength.value == "WEAK":
+                recommendation = f"⚠️ WEAK BUY - proceed with caution ({position_multiplier*100:.0f}% size)"
+            elif entry_signal.signal_strength.value == "MODERATE":
+                recommendation = f"BUY with {position_multiplier*100:.0f}% position size"
+            else:
+                recommendation = f"✓ STRONG BUY with {position_multiplier*100:.0f}% position size"
+        elif entry_signal.signal == SignalType.WAIT:
+            recommendation = f"WAIT - good setup but vetoed: {entry_signal.veto_reason}"
+        else:
+            recommendation = f"HOLD - no entry signal"
+
+        return AnalysisResult(
+            ticker=ticker,
+            timestamp=datetime.now().isoformat(),
+            regime=regime_info,
+            entry_signal=entry_signal,
+            exit_params=exit_params,
+            position_size_multiplier=position_multiplier,
+            recommendation=recommendation,
+            factors=entry_signal.factors,
+            backtest_win_rate=backtest_wr,
+            backtest_trades=backtest_trades,
+            is_valid_signal=is_valid,
+            validation_notes=validation_notes
         )
 
     def check_exit(

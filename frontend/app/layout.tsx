@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { DataProvider } from "@/components/providers/DataProvider";
 
 export const metadata: Metadata = {
-  title: "NASDAQ Super App - AI-Powered Stock Scanner",
-  description: "Real-time stock scanning with technical analysis and AI sentiment",
+  title: "ATLAS V2 - Trading Dashboard",
+  description: "Live portfolio tracking with ML-powered signals",
 };
 
 export default function RootLayout({
@@ -14,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
-        {children}
+        <DataProvider>{children}</DataProvider>
       </body>
     </html>
   );

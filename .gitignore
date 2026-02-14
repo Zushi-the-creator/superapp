@@ -68,6 +68,7 @@ docker-compose.override.yml
 # Data
 backend/data/*.json
 backend/data/*.csv
+backend/data/alerts_config.json
 
 # ChromaDB
 chroma_data/

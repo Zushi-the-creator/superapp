@@ -1,0 +1,607 @@
+{
+  "last_updated": "2026-01-28T20:00:00",
+  "model_version": "V28.0 Regime-Strategy Alignment + V27.0 Adaptive + V26.0 Evidence-Based",
+  "transaction_costs": {
+    "per_trade_fee": 1.50,
+    "round_trip_cost": 3.00,
+    "min_profit_buffer": 2.0,
+    "min_profit_threshold": 6.00,
+    "rules": {
+      "min_position_for_trading": 500,
+      "max_fee_impact_pct": 1.0,
+      "positions_1000_plus_min_move": 0.30,
+      "positions_500_min_move": 0.60,
+      "positions_under_500": "avoid_frequent_trading"
+    },
+    "adjusted_monthly_target": {
+      "original_1pct": 34.23,
+      "expected_trades_per_month": 4,
+      "total_fees": 12.00,
+      "gross_target": 46.23,
+      "gross_target_pct": 1.35
+    }
+  },
+  "v26_evidence_based_weights": {
+    "version": "V26.0",
+    "date_validated": "2026-01-24",
+    "backtest_stocks": 34,
+    "backtest_trades": 755,
+    "weights": {
+      "technical": 0.85,
+      "sentiment": 0.10,
+      "analyst": 0.05
+    },
+    "rules": {
+      "technical": "Entry signals (RSI, trend) - PRIMARY decision driver",
+      "sentiment": "VETO only - block entry if negative news/earnings imminent",
+      "analyst": "EXIT targets only - use analyst targets for profit taking"
+    },
+    "evidence": [
+      "Technical signals alone achieve 66% win rate (755 trades)",
+      "Sentiment adds 3-5% edge when used as VETO filter",
+      "Analyst ratings are lagging indicators, harmful for entry decisions",
+      "Academic: Technical 60-70% signals explain short-term moves (Zhang 2023)"
+    ]
+  },
+  "v27_adaptive_model_selector": {
+    "version": "V27.0",
+    "date_validated": "2026-01-24",
+    "purpose": "When RSI strategy fails (<60% WR), test alternative models",
+    "strategy_thresholds": {
+      "rsi_mean_reversion": {"min_wr": 60, "target_wr": 75},
+      "bollinger_band": {"min_wr": 55, "target_wr": 70},
+      "trend_following": {"min_wr": 35, "target_wr": 50},
+      "macd_crossover": {"min_wr": 50, "target_wr": 65}
+    },
+    "tier_system": {
+      "TIER_1": {"criteria": "WR >= Target, PF >= 1.5, Trades >= 30", "position_size": 1.0},
+      "TIER_2": {"criteria": "WR >= Min, PF >= 1.2, Trades >= 15", "position_size": 0.5},
+      "TIER_3": {"criteria": "Below minimums", "position_size": 0.0, "action": "REJECT"}
+    },
+    "alternative_models": {
+      "MACD_BB_Lower": {"rules": "Price within 3% of BB lower AND MACD > 0", "best_for": "High volatility"},
+      "3Day_Low_Reversal": {"rules": "3 down days + today up + near SMA50", "best_for": "Trending stocks"},
+      "Volume_Breakout": {"rules": "Volume > 2x avg + price break SMA50", "best_for": "Breakout stocks"}
+    }
+  },
+  "critical_exit_strategy_correction": {
+    "date_discovered": "2026-01-25",
+    "error": "RSI(2) > 80 EXIT signal is WRONG for momentum stocks",
+    "evidence": {
+      "QQQ": {"rsi80_exit_accuracy": 40.8, "avg_missed_gain": 0.21, "correct_exit": "+5% Profit Target"},
+      "NVDA": {"rsi80_exit_accuracy": 34.4, "avg_missed_gain": 1.24, "correct_exit": "Price > SMA(5)"},
+      "MU": {"rsi80_exit_accuracy": 29.4, "avg_missed_gain": 5.66, "correct_exit": "+5% Profit Target"}
+    },
+    "validated_exit_strategies": {
+      "QQQ": {"strategy": "+5% Profit Target", "win_rate": 88.9, "avg_return": 3.0, "trades": 9},
+      "NVDA": {"strategy": "Price > SMA(5)", "win_rate": 81.8, "avg_return": 1.26, "trades": 11},
+      "MU": {"strategy": "+5% Profit Target", "win_rate": 85.7, "avg_return": 3.75, "trades": 7}
+    },
+    "rule": "DO NOT use RSI>80 for exit. Use profit targets or trend breaks instead."
+  },
+  "hybrid_model_selection": {
+    "NVDA": {"model": "V8.0 Mean Reversion", "win_rate": 92.9, "regime": "SIDEWAYS", "exit": "Price > SMA(5)"},
+    "MU": {"model": "V24.0 Regime Aware", "win_rate": 100.0, "regime": "BULL", "exit": "+5% Profit Target"},
+    "QQQ": {"model": "V24.0 Regime Aware", "win_rate": 75.0, "regime": "SIDEWAYS", "exit": "+5% Profit Target"},
+    "AAPL": {"model": "V11.0 Buy Dip", "win_rate": 65.2, "regime": "SIDEWAYS"},
+    "MSFT": {"model": "V20.0 RSI5+BB", "win_rate": 69.2, "regime": "SIDEWAYS"},
+    "AMD": {"model": "V13.0 RSI Divergence", "win_rate": 78.6, "regime": "BULL"},
+    "GOOGL": {"model": "V24.0 Regime Aware", "win_rate": 75.0, "regime": "BULL"},
+    "AMZN": {"model": "V8.0 Mean Reversion", "win_rate": 87.5, "regime": "SIDEWAYS"},
+    "TSLA": {"model": "V13.0 RSI Divergence", "win_rate": 70.0, "regime": "SIDEWAYS"},
+    "META": {"model": "V11.0 Buy Dip", "win_rate": 73.7, "regime": "BEAR"},
+    "JPM": {"model": "V11.0 Buy Dip", "win_rate": 100.0, "regime": "SIDEWAYS"},
+    "XOM": {"model": "V11.0 Buy Dip", "win_rate": 100.0, "regime": "BULL"},
+    "JNJ": {"model": "V13.0 RSI Divergence", "win_rate": 87.5, "regime": "BULL"},
+    "XLV": {"model": "V8.0 Mean Reversion", "win_rate": 72.7, "regime": "SIDEWAYS", "trades": 22, "avg_return": 0.86, "added": "2026-01-28"},
+    "WMT": {"model": "V8.0 Mean Reversion", "win_rate": 66.3, "regime": "SIDEWAYS", "trades": 86, "avg_return": 0.80, "added": "2026-01-28"},
+    "TSM": {"model": "V8.0 Mean Reversion", "win_rate": 76.9, "regime": "BULL", "trades": 65, "avg_return": 2.87, "added": "2026-01-28"},
+    "SMH": {"model": "V8.0 Mean Reversion", "win_rate": 72.1, "regime": "BULL", "trades": 61, "avg_return": 2.15, "added": "2026-01-28"},
+    "IWM": {"model": "V8.0 Mean Reversion", "win_rate": 69.8, "regime": "BULL", "trades": 53, "avg_return": 1.44, "added": "2026-01-28"},
+    "AMAT": {"model": "Momentum", "win_rate": 90.9, "regime": "BULL", "trades": 22, "avg_return": 4.28, "strategy": "BULL+20%momentum", "added": "2026-01-28"},
+    "LRCX": {"model": "Momentum", "win_rate": 81.8, "regime": "BULL", "trades": 33, "avg_return": 4.65, "strategy": "BULL+20%momentum", "added": "2026-01-28"},
+    "INTC": {"model": "Momentum", "win_rate": 71.1, "regime": "BULL", "trades": 38, "avg_return": 3.99, "strategy": "BULL+20%momentum", "added": "2026-01-28"},
+    "SBUX": {"model": "Momentum", "win_rate": 80.6, "regime": "BULL", "trades": 31, "avg_return": 1.56, "strategy": "BULL+10%momentum", "sector": "Consumer", "added": "2026-01-28"},
+    "DOCN": {"model": "Momentum", "win_rate": 57.6, "regime": "BULL", "trades": 85, "avg_return": 1.95, "strategy": "BULL+10%momentum", "sector": "Tech/Cloud", "added": "2026-01-28"},
+    "MRNA": {"model": "Momentum", "win_rate": 55.7, "regime": "BULL", "trades": 61, "avg_return": 3.00, "strategy": "BULL+10%momentum", "sector": "Healthcare", "added": "2026-01-28"}
+  },
+  "hybrid_vs_uniform": {
+    "hybrid_avg_win_rate": 82.7,
+    "uniform_v24_win_rate": 60.8,
+    "improvement": 21.8
+  },
+  "model_frequency": {
+    "V11.0 Buy Dip": ["AAPL", "META", "JPM", "XOM"],
+    "V24.0 Regime Aware": ["MU", "QQQ", "GOOGL"],
+    "V13.0 RSI Divergence": ["AMD", "TSLA", "JNJ"],
+    "V8.0 Mean Reversion": ["NVDA", "AMZN"],
+    "V20.0 RSI5+BB": ["MSFT"]
+  },
+  "backtest_summary": {
+    "date": "2026-01-23",
+    "stocks_tested": 34,
+    "total_trades": 755,
+    "overall_win_rate": 65.96,
+    "period_months": 9,
+    "forward_days": 7,
+    "stocks_80_plus": ["MU", "CAT", "V", "JNJ", "CVX", "QQQ", "AMD", "GOOGL", "SPY", "IWM"],
+    "stocks_75_79": ["JPM", "NVDA", "DIS"]
+  },
+  "regime_analysis": {
+    "BULL": {
+      "stocks_count": 10,
+      "stocks": ["NVDA", "MU", "QQQ", "AAPL", "GOOGL", "AMZN", "TSLA", "JPM", "XOM", "JNJ"],
+      "avg_improvement": 18.1,
+      "strategy": "Suppress SELL signals, buy dips only"
+    },
+    "SIDEWAYS": {
+      "stocks_count": 3,
+      "stocks": ["MSFT", "AMD", "META"],
+      "avg_improvement": -7.6,
+      "strategy": "Use both BUY and SELL signals"
+    },
+    "BEAR": {
+      "stocks_count": 0,
+      "stocks": [],
+      "avg_improvement": null,
+      "strategy": "Suppress BUY signals, sell rallies"
+    }
+  },
+  "learnings": [
+    {
+      "id": 1,
+      "date": "2026-01-20",
+      "insight": "SELL signals fail in BULL markets because overbought stocks keep rallying",
+      "evidence": "9-month backtest: SELL accuracy 18-54% in BULL regime vs market returns +10-227%",
+      "action_taken": "V24.0 suppresses SELL signals by 70% when price > SMA50 > SMA200"
+    },
+    {
+      "id": 2,
+      "date": "2026-01-20",
+      "insight": "BUY signals work well across all regimes (60-78% accuracy)",
+      "evidence": "BUY accuracy stable: NVDA 50%, QQQ 79%, GOOGL 75%, JPM 77%",
+      "action_taken": "Keep BUY logic intact, only reduce in BEAR regime"
+    },
+    {
+      "id": 3,
+      "date": "2026-01-20",
+      "insight": "V24.0 underperforms in SIDEWAYS markets (MSFT, META)",
+      "evidence": "SIDEWAYS stocks declined -7.6% avg vs BULL stocks improved +18.1%",
+      "action_taken": "Use V27.0 adaptive model for SIDEWAYS regime"
+    },
+    {
+      "id": 4,
+      "date": "2026-01-20",
+      "insight": "Raising SELL RSI threshold from 80 to 95 reduces false sells",
+      "evidence": "MU improved from 37.5% to 100% win rate by eliminating bad SELL signals",
+      "action_taken": "V24.0 uses RSI(2) > 95 for extreme overbought SELL"
+    },
+    {
+      "id": 5,
+      "date": "2026-01-20",
+      "insight": "Trend break confirmation (price < SMA20) improves SELL accuracy",
+      "evidence": "Academic: Akshehir & Kilic (2024) - trend confirmation reduces false signals",
+      "action_taken": "V24.0 requires price < SMA20 for full SELL strength"
+    },
+    {
+      "id": 6,
+      "date": "2026-01-21",
+      "insight": "Transaction costs ($1.50/trade) significantly impact small positions",
+      "evidence": "Round-trip cost $3.00 = 0.6% on $500 position, 0.3% on $1000 position",
+      "action_taken": "Added fee filter to all signal generation - signals blocked if expected profit < $6.00"
+    },
+    {
+      "id": 7,
+      "date": "2026-01-21",
+      "insight": "Positions under $500 should avoid frequent trading",
+      "evidence": "Fee impact >1% makes most trades unprofitable after costs",
+      "action_taken": "Added min_position_for_trading = $500 rule to hybrid_model.py"
+    },
+    {
+      "id": 8,
+      "date": "2026-01-24",
+      "insight": "Technical signals should dominate (85%) over sentiment (10%) and analyst (5%)",
+      "evidence": "Backtest 755 trades: Technical achieves 66% WR alone, sentiment as VETO adds 3-5% edge, analyst targets are lagging",
+      "action_taken": "V26.0 Evidence-Based Weight Model - 85/10/5 split"
+    },
+    {
+      "id": 9,
+      "date": "2026-01-24",
+      "insight": "Sentiment should be used as VETO only, not for entry decisions",
+      "evidence": "Sentiment-driven entries underperform by 8% vs technical-only entries",
+      "action_taken": "V26.0 uses sentiment only to BLOCK entries during negative news/earnings"
+    },
+    {
+      "id": 10,
+      "date": "2026-01-24",
+      "insight": "Different strategy types have different optimal win rate thresholds",
+      "evidence": "Kelly Criterion: WR_min = 1/(1+R:R). RSI mean reversion needs 60%+, trend following only 35%+",
+      "action_taken": "V27.0 uses strategy-specific thresholds instead of universal 75%"
+    },
+    {
+      "id": 11,
+      "date": "2026-01-24",
+      "insight": "When RSI strategy fails for a stock, try alternative models (MACD+BB, 3-Day Reversal)",
+      "evidence": "GLOB: RSI win rate <60%, MACD+BB achieved 85.7% win rate",
+      "action_taken": "V27.0 Adaptive Model tests alternative strategies when RSI fails"
+    },
+    {
+      "id": 12,
+      "date": "2026-01-25",
+      "insight": "CRITICAL: RSI(2)>80 EXIT is WRONG for momentum stocks",
+      "evidence": "QQQ: 40.8% accuracy, NVDA: 34.4%, MU: 29.4% - would have missed +5.66% avg gain",
+      "action_taken": "Use profit targets (+5%) or trend breaks (Price > SMA5) instead of RSI exits"
+    },
+    {
+      "id": 13,
+      "date": "2026-01-25",
+      "insight": "Each stock needs a validated EXIT strategy separate from ENTRY strategy",
+      "evidence": "QQQ best exit: +5% profit (88.9% WR), NVDA: Price>SMA5 (81.8%), MU: +5% profit (85.7%)",
+      "action_taken": "Added per-ticker validated exit strategies to model_learning.json"
+    },
+    {
+      "id": 14,
+      "date": "2026-01-25",
+      "insight": "CRITICAL: Mean reversion underperforms in BULL markets - use MOMENTUM instead",
+      "evidence": "2024 research: Momentum extraordinarily profitable in equities; Mean reversion only works in sideways/bear markets. Our V3 backtest: +10.79% vs SPY +15.34% (-4.55% underperformance)",
+      "action_taken": "V28.0 implements regime-strategy alignment: BULL=Momentum, SIDEWAYS=Mean Reversion, BEAR=Cash/Hedged"
+    },
+    {
+      "id": 15,
+      "date": "2026-01-25",
+      "insight": "Simple buy-and-hold SPY averaged +1.59%/month in 2024-2025 with 7/12 months hitting 1%+",
+      "evidence": "12-month SPY analysis: +19.09% total, monthly avg +1.59%, 58% of months exceeded 1% target",
+      "action_taken": "Benchmark all strategies against SPY B&H; if strategy underperforms, default to passive allocation"
+    },
+    {
+      "id": 16,
+      "date": "2026-01-25",
+      "insight": "V3 Hold Strategy achieves 1% monthly average (+1.10%) with 64% hit rate",
+      "evidence": "11-month backtest: +10.79% total, 7/11 months hit 1%+, avg +1.10%/month, but underperformed SPY by 4.55%",
+      "action_taken": "V3 strategy validated for monthly target; optimize by adding momentum overlay in BULL regime"
+    },
+    {
+      "id": 17,
+      "date": "2026-01-25",
+      "insight": "Trend following achieves ~1% monthly average (Jegadeesh/Titman: 15.19% CAGR, 6.18% alpha)",
+      "evidence": "Academic: Long-only trend following 1991-2024; practical: 3-12 month holding periods optimal",
+      "action_taken": "Implement trend following as primary strategy in BULL regime with 50% core allocation"
+    },
+    {
+      "id": 18,
+      "date": "2026-01-26",
+      "insight": "NEVER override backtested learnings with conventional wisdom",
+      "evidence": "Recommended selling MU at +6% (conventional 'take profits') despite own Learning #14 saying HOLD in BULL. User correctly called out the contradiction.",
+      "action_taken": "Added critical_mistakes section to track and prevent repeating errors. Rule: Apply learnings FIRST, not fear-based defaults."
+    },
+    {
+      "id": 19,
+      "date": "2026-01-26",
+      "insight": "MUST do comprehensive analysis: Technical + Fundamental + Sentiment + Risk/Reward",
+      "evidence": "Recommended LRCX based only on technicals. Missed that LRCX has only +6% upside to target while NVDA has +37%. Full analysis changes the decision.",
+      "action_taken": "Created V29.0 Comprehensive Analysis Framework - mandatory 4-step process for all decisions."
+    },
+    {
+      "id": 20,
+      "date": "2026-01-26",
+      "insight": "Analyst price targets reveal upside exhaustion - stock near target = limited upside",
+      "evidence": "LRCX at $225 with $239 target = only 6% upside. NVDA at $187 with $255 target = 37% upside. Technical momentum alone is misleading.",
+      "action_taken": "Always compare current price to analyst target. Near-target stocks have limited upside regardless of momentum."
+    },
+    {
+      "id": 21,
+      "date": "2026-01-26",
+      "insight": "Upcoming catalysts can override weak technicals",
+      "evidence": "NVDA has weak technicals (47.8% WR) but Feb 25 earnings + China shipments are major catalysts. Catalyst proximity matters.",
+      "action_taken": "Add catalyst calendar check to analysis framework. Weight upcoming catalysts in decision."
+    },
+    {
+      "id": 22,
+      "date": "2026-01-26",
+      "insight": "CRITICAL: Never change model weights without backtest validation",
+      "evidence": "Changed V26.0 weights (85/10/5) to V29.0 (40/30/15/15) without any backtest. V26.0 was backed by 755 trades. V29.0 was made up.",
+      "action_taken": "V29.0 now defines PROCESS (what to check) not WEIGHTS. Weights remain V26.0 until new backtest validates changes."
+    },
+    {
+      "id": 23,
+      "date": "2026-01-26",
+      "insight": "model_learning.json must be SOURCE OF TRUTH that all analysis reads from",
+      "evidence": "Currently just written to but not read from. Weights and rules must be enforced by reading from this file.",
+      "action_taken": "All analysis must: 1) Read weights from model_learning.json 2) Apply V26.0 validated weights 3) Only update after backtest"
+    },
+    {
+      "id": 24,
+      "date": "2026-01-28",
+      "insight": "ALWAYS scan broader universe (100+ stocks) to find best opportunities - not just familiar watchlist",
+      "evidence": "Initial recommendation was AMD (63.6% WR). After scanning 110 stocks, found XLV (72.7% WR) and WMT (66.3% WR) - both TIER 1 with active signals. Familiar stocks are not always best.",
+      "action_taken": "Expanded universe scan to 110+ stocks. Added XLV, WMT, TSM, SMH, IWM to model_learning.json with validated win rates."
+    },
+    {
+      "id": 25,
+      "date": "2026-01-28",
+      "insight": "NEVER hold cash - always find deployment opportunities. Scan until TIER 1 stocks found.",
+      "evidence": "User feedback: 'we shouldnt left with cash'. If primary stocks don't have signals, scan broader universe until TIER 1 (>65% WR) stocks with signals are found.",
+      "action_taken": "Rule: No idle cash. Deploy into highest win rate opportunities. Scan 100+ stocks if needed."
+    },
+    {
+      "id": 26,
+      "date": "2026-01-28",
+      "insight": "Backtest ALL stocks with signals, then rank by win rate - don't stop at first candidate",
+      "evidence": "16 stocks had RSI(2) < 20 signals. Only 4 were TIER 1/2 (XLV 72.7%, WMT 66.3%, AMD 63.6%, PLTR 63.2%). 12 were TIER 3 (TSLA 43%, COST 47%, etc) - would have been losing trades.",
+      "action_taken": "MANDATORY: When multiple stocks have signals, backtest ALL and rank by win rate. Only deploy into TIER 1/2 stocks."
+    },
+    {
+      "id": 27,
+      "date": "2026-01-28",
+      "insight": "CRITICAL: In BULL markets, use MOMENTUM strategy not just RSI oversold signals",
+      "evidence": "Missed INTC +11% today, MU +51% month. Was scanning RSI(2)<20 (mean reversion) instead of MOMENTUM (BULL regime + strong returns). Learning #14 already said this but I ignored it.",
+      "action_taken": "In BULL market: Scan for BULL regime + >20% monthly momentum. Backtest shows AMAT 90.9%, LRCX 81.8%, MU 75.0% win rates on momentum strategy."
+    },
+    {
+      "id": 28,
+      "date": "2026-01-28",
+      "insight": "Portfolio allocation should match performance - don't overweight underperformers",
+      "evidence": "QQQ had 41% allocation but only +1.4% monthly return. MU had 29% allocation but +51.4% return. User correctly pointed this out.",
+      "action_taken": "Review allocation monthly. Reduce positions that underperform, add to winners in BULL regime."
+    },
+    {
+      "id": 29,
+      "date": "2026-01-28",
+      "insight": "When market is at highs, NO stock may pass all 7 criteria - be honest about this",
+      "evidence": "Scanned 50+ stocks. All momentum stocks at 52W highs. INTC has room but trading above analyst targets with weak Q1 guidance. Forcing a recommendation leads to bad picks.",
+      "action_taken": "When no stock passes all criteria: 1) Be honest 2) Present options with tradeoffs 3) Let user decide risk tolerance"
+    },
+    {
+      "id": 30,
+      "date": "2026-01-28",
+      "insight": "MANDATORY 7-point checklist before ANY recommendation",
+      "evidence": "Made 5+ wrong recommendations today by skipping checks. Each time user caught errors I missed.",
+      "action_taken": "Created mandatory pre-flight checklist: 1-Regime 2-WinRate 3-Momentum 4-52WHigh 5-Analyst 6-News 7-UserHistory. ALL must pass."
+    },
+    {
+      "id": 31,
+      "date": "2026-01-28",
+      "insight": "NEVER put all capital into single stock - diversify across 3-4 positions",
+      "evidence": "Recommended putting $3,000 into single stock (MU, then SBUX). User correctly called out bad risk management.",
+      "action_taken": "Rule: Max 25-40% of new capital per position. Spread across 3+ stocks in different sectors."
+    },
+    {
+      "id": 32,
+      "date": "2026-01-28",
+      "insight": "Scan BROADER universe (200+ stocks) to find opportunities outside familiar watchlist",
+      "evidence": "Only found SBUX (80.6% WR), DOCN (57.6%), MRNA (55.7%) after scanning 200 stocks. Would have missed these scanning only 50 familiar names.",
+      "action_taken": "Expanded scan to 200+ stocks. Found 3 new stocks passing criteria that werent in original watchlist."
+    }
+  ],
+  "v28_regime_strategy_alignment": {
+    "version": "V28.0",
+    "date_validated": "2026-01-25",
+    "core_principle": "Match strategy type to market regime",
+    "regime_strategy_matrix": {
+      "BULL": {
+        "primary_strategy": "Trend Following / Momentum",
+        "entry": "Buy breakouts, buy strong stocks making new highs",
+        "exit": "Trailing stop 7-10% OR trend break (price < SMA50)",
+        "position_sizing": "Full size (100%)",
+        "evidence": "2024 momentum extraordinarily profitable; mean reversion underperforms"
+      },
+      "SIDEWAYS": {
+        "primary_strategy": "Mean Reversion",
+        "entry": "RSI(2) < 20, buy at support levels",
+        "exit": "RSI(2) > 70 OR Price > SMA(5)",
+        "position_sizing": "Reduced size (75%)",
+        "evidence": "Mean reversion works in range-bound conditions"
+      },
+      "BEAR": {
+        "primary_strategy": "Cash / Hedged",
+        "entry": "Minimal - only extreme oversold (RSI(2) < 5)",
+        "exit": "Quick profit taking (+3%) or tight stops (-3%)",
+        "position_sizing": "Minimal (25%)",
+        "evidence": "Preservation of capital more important than gains"
+      }
+    },
+    "regime_detection": {
+      "BULL": "Price > SMA50 > SMA200 AND SMA50 rising",
+      "BEAR": "Price < SMA50 < SMA200 AND SMA50 falling",
+      "SIDEWAYS": "Neither BULL nor BEAR conditions met"
+    }
+  },
+  "backtest_85k_results": {
+    "date": "2026-01-25",
+    "capital": 85000,
+    "period_months": 11,
+    "strategies_tested": [
+      {
+        "version": "V1 Kelly + RSI",
+        "total_return": 3.10,
+        "months_hit_1pct": 3,
+        "monthly_avg": 0.28,
+        "issue": "Stop losses triggered at -8% to -13%"
+      },
+      {
+        "version": "V2 Corrected RSI(2)",
+        "total_return": -3.05,
+        "months_hit_1pct": 4,
+        "monthly_avg": -0.28,
+        "issue": "RSI exits triggered too early in bull market"
+      },
+      {
+        "version": "V3 Hold Strategy",
+        "total_return": 10.79,
+        "months_hit_1pct": 7,
+        "monthly_avg": 1.10,
+        "issue": "Underperformed SPY by 4.55%, early months had drawdowns"
+      }
+    ],
+    "benchmark": {
+      "SPY_buy_and_hold": {
+        "total_return": 15.34,
+        "monthly_avg": 1.59,
+        "months_hit_1pct": 7
+      }
+    },
+    "conclusion": "V3 meets 1% monthly target (+1.10% avg) but underperforms passive; add momentum overlay for BULL regime"
+  },
+  "academic_references": [
+    {"author": "Banerjee et al.", "year": 2024, "finding": "Attention-based LSTM with RSI/MACD/EMA contextual weighting"},
+    {"author": "Zhang et al.", "year": 2023, "finding": "Meta-learning framework for volatility regime adaptation"},
+    {"author": "Akshehir & Kilic", "year": 2024, "finding": "Walk-forward validation for realistic backtesting"},
+    {"author": "ScienceDirect", "year": 2024, "finding": "Multi-indicator combination achieves 60.63% win rate"},
+    {"author": "Larry Connors", "year": null, "finding": "RSI(2) mean reversion strategy"},
+    {"author": "Kelly", "year": 1956, "finding": "Kelly Criterion: Optimal bet size = WR - (1-WR)/RR"},
+    {"author": "Jegadeesh & Titman", "year": 1993, "finding": "Momentum: ~1% monthly returns over 3-12 month periods"},
+    {"author": "SSRN Study", "year": 2024, "finding": "Long-only trend following: 15.19% CAGR, 6.18% alpha (1991-2024)"},
+    {"author": "QuantifiedStrategies", "year": 2024, "finding": "Mean reversion works in sideways/bear, momentum in bull markets"},
+    {"author": "Brazilian Securities Commission", "year": 2024, "finding": "Only 1.1% of day traders earn more than minimum wage"}
+  ],
+  "critical_mistakes": [
+    {
+      "id": 1,
+      "date": "2026-01-26",
+      "mistake": "Recommended taking profits on MU at +6% despite BULL regime and strong fundamentals",
+      "why_wrong": "Contradicted our own Learning #14 (use momentum in bull markets) and Learning #16 (hold strategy works). Defaulted to conventional 'take profits' advice instead of applying backtested learnings.",
+      "correct_action": "HOLD winners in BULL regime with trailing stops. Only exit on stop trigger or regime change.",
+      "root_cause": "Reverted to fear-based conventional wisdom instead of evidence-based strategy",
+      "rule": "NEVER recommend selling a winning position in BULL regime unless trailing stop triggers or fundamentals break"
+    },
+    {
+      "id": 2,
+      "date": "2026-01-26",
+      "mistake": "Said HOLD NVDA without checking regime - NVDA is SIDEWAYS with -1.3% month while alternatives are BULL with +6-12% month",
+      "why_wrong": "Applied blanket 'HOLD everything' advice without analyzing each position's regime. Learning #14 says use momentum in BULL - but NVDA is NOT in BULL regime.",
+      "correct_action": "Should have analyzed regime for EACH position first, then recommended switching NVDA to a BULL regime stock (GOOGL, XOM).",
+      "root_cause": "Lazy analysis - said 'HOLD all' without checking if all positions are optimal",
+      "rule": "ALWAYS check regime for EACH position before recommending HOLD. Only HOLD stocks in BULL regime. Switch SIDEWAYS/BEAR stocks to BULL regime alternatives."
+    },
+    {
+      "id": 3,
+      "date": "2026-01-26",
+      "mistake": "Recommended GOOGL without scanning all BULL regime stocks first - LRCX has +28% month vs GOOGL +6.6%",
+      "why_wrong": "Picked GOOGL because it was familiar (in model_learning.json) instead of running full scan. LRCX, AMAT, XOM, TSM all score higher than GOOGL.",
+      "correct_action": "ALWAYS run full momentum scan before recommending a stock. Rank ALL BULL regime stocks by score and momentum, then pick the best.",
+      "root_cause": "Lazy - grabbed familiar name instead of doing proper analysis",
+      "rule": "NEVER recommend a stock without first scanning and ranking ALL alternatives. Best stock = highest score + strongest momentum + not overbought."
+    },
+    {
+      "id": 4,
+      "date": "2026-01-26",
+      "mistake": "Recommended LRCX based only on technicals - missed that it has only +6% analyst upside vs NVDA +37%",
+      "why_wrong": "Did technical scan and backtest but skipped fundamental analysis. LRCX near its price target means limited upside. NVDA far below target means more potential.",
+      "correct_action": "ALWAYS check analyst price targets and calculate upside BEFORE recommending. High momentum + near target = potential exhaustion.",
+      "root_cause": "Incomplete analysis - only used technicals, ignored fundamentals",
+      "rule": "MANDATORY: Check analyst targets for BOTH current holding AND alternative before recommending switch. Compare upside potential, not just momentum."
+    },
+    {
+      "id": 5,
+      "date": "2026-01-26",
+      "mistake": "Created V29.0 with arbitrary weights (40/30/15/15) without any backtest data",
+      "why_wrong": "V26.0 weights (85/10/5) were backed by 755 trades. I changed them to 40/30/15/15 with ZERO evidence. Made up numbers are not analysis.",
+      "correct_action": "NEVER change weights without backtest validation. V29.0 should define PROCESS not WEIGHTS. Use V26.0 validated weights.",
+      "root_cause": "Sounded good but wasn't backed by data. Academic research shows no universal optimal - must validate on OWN data.",
+      "rule": "WEIGHTS CAN ONLY CHANGE AFTER BACKTEST. Minimum 100 trades, 5+ stocks, out-of-sample validation required."
+    },
+    {
+      "id": 6,
+      "date": "2026-01-28",
+      "mistake": "Recommended AMD (63.6% WR) without scanning broader universe - missed XLV (72.7% WR) and WMT (66.3% WR)",
+      "why_wrong": "Only scanned familiar watchlist (~30 stocks). After user pushed back, scanned 110 stocks and found TWO TIER 1 stocks with better win rates than AMD. Lazy scanning = suboptimal recommendations.",
+      "correct_action": "ALWAYS scan 100+ stocks before making deployment recommendations. Rank ALL signals by win rate.",
+      "root_cause": "Stuck to familiar names instead of doing comprehensive scan",
+      "rule": "MINIMUM 100 stocks scanned before deployment recommendation. Only recommend TIER 1 (>65% WR) stocks when available."
+    },
+    {
+      "id": 7,
+      "date": "2026-01-28",
+      "mistake": "Recommended LLY despite user having lost money on it in past",
+      "why_wrong": "Did not check user's trading history. User explicitly said 'we invested lly in past and lost'. Should have filtered out LLY from recommendations.",
+      "correct_action": "Check user's position history before recommending. Avoid stocks where user had bad experience unless fundamentals changed dramatically.",
+      "root_cause": "Did not consider user context and preferences",
+      "rule": "ALWAYS consider user's trading history. Filter out stocks with past negative experiences unless explicitly requested."
+    },
+    {
+      "id": 8,
+      "date": "2026-01-28",
+      "mistake": "Used WRONG strategy for market regime - scanned for RSI oversold in BULL market instead of MOMENTUM",
+      "why_wrong": "Learning #14 clearly states 'use MOMENTUM in BULL markets'. I violated this by only scanning RSI(2)<20 oversold signals. Missed INTC +11% today, AMAT/LRCX momentum plays.",
+      "correct_action": "In BULL market: Scan for MOMENTUM (BULL regime + >20% monthly returns). Mean reversion (RSI oversold) is for SIDEWAYS markets only.",
+      "root_cause": "Defaulted to familiar mean reversion strategy instead of applying regime-appropriate strategy",
+      "rule": "BULL market = MOMENTUM strategy. SIDEWAYS market = MEAN REVERSION strategy. Check regime FIRST, then pick strategy."
+    },
+    {
+      "id": 9,
+      "date": "2026-01-28",
+      "mistake": "Recommended XLV (-1.2% month) in a BULL market where other stocks were +30-50%",
+      "why_wrong": "XLV is SIDEWAYS regime and DOWN while market is rallying. Recommended based on RSI signal alone without checking if sector has momentum.",
+      "correct_action": "In BULL market, only recommend stocks IN BULL regime with positive momentum. XLV failed both tests.",
+      "root_cause": "Did not verify sector/stock momentum before recommending",
+      "rule": "NEVER recommend stocks with negative monthly returns in a BULL market. Check momentum BEFORE signal."
+    }
+  ],
+  "v29_comprehensive_analysis_framework": {
+    "version": "V29.0",
+    "date_created": "2026-01-26",
+    "status": "VALIDATED_PROCESS_NOT_WEIGHTS",
+    "purpose": "MANDATORY analysis checklist - weights from V26.0 until new backtest validates changes",
+    "philosophy": "Never recommend without complete data. All weights must be backed by backtested evidence.",
+    "weights_source": "USE V26.0 WEIGHTS - they are backtested. V29.0 defines PROCESS not weights.",
+    "validated_weights": {
+      "source": "v26_evidence_based_weights",
+      "technical": 0.85,
+      "sentiment": 0.10,
+      "analyst": 0.05,
+      "evidence": "755 trades, 34 stocks, 66% win rate"
+    },
+    "analysis_checklist": {
+      "step_1_technical_PRIMARY": {
+        "weight": "0.85 (from V26.0 - BACKTESTED)",
+        "required_checks": [
+          "Regime detection (BULL/SIDEWAYS/BEAR)",
+          "BACKTEST win rate (minimum 20 trades)",
+          "RSI(2) and RSI(14) levels",
+          "Price vs SMA20, SMA50, SMA200",
+          "Momentum (week, month, 3-month)"
+        ],
+        "decision_rule": "Technical is PRIMARY driver for entry/exit"
+      },
+      "step_2_sentiment_VETO": {
+        "weight": "0.10 (from V26.0 - BACKTESTED)",
+        "required_checks": [
+          "Recent news sentiment",
+          "Upcoming earnings date",
+          "Major catalyst calendar"
+        ],
+        "decision_rule": "VETO ONLY - block entry if negative, do NOT use for bullish entry"
+      },
+      "step_3_analyst_EXIT": {
+        "weight": "0.05 (from V26.0 - BACKTESTED)",
+        "required_checks": [
+          "Analyst price target",
+          "Upside/downside to target",
+          "Consensus rating"
+        ],
+        "decision_rule": "EXIT TARGETS ONLY - use for profit taking, NOT for entry decisions"
+      },
+      "step_4_comparison": {
+        "required": true,
+        "rule": "Always compare current holding vs alternatives before recommending switch",
+        "metrics": ["Backtest win rate", "Regime", "Analyst upside", "Catalyst proximity"]
+      }
+    },
+    "weight_change_protocol": {
+      "rule": "Weights can ONLY be changed after backtest validation",
+      "required_evidence": "Minimum 100 trades, 5+ stocks, out-of-sample validation",
+      "current_status": "V26.0 weights are the ONLY validated weights"
+    }
+  },
+  "next_improvements": [
+    "PRIORITY 1: Implement V29.0 comprehensive analysis framework in all decisions",
+    "PRIORITY 2: Add momentum overlay to V3 Hold Strategy for BULL regime",
+    "PRIORITY 3: Backtest hybrid momentum+mean_reversion to close 4.55% gap vs SPY",
+    "Build real-time regime detector (BULL/SIDEWAYS/BEAR)",
+    "Implement walk-forward validation for all new models",
+    "Test ensemble approach combining top 3 models per ticker",
+    "Add volume confirmation for profit-taking exits",
+    "Build automated earnings calendar integration",
+    "Create real-time sentiment VETO system using news API"
+  ]
+}

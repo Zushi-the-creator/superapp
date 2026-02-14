@@ -1,7 +1,13 @@
 """
 Multi-Source Stock Data Fetcher
 Provides automatic fallback across multiple free stock data APIs
-NEVER fails - always returns data
+Returns LIVE DATA ONLY - no demo/fake data
+
+Sources (prioritized by reliability):
+1. Tiingo - FREE, 500 req/hr (PRIMARY for historical, most reliable)
+2. Stooq - FREE, ~200/day (SECONDARY for historical)
+3. Finnhub - FREE, 60 calls/min (PRIMARY for live quotes)
+4. Twelve Data - FREE, 800 calls/day (FALLBACK for historical)
 """
 
 import asyncio
@@ -9,30 +15,21 @@ import aiohttp
 import pandas as pd
 from typing import Optional, Dict
 from datetime import datetime, timedelta
-import json
+from io import StringIO
 
 
 class MultiSourceDataFetcher:
     """
     Fetches stock data from multiple sources with automatic fallback
-
-    Sources (in order):
-    1. yfinance (Yahoo Finance) - Primary
-    2. Alpha Vantage - Free tier (500 calls/day)
-    3. Twelve Data - Free tier (800 calls/day)
-    4. Finnhub - Free tier (60 calls/minute)
-    5. Demo/Cache - Always works
+    All sources are FREE with no daily limits (except Twelve Data as fallback)
     """
 
     def __init__(self):
-        # Free API keys (register at respective sites for your own)
-        # These are demo keys with limited quotas
-        self.alpha_vantage_key = "demo"  # Replace with real key from alphavantage.co
-        self.twelve_data_key = "demo"    # Replace with real key from twelvedata.com
-        self.finnhub_key = "demo"        # Replace with real key from finnhub.io
-
-        # Cache for demo data
-        self.demo_cache = {}
+        self.polygon_key = "StsDd_iAxQgokTTsI9d16T3RQf4tNlDg"
+        self.tiingo_key = "6f632a60d6188ebc1b92221e83d4fba37e2a5c42"
+        self.fmp_key = "PETzQaEtgbqcVO3FWTtLD4lZCPuH58sa"
+        self.twelve_data_key = "116ea8557206482e88c40543cec8128b"
+        self.finnhub_key = "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0"
 
     async def fetch_stock_data(self, ticker: str, period_days: int = 30) -> Optional[pd.DataFrame]:
         """
@@ -45,105 +42,177 @@ class MultiSourceDataFetcher:
         Returns:
             DataFrame with OHLCV data or None if all sources fail
         """
-        # Try each source in order
         sources = [
-            self._fetch_yfinance,
-            self._fetch_alpha_vantage,
-            self._fetch_twelve_data,
+            self._fetch_polygon,
+            self._fetch_tiingo,
+            self._fetch_fmp,
+            self._fetch_stooq,
             self._fetch_finnhub,
-            self._fetch_demo_data
+            self._fetch_twelve_data,
         ]
 
         for source_func in sources:
             try:
                 df = await source_func(ticker, period_days)
                 if df is not None and not df.empty and len(df) >= 5:
-                    print(f"✅ {ticker}: Fetched from {source_func.__name__}")
                     return df
             except Exception as e:
-                print(f"⚠️ {ticker}: {source_func.__name__} failed - {e}")
+                error_msg = str(e)
+                if len(error_msg) > 100:
+                    error_msg = error_msg[:100] + "..."
+                print(f"  {ticker}: {source_func.__name__} failed - {type(e).__name__}: {error_msg}")
                 continue
 
-        # If everything fails, return demo data (always works)
-        print(f"🔄 {ticker}: Using fallback demo data")
-        return self._generate_demo_data(ticker, period_days)
-
-    async def _fetch_yfinance(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
-        """Method 1: yfinance (Yahoo Finance)"""
-        import yfinance as yf
-        import requests
-
-        # Configure user agent to bypass blocking
-        yf.utils.get_json = lambda url, proxy=None, session=None: requests.get(
-            url,
-            proxies=proxy,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout=10
-        ).json()
-
-        stock = yf.Ticker(ticker)
-
-        # Try multiple period formats
-        for period in [f"{period_days}d", "1mo", "5d"]:
-            try:
-                df = stock.history(period=period, interval="1d", timeout=10)
-                if not df.empty:
-                    return df
-            except:
-                continue
-
+        print(f"  {ticker}: No live data available from any source")
         return None
 
-    async def _fetch_alpha_vantage(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
-        """Method 2: Alpha Vantage (alphavantage.co)"""
-        url = f"https://www.alphavantage.co/query"
-        params = {
-            "function": "TIME_SERIES_DAILY",
-            "symbol": ticker,
-            "apikey": self.alpha_vantage_key,
-            "outputsize": "compact"  # Last 100 days
-        }
+    async def _fetch_polygon(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
+        """PRIMARY: Polygon.io - unlimited calls, full history"""
+        end = datetime.now()
+        start = end - timedelta(days=period_days + 30)
+        url = (f'https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/'
+               f'{start.strftime("%Y-%m-%d")}/{end.strftime("%Y-%m-%d")}')
+        params = {'adjusted': 'true', 'sort': 'asc', 'limit': 5000,
+                  'apiKey': self.polygon_key}
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as response:
+            async with session.get(url, params=params, timeout=15) as resp:
+                if resp.status != 200:
+                    return None
+
+                data = await resp.json()
+                if data.get('resultsCount', 0) < 5 or 'results' not in data:
+                    return None
+
+                results = data['results']
+                df = pd.DataFrame(results)
+                df['date'] = pd.to_datetime(df['t'], unit='ms')
+                df = df.set_index('date').sort_index()
+                df = df.rename(columns={
+                    'o': 'Open', 'h': 'High', 'l': 'Low',
+                    'c': 'Close', 'v': 'Volume'
+                })
+
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                return df.tail(period_days)
+
+    async def _fetch_tiingo(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
+        """PRIMARY: Tiingo (tiingo.com) - FREE, 500 req/hr, split-adjusted"""
+        start = (datetime.now() - timedelta(days=period_days + 30)).strftime('%Y-%m-%d')
+        end = datetime.now().strftime('%Y-%m-%d')
+        url = f'https://api.tiingo.com/tiingo/daily/{ticker}/prices'
+        params = {'startDate': start, 'endDate': end, 'token': self.tiingo_key}
+        headers = {'Content-Type': 'application/json'}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=headers, timeout=12) as resp:
+                if resp.status != 200:
+                    return None
+
+                data = await resp.json()
+                if not data or not isinstance(data, list) or len(data) < 5:
+                    return None
+
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+                df = df.set_index('date').sort_index()
+
+                # Use split-adjusted prices
+                col_map = {}
+                if 'adjClose' in df.columns:
+                    col_map = {'adjOpen': 'Open', 'adjHigh': 'High',
+                               'adjLow': 'Low', 'adjClose': 'Close', 'adjVolume': 'Volume'}
+                else:
+                    col_map = {'open': 'Open', 'high': 'High',
+                               'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+
+                df = df.rename(columns=col_map)
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                return df.tail(period_days)
+
+    async def _fetch_fmp(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
+        """FMP (financialmodelingprep.com) - 300 req/min, 5yr history"""
+        url = 'https://financialmodelingprep.com/stable/historical-price-eod/full'
+        params = {'symbol': ticker, 'apikey': self.fmp_key}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=15) as resp:
+                if resp.status != 200:
+                    return None
+
+                data = await resp.json()
+                if not data or not isinstance(data, list) or len(data) < 5:
+                    return None
+
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date').sort_index()
+                df = df.rename(columns={
+                    'open': 'Open', 'high': 'High',
+                    'low': 'Low', 'close': 'Close', 'volume': 'Volume'
+                })
+
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                return df.tail(period_days)
+
+    async def _fetch_stooq(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
+        """SECONDARY: Stooq (stooq.com) - FREE, ~200/day, no API key needed"""
+        url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=15) as response:
                 if response.status != 200:
                     return None
 
-                data = await response.json()
-
-                if "Time Series (Daily)" not in data:
+                text = await response.text()
+                lines = text.strip().split('\n')
+                if len(lines) < 10:
                     return None
 
-                # Convert to DataFrame
-                time_series = data["Time Series (Daily)"]
-                df = pd.DataFrame.from_dict(time_series, orient='index')
-                df.index = pd.to_datetime(df.index)
-                df = df.sort_index()
+                df = pd.read_csv(StringIO(text))
+                if 'Date' not in df.columns:
+                    return None
 
-                # Rename columns to match yfinance format
-                df = df.rename(columns={
-                    "1. open": "Open",
-                    "2. high": "High",
-                    "3. low": "Low",
-                    "4. close": "Close",
-                    "5. volume": "Volume"
-                })
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.set_index('Date').sort_index()
 
-                # Convert to numeric
+                # Standardize column names
+                col_map = {}
                 for col in df.columns:
-                    df[col] = pd.to_numeric(df[col])
+                    cl = col.lower()
+                    if cl == 'open': col_map[col] = 'Open'
+                    elif cl == 'high': col_map[col] = 'High'
+                    elif cl == 'low': col_map[col] = 'Low'
+                    elif cl == 'close': col_map[col] = 'Close'
+                    elif cl == 'volume': col_map[col] = 'Volume'
+                if col_map:
+                    df = df.rename(columns=col_map)
+
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
 
                 return df.tail(period_days)
 
     async def _fetch_twelve_data(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
-        """Method 3: Twelve Data (twelvedata.com)"""
+        """FALLBACK: Twelve Data (twelvedata.com) - 800 calls/day"""
         url = "https://api.twelvedata.com/time_series"
         params = {
             "symbol": ticker,
             "interval": "1day",
-            "outputsize": min(period_days, 30),
+            "outputsize": min(period_days, 365),
             "apikey": self.twelve_data_key
         }
 
@@ -157,12 +226,10 @@ class MultiSourceDataFetcher:
                 if "values" not in data:
                     return None
 
-                # Convert to DataFrame
                 df = pd.DataFrame(data["values"])
                 df['datetime'] = pd.to_datetime(df['datetime'])
                 df = df.set_index('datetime').sort_index()
 
-                # Rename and convert columns
                 df = df.rename(columns={
                     "open": "Open",
                     "high": "High",
@@ -177,15 +244,14 @@ class MultiSourceDataFetcher:
                 return df
 
     async def _fetch_finnhub(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
-        """Method 4: Finnhub (finnhub.io)"""
-        # Calculate date range
+        """FALLBACK: Finnhub (finnhub.io) - 60 calls/min"""
         end_date = datetime.now()
         start_date = end_date - timedelta(days=period_days)
 
         url = "https://finnhub.io/api/v1/stock/candle"
         params = {
             "symbol": ticker,
-            "resolution": "D",  # Daily
+            "resolution": "D",
             "from": int(start_date.timestamp()),
             "to": int(end_date.timestamp()),
             "token": self.finnhub_key
@@ -201,7 +267,6 @@ class MultiSourceDataFetcher:
                 if data.get("s") != "ok":
                     return None
 
-                # Convert to DataFrame
                 df = pd.DataFrame({
                     "Open": data["o"],
                     "High": data["h"],
@@ -215,66 +280,53 @@ class MultiSourceDataFetcher:
 
                 return df
 
-    async def _fetch_demo_data(self, ticker: str, period_days: int) -> Optional[pd.DataFrame]:
-        """Method 5: Demo/Cached data (always works)"""
-        # Check cache first
-        if ticker in self.demo_cache:
-            return self.demo_cache[ticker]
-
-        # Generate and cache
-        df = self._generate_demo_data(ticker, period_days)
-        self.demo_cache[ticker] = df
-        return df
-
-    def _generate_demo_data(self, ticker: str, period_days: int = 30) -> pd.DataFrame:
-        """
-        Generate realistic demo stock data
-        This ALWAYS works as a last resort
-        """
-        import random
-        import numpy as np
-
-        # Base prices for common stocks
-        base_prices = {
-            "AAPL": 185.0, "MSFT": 375.0, "GOOGL": 140.0, "AMZN": 150.0,
-            "NVDA": 495.0, "META": 350.0, "TSLA": 245.0, "NFLX": 480.0,
-            "AMD": 145.0, "INTC": 45.0, "QCOM": 145.0, "AVGO": 1050.0,
+    async def _fetch_finnhub_quote(self, ticker: str) -> Optional[Dict]:
+        """Get real-time quote from Finnhub (60 calls/min)"""
+        url = "https://finnhub.io/api/v1/quote"
+        params = {
+            "symbol": ticker,
+            "token": self.finnhub_key
         }
 
-        base_price = base_prices.get(ticker, 100.0)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=10) as response:
+                    if response.status != 200:
+                        return None
 
-        # Generate dates
-        end_date = datetime.now()
-        dates = pd.date_range(end=end_date, periods=period_days, freq='D')
+                    data = await response.json()
 
-        # Generate realistic price movements
-        prices = []
-        current_price = base_price
+                    if not data or data.get("c", 0) == 0:
+                        return None
 
-        for i in range(period_days):
-            # Random walk with trend
-            change_pct = random.gauss(0.001, 0.02)  # Small drift, 2% volatility
-            current_price *= (1 + change_pct)
-            prices.append(current_price)
+                    current = data.get("c", 0)
+                    prev_close = data.get("pc", current)
+                    change = current - prev_close
+                    change_pct = (change / prev_close * 100) if prev_close else 0
 
-        prices = np.array(prices)
-
-        # Generate OHLCV data
-        df = pd.DataFrame({
-            'Open': prices * (1 + np.random.uniform(-0.01, 0.01, period_days)),
-            'High': prices * (1 + np.random.uniform(0.0, 0.02, period_days)),
-            'Low': prices * (1 + np.random.uniform(-0.02, 0.0, period_days)),
-            'Close': prices,
-            'Volume': np.random.randint(20000000, 100000000, period_days)
-        }, index=dates)
-
-        return df
+                    return {
+                        "symbol": ticker,
+                        "price": round(float(current), 2),
+                        "change": round(float(change), 2),
+                        "change_pct": round(float(change_pct), 2),
+                        "volume": 0,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "finnhub_realtime"
+                    }
+        except Exception as e:
+            print(f"  Finnhub quote failed for {ticker}: {e}")
+            return None
 
     async def get_quote(self, ticker: str) -> Dict:
         """
-        Get current quote for a ticker
-        Returns: Dict with current price, change, etc.
+        Get current quote for a ticker (REAL-TIME)
+        Uses Finnhub (60 calls/min, no daily limit)
         """
+        quote = await self._fetch_finnhub_quote(ticker)
+        if quote:
+            return quote
+
+        # Fallback to daily close from Stooq
         df = await self.fetch_stock_data(ticker, period_days=5)
 
         if df is None or df.empty:
@@ -289,7 +341,8 @@ class MultiSourceDataFetcher:
             "change": round(float(current_price - prev_price), 2),
             "change_pct": round(float((current_price - prev_price) / prev_price * 100), 2),
             "volume": int(df['Volume'].iloc[-1]),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "source": "daily_close"
         }
 
 

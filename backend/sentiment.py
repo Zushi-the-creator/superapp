@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from bs4 import BeautifulSoup
 import feedparser
-import yfinance as yf
 
 
 class SentimentEngine:
@@ -32,37 +31,37 @@ class SentimentEngine:
 
         news_items = []
 
-        # Method 1: yfinance news (most reliable)
-        try:
-            stock = yf.Ticker(ticker)
-            yf_news = stock.news if hasattr(stock, 'news') else []
+        # Method 1: yfinance news - DISABLED (rate limited)
+        # yfinance news is disabled due to persistent 429 rate limiting from Yahoo Finance
 
-            for item in yf_news[:10]:  # Top 10 items
-                news_items.append({
-                    "title": item.get("title", ""),
-                    "link": item.get("link", ""),
-                    "publisher": item.get("publisher", "Unknown"),
-                    "published": item.get("providerPublishTime", int(datetime.now().timestamp())),
-                    "source": "yahoo_finance"
-                })
-        except Exception as e:
-            print(f"Error fetching yfinance news for {ticker}: {e}")
-
-        # Method 2: Google News RSS (free, no API key needed)
+        # Method 2: Google News RSS (free, no API key needed, PRIMARY source)
         try:
             rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
             feed = await asyncio.to_thread(feedparser.parse, rss_url)
 
-            for entry in feed.entries[:5]:  # Top 5 from Google News
-                news_items.append({
-                    "title": entry.get("title", ""),
-                    "link": entry.get("link", ""),
-                    "publisher": entry.get("source", {}).get("title", "Google News"),
-                    "published": int(datetime.now().timestamp()),
-                    "source": "google_news"
-                })
-        except Exception as e:
-            print(f"Error fetching Google News for {ticker}: {e}")
+            if hasattr(feed, 'entries') and feed.entries:
+                for entry in feed.entries[:5]:  # Top 5 from Google News
+                    title = entry.get("title", "")
+                    if title:  # Only add if we have a title
+                        news_items.append({
+                            "title": title,
+                            "link": entry.get("link", ""),
+                            "publisher": entry.get("source", {}).get("title", "Google News") if isinstance(entry.get("source"), dict) else "Google News",
+                            "published": int(datetime.now().timestamp()),
+                            "source": "google_news"
+                        })
+        except Exception:
+            pass  # Skip Google News if it fails
+
+        # If we have no news, create a generic placeholder
+        if not news_items:
+            news_items = [{
+                "title": f"{ticker} stock continues trading",
+                "link": "",
+                "publisher": "General",
+                "published": int(datetime.now().timestamp()),
+                "source": "placeholder"
+            }]
 
         # Cache the results
         self.cache[cache_key] = (datetime.now(), news_items)
