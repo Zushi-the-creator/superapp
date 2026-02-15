@@ -6,7 +6,7 @@ export const REFRESH_INTERVALS = {
   scanner: 900_000,          // 15 minutes during market hours
   portfolioOffHours: 300_000, // 5 minutes outside market hours
   healthOffHours: 3_600_000,  // 1 hour outside market hours
-  scannerOffHours: 3_600_000, // 1 hour outside market hours
+  scannerOffHours: 300_000,   // 5 minutes outside market hours
 } as const;
 
 export const COLORS = {

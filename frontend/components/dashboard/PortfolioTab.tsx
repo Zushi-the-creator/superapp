@@ -9,9 +9,12 @@ import { StockSearch } from "./StockSearch";
 import { AlertSettings } from "./AlertSettings";
 import { ScoreGauge } from "@/components/shared/ScoreGauge";
 import { RegimeBadge, SignalBadge } from "@/components/shared/Badges";
+import { Sparkline } from "@/components/shared/Sparkline";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
-import { ArrowUp, ArrowRightLeft, TrendingUp } from "lucide-react";
-import type { ScanOpportunity } from "@/lib/types";
+import { api } from "@/lib/api";
+import { ArrowUp, ArrowRightLeft, TrendingUp, Loader2, CheckCircle2, XCircle, Newspaper, ChevronDown } from "lucide-react";
+import { useState } from "react";
+import type { ScanOpportunity, StockAnalysis } from "@/lib/types";
 
 export function PortfolioTab() {
   const { portfolio, scanner } = useData();
@@ -130,7 +133,7 @@ function UpgradeSuggestions({
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {upgrades.slice(0, 6).map((opp) => (
+          {upgrades.map((opp) => (
             <UpgradeCard key={opp.ticker} opp={opp} />
           ))}
         </div>
@@ -140,14 +143,45 @@ function UpgradeSuggestions({
 }
 
 function UpgradeCard({ opp }: { opp: ScanOpportunity }) {
+  const [expanded, setExpanded] = useState(false);
+  const [analysis, setAnalysis] = useState<StockAnalysis | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleClick = async () => {
+    if (expanded) {
+      setExpanded(false);
+      return;
+    }
+    setExpanded(true);
+    if (analysis) return; // already fetched
+    setLoadingDetail(true);
+    setError(null);
+    try {
+      const data = await api.analyzeStock(opp.ticker);
+      setAnalysis(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
+
   return (
-    <div className="rounded-xl border border-signal-buy/30 bg-signal-buy/5 p-3 hover:border-signal-buy/50 transition-colors">
+    <div
+      className={cn(
+        "rounded-xl border bg-signal-buy/5 p-3 transition-colors cursor-pointer",
+        expanded ? "border-signal-buy/60 col-span-1 md:col-span-2 xl:col-span-3" : "border-signal-buy/30 hover:border-signal-buy/50"
+      )}
+      onClick={handleClick}
+    >
       {/* Beats badge */}
       <div className="flex items-center gap-1.5 mb-2">
         <ArrowUp className="h-3 w-3 text-signal-buy" />
         <span className="text-[10px] font-medium text-signal-buy">
           REPLACES {opp.beats_holdings.join(", ")}
         </span>
+        <ChevronDown className={cn("h-3 w-3 text-neutral-500 ml-auto transition-transform", expanded && "rotate-180")} />
       </div>
 
       <div className="flex items-start justify-between mb-2">
@@ -204,6 +238,168 @@ function UpgradeCard({ opp }: { opp: ScanOpportunity }) {
           </span>
         )}
         <span className="ml-auto text-neutral-500">{opp.trades} trades</span>
+      </div>
+
+      {/* Expanded detail panel */}
+      {expanded && (
+        <div className="mt-3 pt-3 border-t border-signal-buy/20" onClick={(e) => e.stopPropagation()}>
+          {loadingDetail && (
+            <div className="flex items-center gap-2 py-4 justify-center text-neutral-400 text-xs">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Fetching live analysis...
+            </div>
+          )}
+          {error && (
+            <div className="text-signal-sell text-xs py-2">{error}</div>
+          )}
+          {analysis && <UpgradeDetail analysis={analysis} opp={opp} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CheckRow({ passed, label }: { passed: boolean; label: string }) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {passed ? (
+        <CheckCircle2 className="h-3.5 w-3.5 text-signal-buy shrink-0" />
+      ) : (
+        <XCircle className="h-3.5 w-3.5 text-signal-sell shrink-0" />
+      )}
+      <span className={passed ? "text-neutral-300" : "text-signal-sell"}>{label}</span>
+    </div>
+  );
+}
+
+function UpgradeDetail({ analysis, opp }: { analysis: StockAnalysis; opp: ScanOpportunity }) {
+  const a = analysis;
+
+  const modelPassed = a.win_rate >= 55 && a.total_trades >= 10 && a.above_sma50;
+  const sentimentOk = a.sentiment_label !== "NEGATIVE";
+  const earningsOk = !a.earnings_date;
+  const allPassed = modelPassed && sentimentOk && earningsOk;
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Column 1: Live data + model checks */}
+      <div className="space-y-3">
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Live Data</div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-lg font-bold text-neutral-100">{formatCurrency(a.live_price)}</span>
+            <span className={cn("text-xs font-medium", pnlColor(a.day_change_pct))}>
+              {a.day_change_pct >= 0 ? "+" : ""}{a.day_change_pct.toFixed(2)}%
+            </span>
+          </div>
+          {a.sparkline.length > 0 && (
+            <div className="mt-1.5">
+              <Sparkline data={a.sparkline} />
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Model Validation</div>
+          <div className="space-y-1">
+            <CheckRow passed={a.above_sma50} label={`Price > SMA50 (${formatCurrency(a.sma50)})`} />
+            <CheckRow passed={a.rsi2 < 30} label={`RSI(2) = ${a.rsi2.toFixed(1)} ${a.rsi2 < 20 ? "(oversold)" : a.rsi2 < 30 ? "(low)" : ""}`} />
+            <CheckRow passed={a.win_rate >= 55} label={`Win Rate: ${a.win_rate.toFixed(1)}% (${a.total_trades} trades)`} />
+            <CheckRow passed={a.exit_zone_return > 0} label={`Zone Return: ${formatPercent(a.exit_zone_return)} at RSI ${a.rsi_zone}`} />
+          </div>
+        </div>
+      </div>
+
+      {/* Column 2: Sentiment + Analyst + Earnings */}
+      <div className="space-y-3">
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Sentiment</div>
+          <CheckRow passed={sentimentOk} label={`${a.sentiment_label} (score: ${a.sentiment_score.toFixed(2)})`} />
+        </div>
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Analyst</div>
+          <div className="space-y-1">
+            <CheckRow passed={["Strong Buy", "Buy"].includes(a.analyst_consensus)} label={`Consensus: ${a.analyst_consensus}`} />
+            {a.analyst_target > 0 && (
+              <CheckRow
+                passed={a.analyst_upside > 0}
+                label={`Target: ${formatCurrency(a.analyst_target)} (${a.analyst_upside > 0 ? "+" : ""}${a.analyst_upside.toFixed(1)}% upside)`}
+              />
+            )}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Earnings</div>
+          <CheckRow
+            passed={earningsOk}
+            label={a.earnings_date ? `Earnings: ${a.earnings_date} — CAUTION` : "No upcoming earnings — clear"}
+          />
+        </div>
+        {a.issues.length > 0 && (
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Issues</div>
+            <div className="space-y-0.5">
+              {a.issues.map((issue, i) => (
+                <div key={i} className="text-xs text-signal-sell">{issue}</div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Column 3: Why buy + news */}
+      <div className="space-y-3">
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Signal</div>
+          <div className="flex items-center gap-2">
+            <SignalBadge signal={a.signal} />
+            <span className={cn(
+              "text-xs font-bold",
+              allPassed ? "text-signal-buy" : "text-amber-400"
+            )}>
+              {allPassed ? "ALL CHECKS PASSED" : "HAS WARNINGS"}
+            </span>
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Why Buy</div>
+          <p className="text-xs text-neutral-300 leading-relaxed">
+            {opp.ticker} scores <span className="text-signal-buy font-medium">{a.score.toFixed(2)}</span> —{" "}
+            {a.win_rate.toFixed(0)}% win rate over {a.total_trades} trades with{" "}
+            <span className={cn("font-medium", pnlColor(a.exit_zone_return))}>{formatPercent(a.exit_zone_return)}</span>{" "}
+            expected return at current RSI zone.
+            {a.analyst_upside > 0 && ` Analysts see ${a.analyst_upside.toFixed(0)}% upside to ${formatCurrency(a.analyst_target)}.`}
+            {` Replaces ${opp.beats_holdings.join(", ")} for better risk/reward.`}
+          </p>
+        </div>
+        {a.headlines.length > 0 && (
+          <div>
+            <div className="flex items-center gap-1.5 mb-1">
+              <Newspaper className="h-3 w-3 text-neutral-500" />
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Latest News</span>
+            </div>
+            <p className="text-xs text-neutral-400 leading-relaxed line-clamp-2">
+              {a.headlines[0]}
+            </p>
+          </div>
+        )}
+        {/* Exit strategy */}
+        <div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Exit Plan</div>
+          <div className="flex gap-3 text-xs">
+            <div>
+              <span className="text-neutral-500">Stop</span>
+              <div className="text-signal-sell font-medium">{formatCurrency(a.stop_loss)}</div>
+            </div>
+            <div>
+              <span className="text-neutral-500">Target 1</span>
+              <div className="text-signal-buy font-medium">{formatCurrency(a.target_1)}</div>
+            </div>
+            <div>
+              <span className="text-neutral-500">Target 2</span>
+              <div className="text-signal-buy font-medium">{formatCurrency(a.target_2)}</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

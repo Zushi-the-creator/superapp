@@ -15,9 +15,11 @@ export interface PositionDetail {
   weight: number;
   // Technical
   rsi2: number;
+  rsi14: number;
   sma50: number;
   above_sma50: boolean;
   regime: string;
+  tier: string; // EXTREME, STRONG, STANDARD, NONE
   // Backtest
   win_rate: number;
   total_trades: number;
@@ -90,6 +92,7 @@ export interface ScanOpportunity {
   rsi2: number;
   rsi_zone: string;
   regime: string;
+  tier: string; // EXTREME, STRONG, STANDARD, NONE
   win_rate: number;
   trades: number;
   avg_return: number;
@@ -164,9 +167,11 @@ export interface StockAnalysis {
   live_price: number;
   day_change_pct: number;
   rsi2: number;
+  rsi14: number;
   sma50: number;
   above_sma50: boolean;
   regime: string;
+  tier: string; // EXTREME, STRONG, STANDARD, NONE
   win_rate: number;
   total_trades: number;
   avg_return: number;
@@ -188,6 +193,30 @@ export interface StockAnalysis {
   target_1: number;
   target_2: number;
   sparkline: number[];
+}
+
+export interface ChartCandle {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  sma50: number | null;
+}
+
+export interface ChartSignal {
+  date: string;
+  type: "BUY" | "OVERBOUGHT";
+  price: number;
+  rsi: number;
+}
+
+export interface ChartData {
+  ticker: string;
+  candles: ChartCandle[];
+  signals: ChartSignal[];
+  position: { entry_price: number; entry_date: string; shares: number } | null;
 }
 
 export type TabId = "portfolio" | "history";

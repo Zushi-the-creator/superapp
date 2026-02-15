@@ -34,6 +34,30 @@ export function RegimeBadge({ regime }: { regime: string }) {
   );
 }
 
+export function TierBadge({ tier }: { tier: string }) {
+  if (!tier || tier === "NONE") return null;
+
+  const colors: Record<string, string> = {
+    EXTREME:
+      "bg-purple-500/20 text-purple-300 border-purple-500/40 ring-1 ring-purple-500/30",
+    STRONG:
+      "bg-blue-500/20 text-blue-300 border-blue-500/40",
+    STANDARD:
+      "bg-neutral-700/40 text-neutral-400 border-neutral-600/30",
+  };
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border",
+        colors[tier] || colors.STANDARD
+      )}
+    >
+      {tier}
+    </span>
+  );
+}
+
 export function HealthBadge({ issues }: { issues: string[] }) {
   const hasIssues = issues.length > 0;
   const critical = issues.some(

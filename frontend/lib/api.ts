@@ -6,6 +6,7 @@ import type {
   HistoryResponse,
   TradeResult,
   StockAnalysis,
+  ChartData,
 } from "./types";
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
@@ -50,6 +51,10 @@ export const api = {
   // Analyze
   analyzeStock: (ticker: string) =>
     fetchJson<StockAnalysis>(`/api/v2/analyze/${ticker.toUpperCase()}`),
+
+  // Chart
+  getChartData: (ticker: string, days = 90) =>
+    fetchJson<ChartData>(`/api/v2/chart/${ticker.toUpperCase()}?days=${days}`),
 
   // History
   getHistory: (ticker?: string) =>

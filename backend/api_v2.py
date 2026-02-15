@@ -106,7 +106,11 @@ def _get_technicals(ticker: str) -> Dict:
     volumes = df["Volume"].tolist() if "Volume" in df.columns else [0] * len(closes)
 
     sma50 = _entry.calc_sma(closes, 50)
+    sma200 = _entry.calc_sma(closes, 200) if len(closes) >= 200 else 0
     rsi2 = _entry.calc_rsi(closes, 2)
+    rsi14 = _entry.calc_rsi(closes, 14)
+    avg_vol = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 0
+    vol_spike = volumes[-1] > 1.5 * avg_vol if avg_vol > 0 else False
 
     regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
     regime = regime_info.regime.value if hasattr(regime_info, "regime") else str(regime_info)
@@ -148,11 +152,24 @@ def _get_technicals(ticker: str) -> Dict:
     # Sparkline (last 20 closes)
     sparkline = [round(c, 2) for c in closes[-20:]]
 
+    # Tier classification (EXTREME > STRONG > STANDARD > NONE)
+    above_sma50 = closes[-1] > sma50
+    above_sma200 = closes[-1] > sma200 if sma200 > 0 else False
+    is_extreme = rsi2 < 5 and above_sma200
+    is_strong = rsi2 < 20 and above_sma50 and (rsi14 < 40 or vol_spike)
+    is_standard = rsi2 < 20 and above_sma50
+    tier = "EXTREME" if is_extreme else ("STRONG" if is_strong else ("STANDARD" if is_standard else "NONE"))
+
     return {
         "rsi2": round(rsi2, 1),
+        "rsi14": round(rsi14, 1),
         "sma50": round(sma50, 2),
-        "above_sma50": closes[-1] > sma50,
+        "sma200": round(sma200, 2),
+        "above_sma50": above_sma50,
+        "above_sma200": above_sma200,
+        "vol_spike": vol_spike,
         "regime": regime,
+        "tier": tier,
         "win_rate": round(wr, 1),
         "total_trades": len(trades),
         "avg_return": round(avg_ret, 2),
@@ -370,9 +387,11 @@ async def get_portfolio():
                 cost_basis=round(cost, 2),
                 current_value=round(value, 2),
                 rsi2=tech.get("rsi2", -1),
+                rsi14=tech.get("rsi14", -1),
                 sma50=tech.get("sma50", 0),
                 above_sma50=tech.get("above_sma50", True),
                 regime=regime,
+                tier=tech.get("tier", "NONE"),
                 win_rate=tech.get("win_rate", 0),
                 total_trades=tech.get("total_trades", 0),
                 avg_return=tech.get("avg_return", 0),
@@ -578,19 +597,23 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     veto_reason = r.get("veto_reason", "")
 
     # Hard filters: penny stocks and low volume
+    # V2.2: EXTREME tier gets relaxed volume (0.3x) since RSI<5 + >SMA200 is very selective
+    tier = r.get("tier", "NONE")
+    vol_threshold = 0.3 if tier == "EXTREME" else MIN_VOLUME_RATIO
     if not vetoed and price < MIN_PRICE:
         vetoed = True
         veto_reason = f"Penny stock (${price:.2f} < ${MIN_PRICE:.0f})"
-    if not vetoed and 0 < vol_ratio < MIN_VOLUME_RATIO:
+    if not vetoed and 0 < vol_ratio < vol_threshold:
         vetoed = True
-        veto_reason = f"Low volume ({vol_ratio:.1f}x < {MIN_VOLUME_RATIO}x)"
+        veto_reason = f"Low volume ({vol_ratio:.1f}x < {vol_threshold}x)"
 
-    # Which holdings does this stock beat? Strict filters to avoid false upgrades:
-    # - Must not be held or vetoed
-    # - Score must be 30%+ higher (covers $3 round-trip fee)
-    # - Must have 10+ trades (not 5) for upgrade confidence
-    # - Negative sentiment disqualifies
-    # - SIDEWAYS regime with earnings proximity = risky
+    # Which holdings does this stock beat?
+    # V2.2 tier-adjusted thresholds:
+    #   EXTREME: just beat the holding (highest conviction, RSI<5 + >SMA200)
+    #   STRONG:  10% better (good conviction, dual-TF or vol spike)
+    #   STANDARD: 30% better (covers $3 round-trip fee)
+    # Common filters: not held, not vetoed, 10+ trades, no negative sentiment
+    tier = r.get("tier", "NONE")
     sentiment_label = r.get("sentiment_label", "")
     if ticker in holdings_scores or vetoed:
         beats = []
@@ -599,9 +622,11 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     elif r.get("trades", 0) < 10:
         beats = []
     else:
+        # Tier-based premium: EXTREME=0%, STRONG=10%, STANDARD/NONE=30%
+        premium = 1.0 if tier == "EXTREME" else (1.1 if tier == "STRONG" else 1.3)
         beats = [
             h_ticker for h_ticker, h_data in holdings_scores.items()
-            if score > h_data["score"] * 1.3  # 30% better minimum
+            if score > h_data["score"] * premium
             and r.get("zone_trades", 0) >= 5
         ]
 
@@ -611,6 +636,7 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
         rsi2=r.get("rsi2", 0),
         rsi_zone=r.get("rsi_zone", ""),
         regime=r.get("regime", ""),
+        tier=r.get("tier", "NONE"),
         win_rate=r.get("win_rate", 0),
         trades=r.get("trades", 0),
         avg_return=r.get("avg_return", 0),
@@ -1011,9 +1037,11 @@ async def analyze_stock(ticker: str):
         "live_price": round(live_price, 2),
         "day_change_pct": round(day_chg, 2),
         "rsi2": tech.get("rsi2", -1),
+        "rsi14": tech.get("rsi14", -1),
         "sma50": tech.get("sma50", 0),
         "above_sma50": above_sma50,
         "regime": regime,
+        "tier": tech.get("tier", "NONE"),
         "win_rate": round(wr, 1),
         "total_trades": bt.get("trades", 0) if bt else tech.get("total_trades", 0),
         "avg_return": round(avg_ret, 2),
@@ -1035,6 +1063,73 @@ async def analyze_stock(ticker: str):
         "target_1": target_1,
         "target_2": target_2,
         "sparkline": tech.get("sparkline", []),
+    }
+
+
+# ── Chart Data Endpoint ──
+
+@router.get("/chart/{ticker}")
+async def get_chart_data(ticker: str, days: int = 90):
+    """Return OHLCV candles + SMA50 line + buy/sell signal markers for charting."""
+    ticker = ticker.upper()
+    days = min(days, 365)
+
+    df = _cache.get(ticker, days)
+    if df is None or len(df) < 20:
+        raise HTTPException(status_code=404, detail=f"No chart data for {ticker}")
+
+    closes = df["Close"].tolist()
+    highs = df["High"].tolist() if "High" in df.columns else closes
+    lows = df["Low"].tolist() if "Low" in df.columns else closes
+    opens = df["Open"].tolist() if "Open" in df.columns else closes
+    volumes = df["Volume"].tolist() if "Volume" in df.columns else [0] * len(closes)
+    dates = [d.strftime("%Y-%m-%d") for d in df.index]
+
+    # SMA50 line
+    sma50_values = []
+    for i in range(len(closes)):
+        if i >= 49:
+            sma50_values.append(round(sum(closes[i-49:i+1]) / 50, 2))
+        else:
+            sma50_values.append(None)
+
+    # Buy signals: RSI(2) < 20 and price > SMA50
+    signals = []
+    for i in range(50, len(closes)):
+        hist_closes = closes[:i + 1]
+        rsi2 = _entry.calc_rsi(hist_closes, 2)
+        sma = sum(closes[i-49:i+1]) / 50
+        if rsi2 < 20 and closes[i] > sma:
+            signals.append({"date": dates[i], "type": "BUY", "price": round(closes[i], 2), "rsi": round(rsi2, 1)})
+        elif rsi2 > 80:
+            signals.append({"date": dates[i], "type": "OVERBOUGHT", "price": round(closes[i], 2), "rsi": round(rsi2, 1)})
+
+    # Current position info
+    pos = None
+    open_positions = _position_mgr._get_open_positions_sync()
+    for p in open_positions:
+        if p["ticker"] == ticker:
+            pos = {"entry_price": p["entry_price"], "entry_date": p.get("entry_date", ""), "shares": p["shares"]}
+            break
+
+    # Build candles array
+    candles = []
+    for i in range(len(dates)):
+        candles.append({
+            "date": dates[i],
+            "open": round(opens[i], 2),
+            "high": round(highs[i], 2),
+            "low": round(lows[i], 2),
+            "close": round(closes[i], 2),
+            "volume": int(volumes[i]),
+            "sma50": sma50_values[i],
+        })
+
+    return {
+        "ticker": ticker,
+        "candles": candles,
+        "signals": signals,
+        "position": pos,
     }
 
 

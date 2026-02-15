@@ -40,9 +40,11 @@ class PositionDetail(BaseModel):
     weight: float = 0  # % of portfolio
     # Technical
     rsi2: float = -1
+    rsi14: float = -1
     sma50: float = 0
     above_sma50: bool = True
     regime: str = ""
+    tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
     # Backtest
     win_rate: float = 0
     total_trades: int = 0
@@ -115,6 +117,7 @@ class ScanOpportunity(BaseModel):
     rsi2: float
     rsi_zone: str
     regime: str
+    tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
     win_rate: float
     trades: int
     avg_return: float

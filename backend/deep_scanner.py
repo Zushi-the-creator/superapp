@@ -111,6 +111,7 @@ class ScanResult:
     zone_win_rate: float
     volume_ratio: float = 0.0  # current vol / 20-day avg vol
     hold_days: int = 7  # variable hold period based on RSI
+    tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
     # Phase 3 (filled later for top candidates)
     analyst_consensus: str = ""
     analyst_target: float = 0.0
@@ -355,6 +356,15 @@ class DeepScanner:
 
         self.stats["passed"] += 1
 
+        # Tier classification: EXTREME > STRONG > STANDARD > NONE
+        rsi14 = self.entry_engine.calc_rsi(closes, 14) if len(closes) >= 14 else 50
+        sma200 = self.entry_engine.calc_sma(closes, 200) if len(closes) >= 200 else 0
+        above_sma200 = price > sma200 if sma200 > 0 else False
+        vol_spike = vol_ratio > 1.5
+        is_extreme = rsi2 < 5 and above_sma200
+        is_strong = rsi2 < 20 and (rsi14 < 40 or vol_spike)
+        tier = "EXTREME" if is_extreme else ("STRONG" if is_strong else "STANDARD")
+
         return ScanResult(
             ticker=ticker, price=round(price, 2), rsi2=round(rsi2, 1),
             rsi_zone=zone_label, sma50=round(sma50, 2), above_sma50=True,
@@ -365,6 +375,7 @@ class DeepScanner:
             zone_win_rate=round(zone_wr, 1),
             volume_ratio=round(vol_ratio, 2),
             hold_days=hold_days,
+            tier=tier,
             source=source,
         )
 

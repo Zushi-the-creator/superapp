@@ -3,7 +3,7 @@
 import { useData } from "@/components/providers/DataProvider";
 import { Header } from "@/components/layout/Header";
 import { ScoreGauge } from "@/components/shared/ScoreGauge";
-import { RegimeBadge, SignalBadge } from "@/components/shared/Badges";
+import { RegimeBadge, SignalBadge, TierBadge } from "@/components/shared/Badges";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { RefreshCw, ArrowUp, Zap } from "lucide-react";
@@ -29,9 +29,20 @@ export function OpportunitiesTab() {
   const holdingsScores = data?.holdings_scores ?? [];
   const worstHolding = data?.worst_holding ?? "";
   const worstScore = data?.worst_score ?? 0;
-  const upgrades = opportunities.filter((o) => o.is_upgrade && !o.vetoed);
-  const active = opportunities.filter((o) => !o.vetoed && !o.is_upgrade);
-  const vetoed = opportunities.filter((o) => o.vetoed);
+
+  // Filter out current holdings from opportunities
+  const holdingTickers = new Set(holdingsScores.map((h) => h.ticker));
+  const nonHeld = opportunities.filter((o) => !holdingTickers.has(o.ticker));
+
+  // Upgrades = stocks that beat current holdings
+  const upgrades = nonHeld.filter((o) => o.is_upgrade && !o.vetoed);
+
+  // Group non-vetoed, non-held, non-upgrade by V2.2 tier (avoid duplicates with upgrades)
+  const nonVetoed = nonHeld.filter((o) => !o.vetoed && !o.is_upgrade);
+  const extreme = nonVetoed.filter((o) => o.tier === "EXTREME");
+  const strong = nonVetoed.filter((o) => o.tier === "STRONG");
+  const standard = nonVetoed.filter((o) => o.tier === "STANDARD" || o.tier === "NONE");
+  const vetoed = nonHeld.filter((o) => o.vetoed);
 
   return (
     <div className="flex flex-col h-full">
@@ -46,6 +57,8 @@ export function OpportunitiesTab() {
         <div className="flex items-center gap-4 text-xs text-neutral-500">
           <span>Scanned: {data?.total_scanned?.toLocaleString() ?? 0}</span>
           <span>Passed: {data?.passed ?? 0}</span>
+          {extreme.length > 0 && <span className="text-purple-400">Extreme: {extreme.length}</span>}
+          {strong.length > 0 && <span className="text-blue-400">Strong: {strong.length}</span>}
           <span>Upgrades: {upgrades.length}</span>
           <button
             onClick={handleForceRefresh}
@@ -123,14 +136,68 @@ export function OpportunitiesTab() {
           </div>
         )}
 
-        {/* Other passing stocks */}
-        {active.length > 0 && (
+        {/* V2.2 Tier: EXTREME */}
+        {extreme.length > 0 && (
           <>
-            <h3 className="text-xs text-neutral-500 font-medium mt-4">
-              Other Opportunities ({active.length})
-            </h3>
+            <div className="flex items-center gap-2 mt-4">
+              <div className="h-2 w-2 rounded-full bg-purple-500 ring-2 ring-purple-500/30" />
+              <h3 className="text-sm font-semibold text-purple-300">
+                V2.2 EXTREME ({extreme.length})
+              </h3>
+              <span className="text-xs text-neutral-500">
+                RSI(2) &lt; 5 + above SMA200 — highest conviction
+              </span>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {active.slice(0, 12).map((opp) => (
+              {extreme.map((opp) => (
+                <OpportunityCard
+                  key={opp.ticker}
+                  opp={opp}
+                  holdingsScores={holdingsScores}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* V2.2 Tier: STRONG */}
+        {strong.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 mt-4">
+              <div className="h-2 w-2 rounded-full bg-blue-500 ring-2 ring-blue-500/30" />
+              <h3 className="text-sm font-semibold text-blue-300">
+                V2.2 STRONG ({strong.length})
+              </h3>
+              <span className="text-xs text-neutral-500">
+                RSI(2) &lt; 20 + dual-TF or volume spike
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {strong.map((opp) => (
+                <OpportunityCard
+                  key={opp.ticker}
+                  opp={opp}
+                  holdingsScores={holdingsScores}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* V2.2 Tier: STANDARD */}
+        {standard.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 mt-4">
+              <div className="h-2 w-2 rounded-full bg-neutral-500 ring-2 ring-neutral-500/30" />
+              <h3 className="text-sm font-semibold text-neutral-400">
+                V2.2 STANDARD ({standard.length})
+              </h3>
+              <span className="text-xs text-neutral-500">
+                RSI(2) &lt; 20 + above SMA50
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {standard.slice(0, 12).map((opp) => (
                 <OpportunityCard
                   key={opp.ticker}
                   opp={opp}
@@ -178,6 +245,10 @@ function OpportunityCard({
           ? "border-neutral-800 bg-neutral-900/30"
           : opp.is_upgrade
           ? "border-signal-buy/40 bg-signal-buy/5 hover:border-signal-buy/60"
+          : opp.tier === "EXTREME"
+          ? "border-purple-500/30 bg-purple-500/5 hover:border-purple-500/50"
+          : opp.tier === "STRONG"
+          ? "border-blue-500/30 bg-blue-500/5 hover:border-blue-500/50"
           : "border-neutral-800 bg-neutral-900/50 hover:border-neutral-700"
       )}
     >
@@ -203,6 +274,7 @@ function OpportunityCard({
         <div>
           <div className="flex items-center gap-2">
             <span className="font-semibold text-neutral-100">{opp.ticker}</span>
+            <TierBadge tier={opp.tier} />
             <RegimeBadge regime={opp.regime} />
           </div>
           <span className="text-sm text-neutral-400">

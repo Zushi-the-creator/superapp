@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Search, Loader2, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatCurrency, formatPercent, cn, pnlColor, signalBg } from "@/lib/utils";
-import { SignalBadge, RegimeBadge } from "@/components/shared/Badges";
+import { SignalBadge, RegimeBadge, TierBadge } from "@/components/shared/Badges";
 import { Sparkline } from "@/components/shared/Sparkline";
 import type { StockAnalysis } from "@/lib/types";
 
@@ -100,6 +100,7 @@ function AnalysisCard({ data }: { data: StockAnalysis }) {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <TierBadge tier={data.tier} />
           <RegimeBadge regime={data.regime} />
           <SignalBadge signal={data.signal} />
         </div>
