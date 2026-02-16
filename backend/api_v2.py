@@ -899,6 +899,93 @@ async def get_history(ticker: str = None, limit: int = 100):
     )
 
 
+def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
+    """Calculate optimal buy prices by analyzing historical RSI(2) zones.
+
+    For each zone (0-5, 5-10, 10-20), finds:
+    - The avg % drop from recent high that triggers that RSI level
+    - Backtested win rate and avg return at that zone
+    - The resulting price target based on current price action
+    """
+    df = _cache.get(ticker, 365)
+    if df is None or len(df) < 60:
+        return []
+
+    closes = df["Close"].dropna().tolist()
+
+    # Collect all data points with their RSI and % from recent 10-day high
+    zones = {
+        "EXTREME": {"rsi_lo": 0, "rsi_hi": 5, "label": "RSI < 5", "trades": [], "drops": []},
+        "STRONG":  {"rsi_lo": 5, "rsi_hi": 10, "label": "RSI 5-10", "trades": [], "drops": []},
+        "STANDARD": {"rsi_lo": 10, "rsi_hi": 20, "label": "RSI 10-20", "trades": [], "drops": []},
+    }
+
+    for i in range(50, len(closes) - 7):
+        hist_closes = closes[:i + 1]
+        hist_rsi = _entry.calc_rsi(hist_closes, 2)
+        hist_sma = _entry.calc_sma(hist_closes, 50)
+
+        # Only consider valid buy signals (above SMA50)
+        if hist_closes[-1] <= hist_sma:
+            continue
+
+        # % drop from recent 10-day high
+        recent_high = max(closes[max(0, i - 10):i + 1])
+        pct_drop = ((closes[i] - recent_high) / recent_high) * 100
+
+        # 7-day forward return
+        ret = ((closes[i + 7] - closes[i]) / closes[i]) * 100
+
+        for key, z in zones.items():
+            if z["rsi_lo"] <= hist_rsi < z["rsi_hi"]:
+                z["trades"].append({"return": ret, "win": ret > 0})
+                z["drops"].append(pct_drop)
+
+    # Calculate price targets from current 10-day high
+    recent_10d_high = max(closes[-10:]) if len(closes) >= 10 else closes[-1]
+
+    results = []
+    for key in ["EXTREME", "STRONG", "STANDARD"]:
+        z = zones[key]
+        if not z["trades"]:
+            continue
+        n = len(z["trades"])
+        wr = sum(1 for t in z["trades"] if t["win"]) / n * 100
+        avg_ret = sum(t["return"] for t in z["trades"]) / n
+        avg_drop = sum(z["drops"]) / len(z["drops"])
+        median_drop = sorted(z["drops"])[len(z["drops"]) // 2]
+        # Use median drop to estimate entry price (more robust than mean)
+        entry_price = round(recent_10d_high * (1 + median_drop / 100), 2)
+        # Don't suggest entry above current price
+        if entry_price > current_price:
+            entry_price = round(current_price * (1 + median_drop / 100), 2)
+
+        results.append({
+            "tier": key,
+            "label": z["label"],
+            "price": entry_price,
+            "drop_pct": round(median_drop, 1),
+            "avg_return": round(avg_ret, 2),
+            "win_rate": round(wr, 1),
+            "trades": n,
+        })
+
+    # Add SMA50 as support level
+    sma50 = _entry.calc_sma(closes, 50)
+    if sma50 > 0:
+        results.append({
+            "tier": "SUPPORT",
+            "label": "SMA50 Support",
+            "price": round(sma50, 2),
+            "drop_pct": round(((sma50 - current_price) / current_price) * 100, 1) if current_price > 0 else 0,
+            "avg_return": 0,
+            "win_rate": 0,
+            "trades": 0,
+        })
+
+    return results
+
+
 # ── Stock Analysis Endpoint ──
 
 @router.get("/analyze/{ticker}")
@@ -1032,6 +1119,9 @@ async def analyze_stock(ticker: str):
 
     score = round(avg_ret * wr / 100, 2) if wr > 0 else 0
 
+    # 8. Optimal entry prices — backtest zone returns at RSI 0-5, 5-10, 10-20
+    optimal_entries = _calc_optimal_entries(ticker, live_price)
+
     return {
         "ticker": ticker,
         "live_price": round(live_price, 2),
@@ -1063,6 +1153,7 @@ async def analyze_stock(ticker: str):
         "target_1": target_1,
         "target_2": target_2,
         "sparkline": tech.get("sparkline", []),
+        "optimal_entries": optimal_entries,
     }
 
 

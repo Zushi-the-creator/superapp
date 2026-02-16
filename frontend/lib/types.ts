@@ -162,6 +162,16 @@ export interface TradeResult {
   fee: number;
 }
 
+export interface OptimalEntry {
+  tier: string;       // EXTREME, STRONG, STANDARD, SUPPORT
+  label: string;      // "RSI < 5", "RSI 5-10", etc.
+  price: number;      // target entry price
+  drop_pct: number;   // median % drop from recent high
+  avg_return: number;  // backtested avg 7d return at this zone
+  win_rate: number;
+  trades: number;
+}
+
 export interface StockAnalysis {
   ticker: string;
   live_price: number;
@@ -193,6 +203,7 @@ export interface StockAnalysis {
   target_1: number;
   target_2: number;
   sparkline: number[];
+  optimal_entries: OptimalEntry[];
 }
 
 export interface ChartCandle {

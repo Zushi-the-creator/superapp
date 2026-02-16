@@ -12,7 +12,7 @@ import { RegimeBadge, SignalBadge } from "@/components/shared/Badges";
 import { Sparkline } from "@/components/shared/Sparkline";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { api } from "@/lib/api";
-import { ArrowUp, ArrowRightLeft, TrendingUp, Loader2, CheckCircle2, XCircle, Newspaper, ChevronDown } from "lucide-react";
+import { ArrowUp, ArrowRightLeft, TrendingUp, Loader2, CheckCircle2, XCircle, Newspaper, ChevronDown, Crosshair } from "lucide-react";
 import { useState } from "react";
 import type { ScanOpportunity, StockAnalysis } from "@/lib/types";
 
@@ -280,127 +280,216 @@ function UpgradeDetail({ analysis, opp }: { analysis: StockAnalysis; opp: ScanOp
   const earningsOk = !a.earnings_date;
   const allPassed = modelPassed && sentimentOk && earningsOk;
 
+  const entries = a.optimal_entries ?? [];
+  const buyZones = entries.filter((e) => e.tier !== "SUPPORT");
+  const support = entries.find((e) => e.tier === "SUPPORT");
+  const bestZone = buyZones.length > 0
+    ? buyZones.reduce((a, b) => (a.avg_return * a.win_rate > b.avg_return * b.win_rate ? a : b))
+    : null;
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-      {/* Column 1: Live data + model checks */}
-      <div className="space-y-3">
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Live Data</div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-lg font-bold text-neutral-100">{formatCurrency(a.live_price)}</span>
-            <span className={cn("text-xs font-medium", pnlColor(a.day_change_pct))}>
-              {a.day_change_pct >= 0 ? "+" : ""}{a.day_change_pct.toFixed(2)}%
-            </span>
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Column 1: Live data + model checks */}
+        <div className="space-y-3">
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Live Data</div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-lg font-bold text-neutral-100">{formatCurrency(a.live_price)}</span>
+              <span className={cn("text-xs font-medium", pnlColor(a.day_change_pct))}>
+                {a.day_change_pct >= 0 ? "+" : ""}{a.day_change_pct.toFixed(2)}%
+              </span>
+            </div>
+            {a.sparkline.length > 0 && (
+              <div className="mt-1.5">
+                <Sparkline data={a.sparkline} />
+              </div>
+            )}
           </div>
-          {a.sparkline.length > 0 && (
-            <div className="mt-1.5">
-              <Sparkline data={a.sparkline} />
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Model Validation</div>
+            <div className="space-y-1">
+              <CheckRow passed={a.above_sma50} label={`Price > SMA50 (${formatCurrency(a.sma50)})`} />
+              <CheckRow passed={a.rsi2 < 30} label={`RSI(2) = ${a.rsi2.toFixed(1)} ${a.rsi2 < 20 ? "(oversold)" : a.rsi2 < 30 ? "(low)" : ""}`} />
+              <CheckRow passed={a.win_rate >= 55} label={`Win Rate: ${a.win_rate.toFixed(1)}% (${a.total_trades} trades)`} />
+              <CheckRow passed={a.exit_zone_return > 0} label={`Zone Return: ${formatPercent(a.exit_zone_return)} at RSI ${a.rsi_zone}`} />
+            </div>
+          </div>
+        </div>
+
+        {/* Column 2: Sentiment + Analyst + Earnings */}
+        <div className="space-y-3">
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Sentiment</div>
+            <CheckRow passed={sentimentOk} label={`${a.sentiment_label} (score: ${a.sentiment_score.toFixed(2)})`} />
+          </div>
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Analyst</div>
+            <div className="space-y-1">
+              <CheckRow passed={["Strong Buy", "Buy"].includes(a.analyst_consensus)} label={`Consensus: ${a.analyst_consensus}`} />
+              {a.analyst_target > 0 && (
+                <CheckRow
+                  passed={a.analyst_upside > 0}
+                  label={`Target: ${formatCurrency(a.analyst_target)} (${a.analyst_upside > 0 ? "+" : ""}${a.analyst_upside.toFixed(1)}% upside)`}
+                />
+              )}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Earnings</div>
+            <CheckRow
+              passed={earningsOk}
+              label={a.earnings_date ? `Earnings: ${a.earnings_date} — CAUTION` : "No upcoming earnings — clear"}
+            />
+          </div>
+          {a.issues.length > 0 && (
+            <div>
+              <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Issues</div>
+              <div className="space-y-0.5">
+                {a.issues.map((issue, i) => (
+                  <div key={i} className="text-xs text-signal-sell">{issue}</div>
+                ))}
+              </div>
             </div>
           )}
         </div>
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Model Validation</div>
-          <div className="space-y-1">
-            <CheckRow passed={a.above_sma50} label={`Price > SMA50 (${formatCurrency(a.sma50)})`} />
-            <CheckRow passed={a.rsi2 < 30} label={`RSI(2) = ${a.rsi2.toFixed(1)} ${a.rsi2 < 20 ? "(oversold)" : a.rsi2 < 30 ? "(low)" : ""}`} />
-            <CheckRow passed={a.win_rate >= 55} label={`Win Rate: ${a.win_rate.toFixed(1)}% (${a.total_trades} trades)`} />
-            <CheckRow passed={a.exit_zone_return > 0} label={`Zone Return: ${formatPercent(a.exit_zone_return)} at RSI ${a.rsi_zone}`} />
+
+        {/* Column 3: Why buy + news + exit */}
+        <div className="space-y-3">
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Signal</div>
+            <div className="flex items-center gap-2">
+              <SignalBadge signal={a.signal} />
+              <span className={cn(
+                "text-xs font-bold",
+                allPassed ? "text-signal-buy" : "text-amber-400"
+              )}>
+                {allPassed ? "ALL CHECKS PASSED" : "HAS WARNINGS"}
+              </span>
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Why Buy</div>
+            <p className="text-xs text-neutral-300 leading-relaxed">
+              {opp.ticker} scores <span className="text-signal-buy font-medium">{a.score.toFixed(2)}</span> —{" "}
+              {a.win_rate.toFixed(0)}% win rate over {a.total_trades} trades with{" "}
+              <span className={cn("font-medium", pnlColor(a.exit_zone_return))}>{formatPercent(a.exit_zone_return)}</span>{" "}
+              expected return at current RSI zone.
+              {a.analyst_upside > 0 && ` Analysts see ${a.analyst_upside.toFixed(0)}% upside to ${formatCurrency(a.analyst_target)}.`}
+              {` Replaces ${opp.beats_holdings.join(", ")} for better risk/reward.`}
+            </p>
+          </div>
+          {a.headlines.length > 0 && (
+            <div>
+              <div className="flex items-center gap-1.5 mb-1">
+                <Newspaper className="h-3 w-3 text-neutral-500" />
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Latest News</span>
+              </div>
+              <p className="text-xs text-neutral-400 leading-relaxed line-clamp-2">
+                {a.headlines[0]}
+              </p>
+            </div>
+          )}
+          {/* Exit strategy */}
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Exit Plan</div>
+            <div className="flex gap-3 text-xs">
+              <div>
+                <span className="text-neutral-500">Stop</span>
+                <div className="text-signal-sell font-medium">{formatCurrency(a.stop_loss)}</div>
+              </div>
+              <div>
+                <span className="text-neutral-500">Target 1</span>
+                <div className="text-signal-buy font-medium">{formatCurrency(a.target_1)}</div>
+              </div>
+              <div>
+                <span className="text-neutral-500">Target 2</span>
+                <div className="text-signal-buy font-medium">{formatCurrency(a.target_2)}</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Column 2: Sentiment + Analyst + Earnings */}
-      <div className="space-y-3">
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Sentiment</div>
-          <CheckRow passed={sentimentOk} label={`${a.sentiment_label} (score: ${a.sentiment_score.toFixed(2)})`} />
-        </div>
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Analyst</div>
-          <div className="space-y-1">
-            <CheckRow passed={["Strong Buy", "Buy"].includes(a.analyst_consensus)} label={`Consensus: ${a.analyst_consensus}`} />
-            {a.analyst_target > 0 && (
-              <CheckRow
-                passed={a.analyst_upside > 0}
-                label={`Target: ${formatCurrency(a.analyst_target)} (${a.analyst_upside > 0 ? "+" : ""}${a.analyst_upside.toFixed(1)}% upside)`}
-              />
+      {/* Optimal Buy Zones — full width below the 3 columns */}
+      {buyZones.length > 0 && (
+        <div className="border-t border-signal-buy/20 pt-3">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Crosshair className="h-3.5 w-3.5 text-signal-buy" />
+            <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Optimal Buy Prices</span>
+            <span className="text-[10px] text-neutral-600 ml-1">based on backtest of {a.total_trades}+ trades</span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {buyZones.map((entry) => {
+              const isBest = bestZone && entry.tier === bestZone.tier;
+              const isCurrent = a.live_price <= entry.price;
+              return (
+                <div
+                  key={entry.tier}
+                  className={cn(
+                    "relative rounded-lg border p-2.5 text-xs",
+                    isBest
+                      ? "border-signal-buy/50 bg-signal-buy/10"
+                      : "border-neutral-700/50 bg-neutral-800/30"
+                  )}
+                >
+                  {isBest && (
+                    <span className="absolute -top-2 right-2 px-1.5 py-0.5 rounded text-[9px] font-bold bg-signal-buy text-neutral-950">
+                      BEST
+                    </span>
+                  )}
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className={cn(
+                      "h-1.5 w-1.5 rounded-full",
+                      entry.tier === "EXTREME" ? "bg-purple-500" : entry.tier === "STRONG" ? "bg-blue-500" : "bg-neutral-400"
+                    )} />
+                    <span className="text-neutral-400 font-medium">{entry.label}</span>
+                  </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={cn("text-base font-bold", isCurrent ? "text-signal-buy" : "text-neutral-200")}>
+                      {formatCurrency(entry.price)}
+                    </span>
+                    {isCurrent && (
+                      <span className="text-[9px] text-signal-buy font-medium">IN ZONE</span>
+                    )}
+                  </div>
+                  <div className="text-neutral-500 mt-0.5">{entry.drop_pct.toFixed(1)}% from high</div>
+                  <div className="flex justify-between mt-1.5 pt-1.5 border-t border-neutral-700/30">
+                    <div>
+                      <div className="text-neutral-500">Return</div>
+                      <div className={cn("font-medium", pnlColor(entry.avg_return))}>
+                        {entry.avg_return >= 0 ? "+" : ""}{entry.avg_return.toFixed(1)}%
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-neutral-500">WR</div>
+                      <div className="font-medium text-neutral-200">{entry.win_rate.toFixed(0)}%</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-neutral-500">Trades</div>
+                      <div className="text-neutral-300">{entry.trades}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {/* SMA50 support */}
+            {support && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs">
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  <span className="text-amber-400/80 font-medium">{support.label}</span>
+                </div>
+                <div className="text-base font-bold text-amber-400">{formatCurrency(support.price)}</div>
+                <div className="text-neutral-500 mt-0.5">{support.drop_pct.toFixed(1)}% from current</div>
+                <div className="text-[10px] text-neutral-600 mt-1.5 pt-1.5 border-t border-amber-500/15">
+                  Price must stay above this level
+                </div>
+              </div>
             )}
           </div>
         </div>
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Earnings</div>
-          <CheckRow
-            passed={earningsOk}
-            label={a.earnings_date ? `Earnings: ${a.earnings_date} — CAUTION` : "No upcoming earnings — clear"}
-          />
-        </div>
-        {a.issues.length > 0 && (
-          <div>
-            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Issues</div>
-            <div className="space-y-0.5">
-              {a.issues.map((issue, i) => (
-                <div key={i} className="text-xs text-signal-sell">{issue}</div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Column 3: Why buy + news */}
-      <div className="space-y-3">
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Signal</div>
-          <div className="flex items-center gap-2">
-            <SignalBadge signal={a.signal} />
-            <span className={cn(
-              "text-xs font-bold",
-              allPassed ? "text-signal-buy" : "text-amber-400"
-            )}>
-              {allPassed ? "ALL CHECKS PASSED" : "HAS WARNINGS"}
-            </span>
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Why Buy</div>
-          <p className="text-xs text-neutral-300 leading-relaxed">
-            {opp.ticker} scores <span className="text-signal-buy font-medium">{a.score.toFixed(2)}</span> —{" "}
-            {a.win_rate.toFixed(0)}% win rate over {a.total_trades} trades with{" "}
-            <span className={cn("font-medium", pnlColor(a.exit_zone_return))}>{formatPercent(a.exit_zone_return)}</span>{" "}
-            expected return at current RSI zone.
-            {a.analyst_upside > 0 && ` Analysts see ${a.analyst_upside.toFixed(0)}% upside to ${formatCurrency(a.analyst_target)}.`}
-            {` Replaces ${opp.beats_holdings.join(", ")} for better risk/reward.`}
-          </p>
-        </div>
-        {a.headlines.length > 0 && (
-          <div>
-            <div className="flex items-center gap-1.5 mb-1">
-              <Newspaper className="h-3 w-3 text-neutral-500" />
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Latest News</span>
-            </div>
-            <p className="text-xs text-neutral-400 leading-relaxed line-clamp-2">
-              {a.headlines[0]}
-            </p>
-          </div>
-        )}
-        {/* Exit strategy */}
-        <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Exit Plan</div>
-          <div className="flex gap-3 text-xs">
-            <div>
-              <span className="text-neutral-500">Stop</span>
-              <div className="text-signal-sell font-medium">{formatCurrency(a.stop_loss)}</div>
-            </div>
-            <div>
-              <span className="text-neutral-500">Target 1</span>
-              <div className="text-signal-buy font-medium">{formatCurrency(a.target_1)}</div>
-            </div>
-            <div>
-              <span className="text-neutral-500">Target 2</span>
-              <div className="text-signal-buy font-medium">{formatCurrency(a.target_2)}</div>
-            </div>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
