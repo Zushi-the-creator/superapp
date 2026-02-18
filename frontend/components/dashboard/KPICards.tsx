@@ -1,6 +1,6 @@
 "use client";
 
-import { DollarSign, TrendingUp, Layers, Target } from "lucide-react";
+import { DollarSign, TrendingUp, Calendar, Layers, Target } from "lucide-react";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import type { PortfolioSummary } from "@/lib/types";
 import { CardSkeleton } from "@/components/shared/Skeleton";
@@ -14,8 +14,8 @@ export function KPICards({
 }) {
   if (loading || !summary) {
     return (
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {Array.from({ length: 4 }).map((_, i) => (
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        {Array.from({ length: 5 }).map((_, i) => (
           <CardSkeleton key={i} />
         ))}
       </div>
@@ -29,6 +29,13 @@ export function KPICards({
       icon: DollarSign,
       color: "text-blue-400",
       bg: "bg-blue-500/10",
+    },
+    {
+      label: "Today's P&L",
+      value: `${formatCurrency(summary.day_pnl)} (${summary.day_pnl_pct >= 0 ? "+" : ""}${summary.day_pnl_pct.toFixed(2)}%)`,
+      icon: Calendar,
+      color: pnlColor(summary.day_pnl),
+      bg: summary.day_pnl >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
     {
       label: "Total P&L",
@@ -54,7 +61,7 @@ export function KPICards({
   ];
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
       {cards.map((card) => (
         <div
           key={card.label}

@@ -40,6 +40,7 @@ export function PortfolioTab() {
             <PositionsTable
               positions={data?.positions ?? []}
               loading={loading && !data}
+              upgrades={upgrades}
             />
           </div>
           <div>

@@ -46,8 +46,15 @@ _health_cache_time: Optional[datetime] = None
 _scan_cache: Optional[Dict] = None
 _scan_cache_time: Optional[datetime] = None
 
-# Last known good prices (never show 0 P&L due to Finnhub failures)
-_price_cache: Dict[str, Dict] = {}
+# ── Centralized Quote Management ──
+# Single source of truth for live prices. Background task refreshes every 30s.
+# All endpoints read from here instead of hitting Finnhub directly.
+_price_cache: Dict[str, Dict] = {}   # ticker -> last known good quote (persistent)
+_quote_cache: Dict[str, tuple] = {}  # ticker -> (result, timestamp) — 30s TTL
+QUOTE_CACHE_TTL = 30  # seconds
+_finnhub_calls_this_minute: int = 0
+_finnhub_minute_start: Optional[datetime] = None
+FINNHUB_MAX_PER_MIN = 50  # Leave headroom from 60/min limit
 
 # WebSocket connections for alerts
 _ws_connections: List[WebSocket] = []
@@ -68,12 +75,44 @@ def _exit_targets_by_regime(regime: str) -> tuple:
         return (-4.0, 3.0, 6.0)
 
 
+def _check_finnhub_rate() -> bool:
+    """Check if we can make another Finnhub call. Returns True if under limit."""
+    global _finnhub_calls_this_minute, _finnhub_minute_start
+    now = datetime.now()
+    if _finnhub_minute_start is None or (now - _finnhub_minute_start).total_seconds() >= 60:
+        _finnhub_calls_this_minute = 0
+        _finnhub_minute_start = now
+    return _finnhub_calls_this_minute < FINNHUB_MAX_PER_MIN
+
+def _record_finnhub_call():
+    """Record a Finnhub API call."""
+    global _finnhub_calls_this_minute
+    _finnhub_calls_this_minute += 1
+
 async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Optional[Dict]:
-    """Get live quote from Finnhub. Caches last known good price to prevent P&L=0 on failures."""
+    """Get live quote from Finnhub. 30s cache + rate limiter + last-known-good fallback."""
+    # Return cached quote if fresh (avoids redundant API calls)
+    if ticker in _quote_cache:
+        cached_result, cached_time = _quote_cache[ticker]
+        if (datetime.now() - cached_time).total_seconds() < QUOTE_CACHE_TTL:
+            return cached_result
+
+    # Check rate limit before calling
+    if not _check_finnhub_rate():
+        if ticker in _price_cache:
+            return _price_cache[ticker]
+        return None
+
     _timeout = 4 if os.environ.get("FLY_APP_NAME") else 8
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
+        _record_finnhub_call()
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=_timeout)) as resp:
+            if resp.status == 429:
+                if ticker in _price_cache:
+                    _quote_cache[ticker] = (_price_cache[ticker], datetime.now())
+                    return _price_cache[ticker]
+                return None
             if resp.status == 200:
                 data = await resp.json()
                 if data.get("c", 0) > 0:
@@ -83,15 +122,192 @@ async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Opt
                         "prev_close": pc,
                         "day_chg": (data["c"] - pc) / pc * 100 if pc else 0,
                     }
-                    # Cache this good price
                     _price_cache[ticker] = result
+                    _quote_cache[ticker] = (result, datetime.now())
                     return result
     except Exception:
         pass
-    # On failure, return last known good price instead of None
     if ticker in _price_cache:
         return _price_cache[ticker]
     return None
+
+
+# ── Hybrid Exit Strategy Selector ──
+# Backtests 6 exit strategies per stock, caches result for the day
+
+_exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, ...}
+
+_EXIT_STRATEGIES = {
+    "Fixed7d":  {"type": "fixed", "days": 7},
+    "Fixed14d": {"type": "fixed", "days": 14},
+    "SMA5":     {"type": "sma", "period": 5},
+    "SMA10":    {"type": "sma", "period": 10},
+    "RSI65":    {"type": "rsi_exit", "threshold": 65},
+    "RSI90":    {"type": "rsi_exit", "threshold": 90},
+}
+
+
+def _backtest_exit_strategies(closes: list) -> Dict[str, Dict]:
+    """Backtest all exit strategies on a stock. Returns {name: {trades, wr, avg_ret, avg_hold, annual}}."""
+    results = {}
+    for name, strat in _EXIT_STRATEGIES.items():
+        trade_rets = []
+        total_days = 0
+
+        for i in range(50, len(closes) - 30):
+            hist = closes[:i + 1]
+            rsi2 = _entry.calc_rsi(hist, 2)
+            sma50 = sum(hist[-50:]) / 50
+            if rsi2 >= 20 or hist[-1] <= sma50:
+                continue
+            entry_price = closes[i]
+
+            if strat["type"] == "fixed":
+                hold = strat["days"]
+                if i + hold < len(closes):
+                    ret = (closes[i + hold] - entry_price) / entry_price * 100
+                    trade_rets.append(ret)
+                    total_days += hold
+
+            elif strat["type"] == "sma":
+                period = strat["period"]
+                exited = False
+                for d in range(1, 31):
+                    if i + d >= len(closes):
+                        break
+                    start_idx = max(0, i + d - period + 1)
+                    sma_slice = closes[start_idx:i + d + 1]
+                    sma_val = sum(sma_slice) / len(sma_slice) if len(sma_slice) >= period else 0
+                    if closes[i + d] > sma_val > 0:
+                        ret = (closes[i + d] - entry_price) / entry_price * 100
+                        trade_rets.append(ret)
+                        total_days += d
+                        exited = True
+                        break
+                if not exited and i + 30 < len(closes):
+                    ret = (closes[i + 30] - entry_price) / entry_price * 100
+                    trade_rets.append(ret)
+                    total_days += 30
+
+            elif strat["type"] == "rsi_exit":
+                threshold = strat["threshold"]
+                exited = False
+                for d in range(1, 31):
+                    if i + d >= len(closes):
+                        break
+                    rsi_now = _entry.calc_rsi(closes[:i + d + 1], 2)
+                    if rsi_now > threshold:
+                        ret = (closes[i + d] - entry_price) / entry_price * 100
+                        trade_rets.append(ret)
+                        total_days += d
+                        exited = True
+                        break
+                if not exited and i + 30 < len(closes):
+                    ret = (closes[i + 30] - entry_price) / entry_price * 100
+                    trade_rets.append(ret)
+                    total_days += 30
+
+        if len(trade_rets) >= 5:
+            avg_ret = sum(trade_rets) / len(trade_rets)
+            wr = sum(1 for r in trade_rets if r > 0) / len(trade_rets) * 100
+            avg_hold = total_days / len(trade_rets)
+            annual = avg_ret * (252 / avg_hold) if avg_hold > 0 else 0
+            results[name] = {
+                "trades": len(trade_rets), "wr": round(wr, 1),
+                "avg_ret": round(avg_ret, 2), "avg_hold": round(avg_hold, 1),
+                "annual": round(annual, 1),
+            }
+    return results
+
+
+def _select_best_exit(ticker: str, closes: list, entry_trades: list, current_rsi: float) -> Dict:
+    """Select the best exit strategy for a stock. Caches for the trading day."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = f"{ticker}_{today}"
+    current_price = closes[-1] if closes else 0
+
+    # Check cache
+    if cache_key in _exit_strategy_cache:
+        cached = _exit_strategy_cache[cache_key]
+        # Re-evaluate trigger with fresh price/RSI
+        return _evaluate_exit_trigger(cached, closes, current_rsi, current_price)
+
+    # Backtest all strategies
+    strat_results = _backtest_exit_strategies(closes)
+
+    if not strat_results:
+        result = {
+            "strategy": "Fixed7d", "wr": 0, "avg_ret": 0, "avg_hold": 7,
+            "triggered": False, "exit_price": 0, "exit_price_pct": 0,
+            "label": "No data",
+        }
+        _exit_strategy_cache[cache_key] = result
+        return result
+
+    # Pick winner by annualized return (capital efficiency)
+    best_name = max(strat_results, key=lambda n: strat_results[n]["annual"])
+    best = strat_results[best_name]
+
+    result = {
+        "strategy": best_name, "wr": best["wr"],
+        "avg_ret": best["avg_ret"], "avg_hold": best["avg_hold"],
+        "all_strategies": strat_results,  # keep for debugging
+    }
+    _exit_strategy_cache[cache_key] = result
+
+    return _evaluate_exit_trigger(result, closes, current_rsi, current_price)
+
+
+def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, current_price: float) -> Dict:
+    """Check if exit condition is triggered RIGHT NOW for the selected strategy."""
+    strategy = cached["strategy"]
+    strat_def = _EXIT_STRATEGIES.get(strategy, {})
+    triggered = False
+    exit_price = 0.0
+
+    if strat_def.get("type") == "sma":
+        period = strat_def["period"]
+        sma_val = sum(closes[-period:]) / period if len(closes) >= period else 0
+        exit_price = round(sma_val, 2)
+        triggered = current_price > sma_val > 0
+
+    elif strat_def.get("type") == "rsi_exit":
+        threshold = strat_def["threshold"]
+        triggered = current_rsi > threshold
+        # For RSI exits: show practical exit price based on avg return from current price
+        # (RSI algebra gives unrealistic numbers like $307 when stock is at $169)
+        avg_ret_pct = cached.get("avg_ret", 0)
+        exit_price = round(current_price * (1 + avg_ret_pct / 100), 2) if current_price > 0 else 0
+
+    elif strat_def.get("type") == "fixed":
+        # Fixed hold: can't determine exit price from technicals alone (need entry_date)
+        # Show expected exit return instead
+        exit_price = round(current_price * (1 + cached.get("avg_ret", 0) / 100), 2)
+        triggered = False  # Determined by days held, checked in signal logic
+
+    exit_price_pct = round((exit_price - current_price) / current_price * 100, 2) if current_price > 0 and exit_price > 0 else 0
+
+    # Build label
+    strat_name = strategy
+    wr = cached.get("wr", 0)
+    avg_ret = cached.get("avg_ret", 0)
+    avg_hold = cached.get("avg_hold", 0)
+
+    if strat_def.get("type") == "sma":
+        label = f"SMA({strat_def['period']}) ${exit_price:.0f} | +{avg_ret:.1f}% WR {wr:.0f}% ~{avg_hold:.0f}d"
+    elif strat_def.get("type") == "rsi_exit":
+        label = f"RSI>{strat_def['threshold']} | +{avg_ret:.1f}% WR {wr:.0f}% ~{avg_hold:.0f}d"
+    else:
+        label = f"Hold {strat_def.get('days', 7)}d | +{avg_ret:.1f}% WR {wr:.0f}%"
+
+    if triggered:
+        label = "EXIT NOW: " + label
+
+    return {
+        "strategy": strat_name, "wr": wr, "avg_ret": avg_ret, "avg_hold": avg_hold,
+        "triggered": triggered, "exit_price": exit_price, "exit_price_pct": exit_price_pct,
+        "label": label,
+    }
 
 
 def _get_technicals(ticker: str) -> Dict:
@@ -105,6 +321,7 @@ def _get_technicals(ticker: str) -> Dict:
     lows = df["Low"].tolist() if "Low" in df.columns else closes
     volumes = df["Volume"].tolist() if "Volume" in df.columns else [0] * len(closes)
 
+    sma10 = _entry.calc_sma(closes, 10)
     sma50 = _entry.calc_sma(closes, 50)
     sma200 = _entry.calc_sma(closes, 200) if len(closes) >= 200 else 0
     rsi2 = _entry.calc_rsi(closes, 2)
@@ -149,6 +366,10 @@ def _get_technicals(ticker: str) -> Dict:
     exit_zone_ret = sum(t["return"] for t in exit_zone_trades_list) / len(exit_zone_trades_list) if exit_zone_trades_list else 0
     exit_zone_wr = sum(1 for t in exit_zone_trades_list if t["win"]) / len(exit_zone_trades_list) * 100 if exit_zone_trades_list else 0
 
+    # Hybrid exit strategy: backtest all strategies per-stock, pick the winner
+    current_price = closes[-1]
+    exit_result = _select_best_exit(ticker, closes, trades, rsi2)
+
     # Sparkline (last 20 closes)
     sparkline = [round(c, 2) for c in closes[-20:]]
 
@@ -163,6 +384,7 @@ def _get_technicals(ticker: str) -> Dict:
     return {
         "rsi2": round(rsi2, 1),
         "rsi14": round(rsi14, 1),
+        "sma10": round(sma10, 2),
         "sma50": round(sma50, 2),
         "sma200": round(sma200, 2),
         "above_sma50": above_sma50,
@@ -180,6 +402,14 @@ def _get_technicals(ticker: str) -> Dict:
         "exit_zone_return": round(exit_zone_ret, 2),
         "exit_zone_wr": round(exit_zone_wr, 1),
         "exit_zone_trades": len(exit_zone_trades_list),
+        "exit_strategy": exit_result["strategy"],
+        "exit_strategy_wr": exit_result["wr"],
+        "exit_strategy_ret": exit_result["avg_ret"],
+        "exit_strategy_hold": exit_result["avg_hold"],
+        "exit_triggered": exit_result["triggered"],
+        "exit_price": exit_result["exit_price"],
+        "exit_price_pct": exit_result["exit_price_pct"],
+        "exit_label": exit_result["label"],
         "sparkline": sparkline,
     }
 
@@ -287,9 +517,14 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
         elif exit_zone_ret < 2.0:
             issues.append(f"Moderate zone return (+{exit_zone_ret:.1f}% at RSI {int(rsi2)})")
 
-    # Determine signal from issues + exit zone analysis
+    # Hybrid exit strategy check
+    exit_triggered = tech.get("exit_triggered", False)
+    exit_strategy = tech.get("exit_strategy", "")
+    if exit_triggered:
+        issues.append(f"Exit triggered ({exit_strategy}: {tech.get('exit_label', '')})")
+
+    # Determine signal from issues + hybrid exit strategy
     critical = [i for i in issues if any(k in i for k in ["Below SMA50", "BEAR regime", "CRASH", "Low WR"])]
-    warnings = [i for i in issues if i not in critical]
 
     if any("CRASH" in i for i in critical):
         signal = "SELL"
@@ -299,28 +534,22 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
         signal = "CAUTION"
     elif len(critical) > 0:
         signal = "CAUTION"
-    elif rsi2 > 80:
-        # Don't assume overbought = sell — use exit zone return (all historical data at this RSI)
-        if exit_zone_trades >= 5 and exit_zone_ret > 3:
-            signal = "HOLD"  # Strong zone return even at overbought
-        elif exit_zone_trades >= 5 and exit_zone_ret > 1:
-            signal = "HOLD"  # Decent zone return
-        elif exit_zone_trades >= 5 and exit_zone_ret <= 1 and exit_zone_wr < 55:
-            signal = "ROTATION"  # Weak expected return at overbought → rotate
-        elif exit_zone_trades < 5:
-            signal = "HOLD"  # Not enough data, default hold
-        else:
-            signal = "OVERBOUGHT"
-    elif rsi2 >= 20:
-        # Mid-range RSI: check exit zone return for rotation signals
-        if exit_zone_trades >= 5 and exit_zone_ret < 1.0 and exit_zone_wr < 55:
-            signal = "ROTATION"  # Weak expected return → consider selling
-        elif rsi2 < 30 and above_sma50 and regime != "BEAR":
-            signal = "BUY"  # Near buy zone
-        else:
+    elif exit_triggered:
+        # Check if RSI re-entered oversold — fresh entry signal overrides exit
+        # Selling + re-buying at same price wastes $3 in fees for nothing
+        exit_strat_ret = tech.get("exit_strategy_ret", 0)
+        zone_ret = tech.get("zone_return", 0)
+        zone_wr = tech.get("zone_wr", 0)
+        zone_trades = tech.get("zone_trades", 0)
+        if rsi2 < 20 and zone_trades >= 5 and zone_ret > exit_strat_ret:
             signal = "HOLD"
+            issues.append(f"Exit suppressed: RSI oversold ({rsi2:.0f}), zone +{zone_ret:.1f}% > exit +{exit_strat_ret:.1f}%")
+        else:
+            signal = "EXIT"
     elif rsi2 < 20 and above_sma50 and regime != "BEAR":
         signal = "BUY"
+    elif rsi2 < 30 and above_sma50 and regime != "BEAR":
+        signal = "BUY"  # Near buy zone
     else:
         signal = "HOLD"
 
@@ -364,6 +593,25 @@ async def get_portfolio():
             # Technicals from cache
             tech = _get_technicals(ticker)
 
+            # Re-evaluate exit trigger with LIVE price (cached uses stale historical close)
+            if tech and tech.get("exit_strategy"):
+                df = _cache.get(ticker, 365)
+                if df is not None and len(df) >= 10:
+                    closes_live = df["Close"].dropna().tolist()
+                    rsi_live = tech.get("rsi2", -1)
+                    live_exit = _evaluate_exit_trigger(
+                        _exit_strategy_cache.get(f"{ticker}_{datetime.now().strftime('%Y-%m-%d')}", tech),
+                        closes_live, rsi_live, live_price
+                    )
+                    old_triggered = tech.get("exit_triggered", False)
+                    tech["exit_triggered"] = live_exit["triggered"]
+                    tech["exit_price"] = live_exit["exit_price"]
+                    tech["exit_price_pct"] = live_exit["exit_price_pct"]
+                    tech["exit_label"] = live_exit["label"]
+                    # Invalidate signal cache if exit trigger state changed
+                    if live_exit["triggered"] != old_triggered and ticker in _signal_cache:
+                        del _signal_cache[ticker]
+
             # Real signal using ATLAS V2 rules + sentiment + analyst + earnings
             signal, issues = await _compute_signal(session, ticker, tech, live_price, day_chg)
 
@@ -388,10 +636,14 @@ async def get_portfolio():
                 current_value=round(value, 2),
                 rsi2=tech.get("rsi2", -1),
                 rsi14=tech.get("rsi14", -1),
+                sma10=tech.get("sma10", 0),
                 sma50=tech.get("sma50", 0),
                 above_sma50=tech.get("above_sma50", True),
+                above_sma10=live_price > tech.get("sma10", 0) if tech.get("sma10", 0) > 0 else False,
                 regime=regime,
-                tier=tech.get("tier", "NONE"),
+                # Tier must reflect live price reality, not stale cached RSI
+                # If exit is triggered (stock bounced), tier is NONE
+                tier="NONE" if tech.get("exit_triggered", False) else tech.get("tier", "NONE"),
                 win_rate=tech.get("win_rate", 0),
                 total_trades=tech.get("total_trades", 0),
                 avg_return=tech.get("avg_return", 0),
@@ -402,6 +654,14 @@ async def get_portfolio():
                 exit_zone_return=tech.get("exit_zone_return", 0),
                 exit_zone_wr=tech.get("exit_zone_wr", 0),
                 exit_zone_trades=tech.get("exit_zone_trades", 0),
+                exit_strategy=tech.get("exit_strategy", ""),
+                exit_strategy_wr=tech.get("exit_strategy_wr", 0),
+                exit_strategy_ret=tech.get("exit_strategy_ret", 0),
+                exit_strategy_hold=tech.get("exit_strategy_hold", 0),
+                exit_triggered=tech.get("exit_triggered", False),
+                exit_price=tech.get("exit_price", 0),
+                exit_price_pct=tech.get("exit_price_pct", 0),
+                exit_label=tech.get("exit_label", ""),
                 sparkline=tech.get("sparkline", []),
                 signal=signal,
                 issues=issues,
@@ -424,11 +684,20 @@ async def get_portfolio():
     total_pnl = total_value - total_cost
     wr_list = [d.win_rate for d in details if d.win_rate > 0]
 
+    # Daily P&L: sum of each position's day change in dollars
+    day_pnl = sum(
+        d.current_value * d.day_change_pct / (100 + d.day_change_pct) if d.day_change_pct != -100 else 0
+        for d in details
+    )
+    day_pnl_pct = (day_pnl / (total_value - day_pnl) * 100) if (total_value - day_pnl) > 0 else 0
+
     summary = PortfolioSummary(
         total_value=round(total_value, 2),
         total_cost=round(total_cost, 2),
         total_pnl=round(total_pnl, 2),
         total_pnl_pct=round(total_pnl / total_cost * 100, 2) if total_cost else 0,
+        day_pnl=round(day_pnl, 2),
+        day_pnl_pct=round(day_pnl_pct, 2),
         position_count=len(details),
         avg_win_rate=round(sum(wr_list) / len(wr_list), 1) if wr_list else 0,
         timestamp=datetime.now().isoformat(),
@@ -499,7 +768,19 @@ async def get_opportunities():
     global _scan_cache, _scan_cache_time, _scan_running
 
     if _scan_cache:
-        return {**_scan_cache, "last_scan": _scan_cache_time.isoformat() if _scan_cache_time else ""}
+        # Overlay live/recent prices on cached scan results
+        result = {**_scan_cache, "last_scan": _scan_cache_time.isoformat() if _scan_cache_time else ""}
+        for opp in result.get("opportunities", []):
+            ticker = opp.get("ticker", "")
+            live = _price_cache.get(ticker)
+            if live and live.get("price", 0) > 0:
+                opp["price"] = round(live["price"], 2)
+            else:
+                # Fallback: latest close from historical cache
+                df = _cache.get(ticker, 365)
+                if df is not None and len(df) >= 50:
+                    opp["price"] = round(float(df["Close"].iloc[-1]), 2)
+        return result
 
     # No cache yet — trigger background scan, return empty placeholder
     if not _scan_running:
@@ -562,20 +843,26 @@ def _backtest_7day(ticker: str) -> dict:
 
 
 def _get_holdings_scores() -> tuple:
-    """Get current portfolio holdings scores using SAME backtest as scanner.
-    Uses variable hold periods to match DeepScanner methodology exactly."""
+    """Get current portfolio holdings scores using hybrid exit strategy.
+    Each holding gets its best exit strategy's return, not fixed 7d."""
     positions = _position_mgr._get_open_positions_sync()
     holdings_scores = {}
     for pos in positions:
-        bt = _backtest_7day(pos["ticker"])
-        wr = bt.get("win_rate", 0)
-        avg_ret = bt.get("avg_return", 0)
-        if wr > 0:
-            score = avg_ret * wr / 100
-            holdings_scores[pos["ticker"]] = {
+        ticker = pos["ticker"]
+        tech = _get_technicals(ticker)
+        # Use hybrid strategy return if available, fallback to fixed 7d
+        strat_ret = tech.get("exit_strategy_ret", 0) if tech else 0
+        strat_wr = tech.get("exit_strategy_wr", 0) if tech else 0
+        if strat_ret == 0 or strat_wr == 0:
+            bt = _backtest_7day(ticker)
+            strat_wr = bt.get("win_rate", 0)
+            strat_ret = bt.get("avg_return", 0)
+        if strat_wr > 0:
+            score = strat_ret * strat_wr / 100
+            holdings_scores[ticker] = {
                 "score": round(score, 2),
-                "zone_return": avg_ret,
-                "win_rate": wr,
+                "zone_return": strat_ret,
+                "win_rate": strat_wr,
             }
     worst_ticker = min(holdings_scores, key=lambda k: holdings_scores[k]["score"]) if holdings_scores else ""
     worst_score = holdings_scores[worst_ticker]["score"] if worst_ticker else 0
@@ -765,6 +1052,12 @@ async def _run_scan() -> Dict:
                         await asyncio.sleep(1.1)  # Finnhub rate limit
                     except Exception as e:
                         print(f"[Scan] Earnings check failed for {opp.ticker}: {e}")
+
+        # Update prices with live quotes (scan uses stale historical close)
+        for opp in opportunities:
+            live = _price_cache.get(opp.ticker)
+            if live and live.get("price", 0) > 0:
+                opp.price = round(live["price"], 2)
 
         # Sort: upgrades first (stocks that beat holdings), then by score
         opportunities.sort(key=lambda x: (x.is_upgrade, x.score), reverse=True)
@@ -1017,11 +1310,18 @@ async def analyze_stock(ticker: str):
     # 2. 7-day fixed hold backtest
     bt = _backtest_7day(ticker)
 
-    # 3. Live quote
+    # 3. Live quote (fall back to latest historical close if market closed)
     async with aiohttp.ClientSession() as session:
         quote = await _get_finnhub_quote(session, ticker)
         live_price = quote["price"] if quote else 0
         day_chg = quote["day_chg"] if quote else 0
+        if live_price <= 0:
+            # Market closed or Finnhub down — use latest close from cache
+            df_fallback = _cache.get(ticker, 365)
+            if df_fallback is not None and len(df_fallback) >= 2:
+                live_price = float(df_fallback["Close"].iloc[-1])
+                prev_close = float(df_fallback["Close"].iloc[-2])
+                day_chg = round(((live_price - prev_close) / prev_close) * 100, 2) if prev_close > 0 else 0
 
         # 4. Earnings check
         earnings_date = None
@@ -1092,6 +1392,39 @@ async def analyze_stock(ticker: str):
     if exit_zt >= 5 and exit_zr < 1.0 and exit_zwr < 55:
         issues.append(f"Weak zone return (+{exit_zr:.1f}%, {exit_zwr:.0f}% WR)")
 
+    # Check if this ticker is a current holding → apply hybrid exit strategy
+    exit_strategy_info = {}
+    try:
+        import sqlite3
+        _pos_db = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+        conn = sqlite3.connect(_pos_db)
+        row = conn.execute("SELECT shares, entry_price FROM positions WHERE ticker=? AND shares>0", (ticker,)).fetchone()
+        conn.close()
+        if row:
+            # Held position: check hybrid exit
+            df_hist = _cache.get(ticker, 365)
+            if df_hist is not None and len(df_hist) >= 50:
+                closes_list = df_hist["Close"].dropna().tolist()
+                bt_data = _backtest_7day(ticker)
+                best_exit = _select_best_exit(ticker, closes_list, bt_data.get("trades", 0) if bt_data else 0, rsi2)
+                if best_exit:
+                    triggered = _evaluate_exit_trigger(best_exit, closes_list, rsi2, live_price)
+                    exit_strategy_info = {
+                        "exit_strategy": best_exit.get("strategy", ""),
+                        "exit_strategy_wr": best_exit.get("wr", 0),
+                        "exit_strategy_ret": best_exit.get("avg_ret", 0),
+                        "exit_strategy_hold": best_exit.get("hold_days", 0),
+                        "exit_triggered": triggered.get("triggered", False),
+                        "exit_price": triggered.get("exit_price", 0),
+                        "exit_label": triggered.get("label", ""),
+                        "entry_price": row[1],
+                        "shares": row[0],
+                    }
+                    if triggered.get("triggered", False):
+                        issues.append(f"Exit triggered ({best_exit.get('strategy', '')}: {triggered.get('label', '')})")
+    except Exception:
+        pass
+
     # Determine action
     has_critical = any(k in str(issues) for k in ["Below SMA50", "BEAR", "Low WR"])
     if has_critical and not above_sma50 and regime == "BEAR":
@@ -1102,6 +1435,16 @@ async def analyze_stock(ticker: str):
         signal = "WAIT"
     elif sentiment_label == "NEGATIVE":
         signal = "WAIT"
+    elif exit_strategy_info.get("exit_triggered", False):
+        # Held position with exit triggered — check RSI override
+        exit_strat_ret = exit_strategy_info.get("exit_strategy_ret", 0)
+        zone_ret = tech.get("zone_return", 0)
+        zone_trades = tech.get("zone_trades", 0)
+        if rsi2 < 20 and zone_trades >= 5 and zone_ret > exit_strat_ret:
+            signal = "HOLD"
+            issues.append(f"Exit suppressed: RSI oversold ({rsi2:.0f}), zone +{zone_ret:.1f}% > exit +{exit_strat_ret:.1f}%")
+        else:
+            signal = "EXIT"
     elif rsi2 < 20 and above_sma50 and regime != "BEAR" and wr >= 55:
         signal = "BUY"
     elif rsi2 < 30 and above_sma50 and regime != "BEAR" and wr >= 55:
@@ -1538,52 +1881,51 @@ async def price_level_monitor():
                 continue
 
             triggered = []
-            async with aiohttp.ClientSession() as session:
-                for pos in positions:
-                    ticker = pos["ticker"]
-                    entry = pos["entry_price"]
-                    shares = pos["shares"]
+            for pos in positions:
+                ticker = pos["ticker"]
+                entry = pos["entry_price"]
+                shares = pos["shares"]
 
-                    quote = await _get_finnhub_quote(session, ticker)
-                    if not quote:
-                        continue
-                    price = quote["price"]
+                # Read from centralized quote cache — NO direct Finnhub calls
+                quote = _price_cache.get(ticker)
+                if not quote:
+                    continue
+                price = quote["price"]
+                if price <= 0:
+                    continue
 
-                    # Get regime for this ticker
-                    tech = _get_technicals(ticker)
-                    regime = tech.get("regime", "BULL")
-                    stop_pct, t1_pct, t2_pct = _exit_targets_by_regime(regime)
+                tech = _get_technicals(ticker)
+                regime = tech.get("regime", "BULL")
+                stop_pct, t1_pct, t2_pct = _exit_targets_by_regime(regime)
 
-                    stop_price = entry * (1 + stop_pct / 100)
-                    target_1 = entry * (1 + t1_pct / 100)
-                    target_2 = entry * (1 + t2_pct / 100)
-                    pnl_pct = (price - entry) / entry * 100
+                stop_price = entry * (1 + stop_pct / 100)
+                target_1 = entry * (1 + t1_pct / 100)
+                target_2 = entry * (1 + t2_pct / 100)
+                pnl_pct = (price - entry) / entry * 100
 
-                    prev_alert = price_alerts.get(ticker)
+                prev_alert = price_alerts.get(ticker)
 
-                    if price <= stop_price and prev_alert != "STOP_LOSS":
-                        triggered.append({
-                            "ticker": ticker, "alert_type": "STOP_LOSS",
-                            "price": price, "level": stop_price,
-                            "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
-                        })
-                        price_alerts[ticker] = "STOP_LOSS"
-                    elif price >= target_2 and prev_alert != "TARGET_2":
-                        triggered.append({
-                            "ticker": ticker, "alert_type": "TARGET_2",
-                            "price": price, "level": target_2,
-                            "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
-                        })
-                        price_alerts[ticker] = "TARGET_2"
-                    elif price >= target_1 and prev_alert not in ("TARGET_1", "TARGET_2"):
-                        triggered.append({
-                            "ticker": ticker, "alert_type": "TARGET_1",
-                            "price": price, "level": target_1,
-                            "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
-                        })
-                        price_alerts[ticker] = "TARGET_1"
-
-                    await asyncio.sleep(0.3)  # Rate limit
+                if price <= stop_price and prev_alert != "STOP_LOSS":
+                    triggered.append({
+                        "ticker": ticker, "alert_type": "STOP_LOSS",
+                        "price": price, "level": stop_price,
+                        "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
+                    })
+                    price_alerts[ticker] = "STOP_LOSS"
+                elif price >= target_2 and prev_alert != "TARGET_2":
+                    triggered.append({
+                        "ticker": ticker, "alert_type": "TARGET_2",
+                        "price": price, "level": target_2,
+                        "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
+                    })
+                    price_alerts[ticker] = "TARGET_2"
+                elif price >= target_1 and prev_alert not in ("TARGET_1", "TARGET_2"):
+                    triggered.append({
+                        "ticker": ticker, "alert_type": "TARGET_1",
+                        "price": price, "level": target_1,
+                        "entry_price": entry, "pnl_pct": pnl_pct, "shares": shares,
+                    })
+                    price_alerts[ticker] = "TARGET_1"
 
             # Persist price alert dedup
             _dedup["price_alerts"] = price_alerts
@@ -1664,3 +2006,46 @@ async def warmup_signal_cache():
                     print(f"[Warmup] {ticker} error: {e}")
                 await asyncio.sleep(0.5)
         print("[Warmup] Signal cache ready")
+
+
+async def quote_refresh_loop():
+    """Centralized quote refresher. Fetches all position quotes every 30s.
+    All other code reads from _quote_cache instead of hitting Finnhub directly.
+    This is the ONLY recurring Finnhub caller — avoids rate limit exhaustion."""
+    await asyncio.sleep(5)  # Wait for app startup
+    print("[QuoteRefresh] Started — refreshing position quotes every 30s")
+
+    while True:
+        try:
+            positions = _position_mgr._get_open_positions_sync()
+            if not positions:
+                await asyncio.sleep(30)
+                continue
+
+            async with aiohttp.ClientSession() as session:
+                for pos in positions:
+                    ticker = pos["ticker"]
+                    quote = await _get_finnhub_quote(session, ticker)
+                    if quote:
+                        # Also fall back to historical if Finnhub returns stale/zero
+                        if quote.get("price", 0) <= 0:
+                            df = _cache.get(ticker, 365)
+                            if df is not None and len(df) >= 2:
+                                close = float(df["Close"].iloc[-1])
+                                prev = float(df["Close"].iloc[-2])
+                                _price_cache[ticker] = {
+                                    "price": close,
+                                    "prev_close": prev,
+                                    "day_chg": round(((close - prev) / prev) * 100, 2) if prev > 0 else 0,
+                                }
+                                _quote_cache[ticker] = (_price_cache[ticker], datetime.now())
+                    await asyncio.sleep(1.2)  # ~50 calls/min max with 5 tickers = safe
+
+            # Log status
+            prices = {t: _price_cache.get(t, {}).get("price", 0) for t in [p["ticker"] for p in positions]}
+            print(f"[QuoteRefresh] Updated: {prices} | API calls: {_finnhub_calls_this_minute}/min")
+
+        except Exception as e:
+            print(f"[QuoteRefresh] Error: {e}")
+
+        await asyncio.sleep(30)

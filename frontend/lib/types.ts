@@ -16,8 +16,10 @@ export interface PositionDetail {
   // Technical
   rsi2: number;
   rsi14: number;
+  sma10: number;
   sma50: number;
   above_sma50: boolean;
+  above_sma10: boolean;
   regime: string;
   tier: string; // EXTREME, STRONG, STANDARD, NONE
   // Backtest
@@ -32,6 +34,16 @@ export interface PositionDetail {
   exit_zone_return: number;
   exit_zone_wr: number;
   exit_zone_trades: number;
+  // Hybrid exit strategy (per-stock optimal)
+  exit_strategy: string;  // e.g. "SMA10", "RSI65", "Fixed14d"
+  exit_strategy_wr: number;
+  exit_strategy_ret: number;
+  exit_strategy_hold: number;
+  exit_triggered: boolean;
+  // Exit price: dynamic level based on selected strategy
+  exit_price: number;
+  exit_price_pct: number;
+  exit_label: string;
   // Signal
   signal: string;
   issues: string[];
@@ -51,6 +63,8 @@ export interface PortfolioSummary {
   total_cost: number;
   total_pnl: number;
   total_pnl_pct: number;
+  day_pnl: number;
+  day_pnl_pct: number;
   position_count: number;
   avg_win_rate: number;
   cash: number;

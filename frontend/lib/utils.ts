@@ -61,6 +61,7 @@ export function signalBg(signal: string): string {
   const s = signal.toUpperCase();
   if (s.includes("BUY")) return "bg-signal-buy/15 text-signal-buy border-signal-buy/30";
   if (s.includes("SELL") || s === "CRASH") return "bg-signal-sell/15 text-signal-sell border-signal-sell/30";
+  if (s === "EXIT") return "bg-orange-500/15 text-orange-400 border-orange-500/30 animate-pulse";
   if (s.includes("CAUTION")) return "bg-amber-500/15 text-amber-400 border-amber-500/30";
   if (s === "ROTATION") return "bg-orange-500/15 text-orange-400 border-orange-500/30";
   if (s === "OVERBOUGHT") return "bg-blue-500/15 text-blue-400 border-blue-500/30";

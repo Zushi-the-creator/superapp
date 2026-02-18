@@ -21,7 +21,7 @@ from macro_policy import (
     adjust_signal_for_macro,
     full_macro_analysis
 )
-from api_v2 import router as v2_router, background_monitor, price_level_monitor, warmup_signal_cache
+from api_v2 import router as v2_router, background_monitor, price_level_monitor, warmup_signal_cache, quote_refresh_loop
 
 # Optional: RAG/LLM (not installed in production slim build)
 try:
@@ -106,6 +106,9 @@ async def startup_event():
 
     # Warmup signal cache so first portfolio request is fast
     asyncio.create_task(warmup_signal_cache())
+
+    # Centralized quote refresh (replaces per-endpoint Finnhub calls)
+    asyncio.create_task(quote_refresh_loop())
 
     print("Backend started successfully!")
 

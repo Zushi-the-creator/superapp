@@ -41,8 +41,10 @@ class PositionDetail(BaseModel):
     # Technical
     rsi2: float = -1
     rsi14: float = -1
+    sma10: float = 0
     sma50: float = 0
     above_sma50: bool = True
+    above_sma10: bool = False
     regime: str = ""
     tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
     # Backtest
@@ -57,6 +59,16 @@ class PositionDetail(BaseModel):
     exit_zone_return: float = 0
     exit_zone_wr: float = 0
     exit_zone_trades: int = 0
+    # Hybrid exit strategy (per-stock optimal, backtested)
+    exit_strategy: str = ""  # e.g. "SMA10", "RSI65", "Fixed14d"
+    exit_strategy_wr: float = 0
+    exit_strategy_ret: float = 0  # avg return per trade
+    exit_strategy_hold: float = 0  # avg hold days
+    exit_triggered: bool = False  # True when exit condition is met NOW
+    # Exit price: dynamic level based on selected strategy
+    exit_price: float = 0
+    exit_price_pct: float = 0  # % from current price to exit price
+    exit_label: str = ""  # e.g. "SMA(10) $180 | +4.8% WR 94%"
     # Signal
     signal: str = "HOLD"
     issues: List[str] = []
@@ -76,6 +88,8 @@ class PortfolioSummary(BaseModel):
     total_cost: float
     total_pnl: float
     total_pnl_pct: float
+    day_pnl: float = 0  # Today's P&L in dollars
+    day_pnl_pct: float = 0  # Today's P&L percentage
     position_count: int
     avg_win_rate: float
     cash: float = 0
