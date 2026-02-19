@@ -20,19 +20,21 @@
 
 ---
 
-## Current Positions (Updated 2026-02-12, Live Data)
+## Current Positions (Updated 2026-02-18, Live Data)
 
 ### USD Portfolio
 
-| Ticker | Shares | Avg Entry | Regime | WR | Zone Ret | Weight |
-|--------|--------|-----------|--------|-----|----------|--------|
-| COHR | 9.3113 | $220.59 | BULL | 90.3% | +7.86% | 39.2% |
-| LRCX | 4.5502 | $220.42 | BULL | 82.4% | +6.78% | 20.6% |
-| ALB | 6.5893 | $162.38 | BULL | 76.3% | +7.75% | 20.6% |
-| BE | 7.1667 | $141.90 | BULL | 76.7% | +10.70% | 19.7% |
+| Ticker | Shares | Avg Entry | Regime | WR | Avg Ret (14d) | SMA50 Buffer | Weight |
+|--------|--------|-----------|--------|-----|---------------|--------------|--------|
+| COHR | 13.8764 | $220.08 | BULL | 94.3% | +11.97% | +14.8% | 36% |
+| BE | 15.6302 | $141.84 | BULL | 82.8% | +24.98% | +26.4% | 28% |
+| CMC | 16.9659 | $78.39 | BULL | 87.5% | +5.43% | +6.3% | 15% |
+| BWA | 19.0987 | $61.47 | BULL | 84.0% | +6.95% | +27.2% | 14% |
+| GHM | 8.4703 | $84.88 | BULL | 88.5% | +10.09% | +15.1% | 8% |
 
 ### ILS Portfolio
 - **SOLD** TA-35 3x ETF on 2026-02-10 for ~+2,871 ILS profit (+14.5%)
+- LUMI.TA: ~10,000 ILS position (entered 2026-02-17)
 - Waiting for TA-35 pullback to ~4,000 to re-enter (RSI < 35 entry signal)
 
 ---
@@ -57,15 +59,31 @@
 | 2026-02-11 | BUY | LRCX (add) | 1.4423 | $336 | -$1.50 |
 | 2026-02-12 | SELL | GOOGL | 3.2039 | $994 | -$1.50 |
 | 2026-02-12 | BUY | COHR (add) | 4.5514 | $992 | -$1.50 |
-| **Total Fees** | | | | | **-$24.00** |
+| 2026-02-13 | SELL | LRCX | 4.5502 | $1,079 | -$1.50 |
+| 2026-02-13 | BUY | COHR (add) | 4.5651 | $1,004 | -$1.50 |
+| 2026-02-13 | BUY | BE (add) | 8.4635 | $1,200 | -$1.50 |
+| 2026-02-13 | BUY | ALB (add) | 5.1978 | $862 | -$1.50 |
+| 2026-02-13 | BUY | GHM | 8.4703 | $719 | -$1.50 |
+| 2026-02-13 | BUY | JOUT | 10.2115 | $498 | -$1.50 |
+| 2026-02-18 | SELL | JOUT | 10.2115 | $500 | -$1.50 |
+| 2026-02-18 | SELL | ALB | 11.78 | $2,032 | -$1.50 |
+| 2026-02-18 | BUY | CMC | 16.9659 | $1,330 | -$1.50 |
+| 2026-02-18 | BUY | BWA | 19.0987 | $1,174 | -$1.50 |
+| **Total Fees** | | | | | **-$33.00** |
 
 ---
 
-## ATLAS V2.2 - Primary Model
+## ATLAS V2.3 - Primary Model (Updated 2026-02-18)
 
-**Location**: `backend/atlas_v2/entry.py`, `backend/atlas_v2/model.py`
+**Location**: `backend/atlas_v2/entry.py`, `backend/atlas_v2/model.py`, `backend/api_v2.py`
 
-### Entry Signal (V2.2 Enhanced)
+### Key V2.3 Changes (Backtested on 467 trades from our portfolio stocks)
+- **14-day hold** replaces 7-day (87.7% WR, +11.29% avg vs 84%, +6.03%)
+- **No profit targets** — they HALVE returns (+5.25% vs +11.29%)
+- **SMA50 buffer** is #1 predictor (20%+ = +9.29% avg vs 0-5% = +2.76%)
+- **Exit selection by avg_ret** not annualized (favors longer holds like Fixed14d)
+
+### Entry Signal (V2.3)
 ```
 REQUIRED: Price > SMA(50) AND RSI(2) < threshold AND Volume > 1.5x avg
 
@@ -75,12 +93,13 @@ Scoring:
 +15 pts: RSI(2) < 20
 +20 pts: Price > SMA(50) (REQUIRED)
 +10 pts: Price > SMA(200)
-+10 pts: Volume > 1.5x (REQUIRED in V2.2)
++10 pts: Volume > 1.5x (REQUIRED in V2.3)
 +10 pts: RSI(14) < 40
++15 pts: SMA50 buffer > 15% (NEW — strongest predictor)
 -20 pts: Trend strength > 25%
 ```
 
-### V2.2 VETO Filters
+### V2.3 VETO Filters
 | Filter | Condition | Action |
 |--------|-----------|--------|
 | Analyst Target | Price > target | VETO - overvalued |
@@ -98,12 +117,12 @@ Scoring:
 | WR 55-60% | WARNING | Small position only |
 | Trades < 10 | CRITICAL | Insufficient sample |
 
-### Exit by Regime
-| Regime | Stop | Target | Hold Days |
-|--------|------|--------|-----------|
-| BULL | -8% | +10/+20% | 3 days |
-| SIDEWAYS | -5% | +5% | 5 days |
-| BEAR | -4% | +3% | 7 days |
+### Exit Strategy (V2.3 — backtested optimal)
+- **Hold period**: Fixed 14 days (replaces variable 7-day)
+- **No profit targets**: Let positions run full 14 days
+- **Exit selection**: By absolute avg_ret (not annualized)
+- **Stop loss**: -8% (BULL), -5% (SIDEWAYS), -4% (BEAR)
+- **SMA50 buffer weighting**: Higher buffer = stronger signal
 
 ---
 

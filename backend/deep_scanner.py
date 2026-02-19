@@ -12,7 +12,7 @@ Usage:
 Architecture:
     Phase 0: Finviz discovery - find ALL oversold US stocks (>300M cap) from entire market
     Phase 1: Read from SQLite cache (instant) - populate via Tiingo if missing
-    Phase 2: RSI(2) filter + deep backtest (7-day forward, zone returns)
+    Phase 2: RSI(2) filter + deep backtest (14-day forward, zone returns)
     Phase 3: Validate top 15 (Finviz analyst + Google News sentiment + earnings)
 """
 
@@ -110,8 +110,13 @@ class ScanResult:
     zone_trades: int
     zone_win_rate: float
     volume_ratio: float = 0.0  # current vol / 20-day avg vol
-    hold_days: int = 7  # variable hold period based on RSI
+    hold_days: int = 14  # 14-day hold (backtested optimal)
     tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
+    # ML-discovered features (SHAP importance ranked #1, #2, #5)
+    low52_dist: float = 0.0   # % distance from 52-week low (closer=better bounce)
+    atr_pct: float = 0.0      # ATR(14) as % of price (higher volatility=bigger bounce)
+    ret20: float = 0.0        # 20-day price momentum %
+    ml_score: float = 0.0     # composite score combining zone_return + ML features
     # Phase 3 (filled later for top candidates)
     analyst_consensus: str = ""
     analyst_target: float = 0.0
@@ -136,8 +141,8 @@ class DeepScanner:
 
     @staticmethod
     def _hold_days(rsi: float) -> int:
-        """Fixed 7-day hold period — matches ATLAS V2 core model that found COHR/BE/ALB/VRT."""
-        return 7
+        """Fixed 14-day hold period — backtested: 87.7% WR, +11.29% avg (vs 7d: 84%, +6.03%)."""
+        return 14
 
     def __init__(self):
         self.entry_engine = EntryEngine()
@@ -299,7 +304,7 @@ class DeepScanner:
         # Full backtest: entries where RSI(2) < 20 AND price > SMA(50)
         # Uses variable hold days per-entry based on RSI at entry time
         trades = []
-        for i in range(50, len(closes) - 7):  # ensure room for max hold
+        for i in range(50, len(closes) - 14):  # ensure room for 14-day hold
             hist_closes = closes[:i+1]
             hist_rsi2 = self.entry_engine.calc_rsi(hist_closes, 2)
             hist_sma50 = self.entry_engine.calc_sma(hist_closes, 50)
@@ -329,7 +334,7 @@ class DeepScanner:
         zone_label = f"{zone_lo}-{zone_hi}"
 
         zone_trades_list = []
-        for i in range(50, len(closes) - 7):
+        for i in range(50, len(closes) - 14):
             hist_closes = closes[:i+1]
             hist_rsi2 = self.entry_engine.calc_rsi(hist_closes, 2)
             hist_sma50 = self.entry_engine.calc_sma(hist_closes, 50)
@@ -365,6 +370,29 @@ class DeepScanner:
         is_strong = rsi2 < 20 and (rsi14 < 40 or vol_spike)
         tier = "EXTREME" if is_extreme else ("STRONG" if is_strong else "STANDARD")
 
+        # ML-discovered features (SHAP importance: #1, #2, #5)
+        # 1. Distance from 52-week low (closer = bigger bounce, SHAP weight 5.05)
+        low_52w = min(lows[-252:]) if len(lows) >= 252 else min(lows)
+        low52_dist = ((price / low_52w) - 1) * 100 if low_52w > 0 else 0
+
+        # 2. ATR(14) as % of price (higher volatility = bigger bounce, SHAP weight 3.64)
+        atr_values = []
+        for j in range(max(1, len(closes) - 14), len(closes)):
+            tr = max(highs[j] - lows[j],
+                     abs(highs[j] - closes[j - 1]),
+                     abs(lows[j] - closes[j - 1]))
+            atr_values.append(tr)
+        atr_pct = (sum(atr_values) / len(atr_values) / price * 100) if atr_values and price > 0 else 0
+
+        # 3. 20-day momentum (positive = helps, SHAP weight 0.77)
+        ret20 = ((price / closes[-21]) - 1) * 100 if len(closes) >= 21 else 0
+
+        # Composite ML score: zone_return weighted by ML feature bonuses
+        # Normalized: low52_dist < 20% is ideal (stock near lows), atr_pct > 3% is ideal (volatile)
+        low52_bonus = max(0, 1 - low52_dist / 100)  # 0-1, higher when closer to 52w low
+        atr_bonus = min(atr_pct / 5, 1.5)           # 0-1.5, higher for volatile stocks
+        ml_score = zone_return * (1 + 0.3 * low52_bonus + 0.2 * atr_bonus)
+
         return ScanResult(
             ticker=ticker, price=round(price, 2), rsi2=round(rsi2, 1),
             rsi_zone=zone_label, sma50=round(sma50, 2), above_sma50=True,
@@ -376,6 +404,10 @@ class DeepScanner:
             volume_ratio=round(vol_ratio, 2),
             hold_days=hold_days,
             tier=tier,
+            low52_dist=round(low52_dist, 1),
+            atr_pct=round(atr_pct, 2),
+            ret20=round(ret20, 1),
+            ml_score=round(ml_score, 2),
             source=source,
         )
 
@@ -393,7 +425,7 @@ class DeepScanner:
             if result:
                 results.append(result)
 
-        results.sort(key=lambda r: r.zone_return, reverse=True)
+        results.sort(key=lambda r: r.ml_score, reverse=True)
         self.stats["candidates"] = len(results)
 
         print(f"  Phase 2 complete: {len(results)} stocks passed all filters")
@@ -562,15 +594,16 @@ def print_results(results: List[ScanResult], top_n: int = 30):
         return
 
     show = results[:top_n]
-    print(f"\n{'='*140}")
-    print(f"  TOP {len(show)} STOCKS - Sorted by Zone Expected Return")
-    print(f"{'='*140}")
+    print(f"\n{'='*170}")
+    print(f"  TOP {len(show)} STOCKS - Sorted by ML Score (Zone Return × Feature Bonuses)")
+    print(f"{'='*170}")
     print(f"{'#':<3} {'Ticker':<7} {'Price':>8} {'RSI':>6} {'Zone':>6} "
           f"{'WR%':>6} {'Tr':>4} {'AvgRet':>8} {'ZnRet':>7} {'ZnTr':>5} "
+          f"{'52wL%':>6} {'ATR%':>5} {'20dM':>6} {'MLsc':>6} "
           f"{'Vol':>5} {'Hd':>3} "
           f"{'Regime':<9} {'Analyst':<10} {'Target':>7} {'Up%':>6} "
-          f"{'Sent':<9} {'Src':<8} {'St':<5}")
-    print("-" * 140)
+          f"{'Sent':<9} {'Src':<5} {'St':<5}")
+    print("-" * 170)
 
     for i, r in enumerate(show, 1):
         st = "VETO" if r.vetoed else "BUY"
@@ -579,20 +612,21 @@ def print_results(results: List[ScanResult], top_n: int = 30):
         print(f"{i:<3} {r.ticker:<7} {r.price:>8.2f} {r.rsi2:>6.1f} {r.rsi_zone:>6} "
               f"{r.win_rate:>5.1f}% {r.trades:>4} {r.avg_return:>7.2f}% "
               f"{r.zone_return:>6.2f}% {r.zone_trades:>5} "
+              f"{r.low52_dist:>5.1f}% {r.atr_pct:>5.2f} {r.ret20:>+5.1f}% {r.ml_score:>6.2f} "
               f"{vol_s:>5} {r.hold_days:>3} "
               f"{r.regime:<9} {(r.analyst_consensus or '-'):<10} "
               f"{'$'+str(int(r.analyst_target)) if r.analyst_target else '-':>7} "
               f"{str(round(r.analyst_upside,1))+'%' if r.analyst_upside else '-':>6} "
-              f"{(r.sentiment_label or '-'):<9} {src:<8} {st:<5}")
+              f"{(r.sentiment_label or '-'):<9} {src:<5} {st:<5}")
 
     valid = [r for r in show if not r.vetoed]
     if valid:
         print(f"\n  TOP BUY CANDIDATES:")
         for r in valid[:5]:
             vol_s = f"Vol {r.volume_ratio:.1f}x" if r.volume_ratio > 0 else "Vol N/A"
-            print(f"    {r.ticker}: +{r.zone_return:.2f}% zone return | "
+            print(f"    {r.ticker}: ML={r.ml_score:.2f} | +{r.zone_return:.2f}% zone | "
                   f"WR {r.win_rate:.1f}% | {r.regime} | RSI={r.rsi2:.1f} | "
-                  f"Hold {r.hold_days}d | {vol_s} | "
+                  f"52wL={r.low52_dist:.0f}% | ATR={r.atr_pct:.1f}% | 20d={r.ret20:+.1f}% | "
                   f"{r.analyst_consensus or 'N/A'} | {r.sentiment_label or 'N/A'}")
 
 

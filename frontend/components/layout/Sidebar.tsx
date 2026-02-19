@@ -3,12 +3,14 @@
 import {
   BarChart3,
   History,
+  Landmark,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { TabId } from "@/lib/types";
 
 const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
-  { id: "portfolio", label: "Portfolio", icon: BarChart3 },
+  { id: "portfolio", label: "USD Portfolio", icon: BarChart3 },
+  { id: "portfolio-ils", label: "ILS Portfolio", icon: Landmark },
   { id: "history", label: "History", icon: History },
 ];
 

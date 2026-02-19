@@ -151,11 +151,27 @@ function PositionRow({
               )}>
                 {pos.exit_strategy}
               </span>
-              {pos.exit_price > 0 && (
+              {pos.exit_strategy?.startsWith("RSI") ? (
+                <div className={cn("text-[10px]", pos.exit_triggered ? "text-signal-sell" : "text-neutral-500")}>
+                  now {pos.rsi2?.toFixed(0)}
+                </div>
+              ) : pos.exit_strategy === "Stop8T10" ? (
+                <div className="text-[10px] text-neutral-500">
+                  -{8}% / +{10}%
+                </div>
+              ) : pos.exit_strategy === "Trail5" ? (
+                <div className="text-[10px] text-neutral-500">
+                  {pos.exit_price > 0 ? formatCurrency(pos.exit_price) : "5% trail"}
+                </div>
+              ) : pos.exit_strategy?.startsWith("Fixed") ? (
+                <div className="text-[10px] text-neutral-500">
+                  +{pos.exit_strategy_ret?.toFixed(1)}% avg
+                </div>
+              ) : pos.exit_price > 0 ? (
                 <div className={cn("text-[10px]", pos.exit_triggered ? "text-signal-sell" : "text-neutral-500")}>
                   {formatCurrency(pos.exit_price)}
                 </div>
-              )}
+              ) : null}
             </div>
           ) : (
             <span className="text-neutral-600 text-xs">—</span>
@@ -186,7 +202,7 @@ function PositionRow({
               <div>
                 <span className="text-neutral-500">SMA50</span>
                 <div className={cn("font-medium", pos.above_sma50 ? "text-signal-buy" : "text-signal-sell")}>
-                  {formatCurrency(pos.sma50)} ({pos.above_sma50 ? "ABOVE" : "BELOW"})
+                  {formatCurrency(pos.sma50)} ({pos.sma50_buffer > 0 ? `+${pos.sma50_buffer.toFixed(1)}%` : `${pos.sma50_buffer?.toFixed(1)}%`})
                 </div>
               </div>
               <div>
@@ -261,6 +277,18 @@ function PositionRow({
                           : "text-amber-400/60"
                       )}>
                         {formatCurrency(pos.exit_price)}
+                        <span className="text-[10px] ml-1">
+                          +{pos.exit_strategy_ret?.toFixed(1)}% WR {pos.exit_strategy_wr?.toFixed(0)}%
+                        </span>
+                      </div>
+                    ) : pos.exit_strategy?.startsWith("RSI") ? (
+                      <div className={cn(
+                        "font-medium",
+                        pos.exit_triggered
+                          ? "text-signal-sell animate-pulse"
+                          : "text-amber-400/60"
+                      )}>
+                        RSI(2) = {pos.rsi2?.toFixed(0)}
                         <span className="text-[10px] ml-1">
                           +{pos.exit_strategy_ret?.toFixed(1)}% WR {pos.exit_strategy_wr?.toFixed(0)}%
                         </span>

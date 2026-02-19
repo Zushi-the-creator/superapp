@@ -10,28 +10,19 @@ import type {
   HistoryResponse,
 } from "@/lib/types";
 
+interface PollingResult<T> {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+  lastUpdated: Date | null;
+}
+
 interface DataContextType {
-  portfolio: {
-    data: PortfolioResponse | null;
-    loading: boolean;
-    error: string | null;
-    refresh: () => Promise<void>;
-    lastUpdated: Date | null;
-  };
-  scanner: {
-    data: ScanResponse | null;
-    loading: boolean;
-    error: string | null;
-    refresh: () => Promise<void>;
-    lastUpdated: Date | null;
-  };
-  history: {
-    data: HistoryResponse | null;
-    loading: boolean;
-    error: string | null;
-    refresh: () => Promise<void>;
-    lastUpdated: Date | null;
-  };
+  portfolio: PollingResult<PortfolioResponse>;
+  portfolioILS: PollingResult<PortfolioResponse>;
+  scanner: PollingResult<ScanResponse>;
+  history: PollingResult<HistoryResponse>;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
@@ -39,6 +30,12 @@ const DataContext = createContext<DataContextType | null>(null);
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const portfolio = usePolling<PortfolioResponse>({
     fetcher: api.getPortfolio,
+    interval: REFRESH_INTERVALS.portfolio,
+    offHoursInterval: REFRESH_INTERVALS.portfolioOffHours,
+  });
+
+  const portfolioILS = usePolling<PortfolioResponse>({
+    fetcher: api.getILSPortfolio,
     interval: REFRESH_INTERVALS.portfolio,
     offHoursInterval: REFRESH_INTERVALS.portfolioOffHours,
   });
@@ -56,7 +53,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   });
 
   return (
-    <DataContext.Provider value={{ portfolio, scanner, history }}>
+    <DataContext.Provider value={{ portfolio, portfolioILS, scanner, history }}>
       {children}
     </DataContext.Provider>
   );

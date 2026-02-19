@@ -19,6 +19,7 @@ export interface PositionDetail {
   sma10: number;
   sma50: number;
   above_sma50: boolean;
+  sma50_buffer: number; // % above SMA50 (strongest predictor)
   above_sma10: boolean;
   regime: string;
   tier: string; // EXTREME, STRONG, STANDARD, NONE
@@ -244,4 +245,4 @@ export interface ChartData {
   position: { entry_price: number; entry_date: string; shares: number } | null;
 }
 
-export type TabId = "portfolio" | "history";
+export type TabId = "portfolio" | "portfolio-ils" | "history";

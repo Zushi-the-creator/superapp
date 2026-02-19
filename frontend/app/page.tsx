@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { PortfolioTab } from "@/components/dashboard/PortfolioTab";
+import { ILSPortfolioTab } from "@/components/dashboard/ILSPortfolioTab";
 import { HistoryTab } from "@/components/dashboard/HistoryTab";
 import type { TabId } from "@/lib/types";
 
@@ -17,6 +18,7 @@ export default function DashboardPage() {
       />
       <main className="flex-1 overflow-hidden">
         {activeTab === "portfolio" && <PortfolioTab />}
+        {activeTab === "portfolio-ils" && <ILSPortfolioTab />}
         {activeTab === "history" && <HistoryTab />}
       </main>
     </div>

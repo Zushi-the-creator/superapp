@@ -23,6 +23,7 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
   // Portfolio
   getPortfolio: () => fetchJson<PortfolioResponse>("/api/v2/portfolio"),
+  getILSPortfolio: () => fetchJson<PortfolioResponse>("/api/v2/portfolio/ils"),
 
   // Health
   getHealth: () => fetchJson<HealthCheckResponse>("/api/v2/portfolio/health"),

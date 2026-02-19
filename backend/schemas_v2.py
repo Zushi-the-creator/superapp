@@ -44,6 +44,7 @@ class PositionDetail(BaseModel):
     sma10: float = 0
     sma50: float = 0
     above_sma50: bool = True
+    sma50_buffer: float = 0  # % above SMA50 (strongest predictor: 20%+ = +9.29% avg)
     above_sma10: bool = False
     regime: str = ""
     tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
@@ -139,7 +140,12 @@ class ScanOpportunity(BaseModel):
     zone_trades: int
     zone_win_rate: float
     volume_ratio: float = 0
-    hold_days: int = 7
+    hold_days: int = 14
+    # ML-discovered features
+    low52_dist: float = 0  # % distance from 52-week low
+    atr_pct: float = 0     # ATR(14) as % of price
+    ret20: float = 0       # 20-day price momentum %
+    ml_score: float = 0    # composite ML-weighted score
     analyst_consensus: str = ""
     analyst_target: float = 0
     analyst_upside: float = 0
