@@ -35,16 +35,30 @@ export interface PositionDetail {
   exit_zone_return: number;
   exit_zone_wr: number;
   exit_zone_trades: number;
+  days_held: number;  // days since entry
   // Hybrid exit strategy (per-stock optimal)
   exit_strategy: string;  // e.g. "SMA10", "RSI65", "Fixed14d"
   exit_strategy_wr: number;
   exit_strategy_ret: number;
   exit_strategy_hold: number;
+  exit_strategy_target_days: number;  // target hold days (e.g. 21 for Fixed21d)
   exit_triggered: boolean;
+  exit_momentum_override: boolean;  // True when exit overridden (winner still trending)
   // Exit price: dynamic level based on selected strategy
   exit_price: number;
   exit_price_pct: number;
   exit_label: string;
+  // Walk-forward validation (OOS metrics)
+  exit_strategy_oos_wr: number;
+  exit_strategy_is_wr: number;
+  exit_strategy_overfitting: number;  // IS/OOS ratio (>1.5 = overfitted)
+  exit_strategy_validation: string;   // VALID / CAUTION / REJECTED / NO_DATA
+  exit_strategy_oos_ci_lo: number;
+  exit_strategy_oos_ci_hi: number;
+  // Extended hours
+  ext_price: number | null;
+  ext_change_pct: number | null;
+  market_session: string; // PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
   // Signal
   signal: string;
   issues: string[];
@@ -66,9 +80,12 @@ export interface PortfolioSummary {
   total_pnl_pct: number;
   day_pnl: number;
   day_pnl_pct: number;
+  realized_pnl: number;
+  total_fees: number;
   position_count: number;
   avg_win_rate: number;
   cash: number;
+  market_session: string; // PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
   timestamp: string;
 }
 
@@ -124,6 +141,7 @@ export interface ScanOpportunity {
   vetoed: boolean;
   veto_reason: string;
   score: number;
+  wr_tier: string; // TIER1 (80%+), TIER2 (70%+), TIER3 (65%+)
   beats_holdings: string[];
   is_upgrade: boolean;
 }
@@ -133,6 +151,8 @@ export interface HoldingScore {
   score: number;
   zone_return: number;
   win_rate: number;
+  exit_triggered: boolean;
+  signal: string;
 }
 
 export interface ScanResponse {
@@ -219,6 +239,18 @@ export interface StockAnalysis {
   target_2: number;
   sparkline: number[];
   optimal_entries: OptimalEntry[];
+  former_holding: {
+    was_held: boolean;
+    entry_price: number;
+    exit_price: number;
+    exit_date: string;
+    entry_date: string;
+    exit_pnl_pct: number;
+    post_exit_pnl_pct: number;
+    missed_gain_per_share: number;
+    missed_gain_total: number;
+    mistake: boolean;
+  } | null;
 }
 
 export interface ChartCandle {
@@ -245,4 +277,50 @@ export interface ChartData {
   position: { entry_price: number; entry_date: string; shares: number } | null;
 }
 
-export type TabId = "portfolio" | "portfolio-ils" | "history";
+export interface TradePerformance {
+  ticker: string;
+  status: string;
+  entry_date: string;
+  exit_date: string;
+  hold_days: number;
+  entry_price: number;
+  exit_price: number;
+  shares: number;
+  cost: number;
+  value: number;
+  pnl: number;
+  pnl_pct: number;
+  result: string;
+}
+
+export interface DailyPnL {
+  date: string;
+  portfolio_value: number;
+  total_cost: number;
+  pnl: number;
+  pnl_pct: number;
+  positions: number;
+}
+
+export interface PerformanceResponse {
+  trades: TradePerformance[];
+  daily_pnl: DailyPnL[];
+  total_realized: number;
+  total_unrealized: number;
+  total_fees: number;
+  total_deposited: number;
+  realized_pnl_pct: number;
+  tax_rate: number;
+  tax_amount: number;
+  net_realized: number;
+  net_pnl_pct: number;
+  win_count: number;
+  loss_count: number;
+  win_rate: number;
+  avg_win_pct: number;
+  avg_loss_pct: number;
+  best_trade: string;
+  worst_trade: string;
+}
+
+export type TabId = "portfolio" | "opportunities" | "performance" | "history";

@@ -4,6 +4,7 @@ export const REFRESH_INTERVALS = {
   portfolio: 60_000,         // 60 seconds during market hours
   health: 900_000,           // 15 minutes during market hours
   scanner: 900_000,          // 15 minutes during market hours
+  portfolioExtHours: 120_000, // 2 minutes during pre-market / after-hours
   portfolioOffHours: 300_000, // 5 minutes outside market hours
   healthOffHours: 3_600_000,  // 1 hour outside market hours
   scannerOffHours: 300_000,   // 5 minutes outside market hours

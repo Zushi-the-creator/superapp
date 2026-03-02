@@ -1,6 +1,6 @@
 "use client";
 
-import { DollarSign, TrendingUp, Calendar, Layers, Target } from "lucide-react";
+import { DollarSign, TrendingUp, Calendar, Layers, Target, Banknote } from "lucide-react";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import type { PortfolioSummary } from "@/lib/types";
 import { CardSkeleton } from "@/components/shared/Skeleton";
@@ -38,25 +38,19 @@ export function KPICards({
       bg: summary.day_pnl >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
     {
-      label: "Total P&L",
-      value: `${formatCurrency(summary.total_pnl)} (${formatPercent(summary.total_pnl_pct)})`,
-      icon: TrendingUp,
-      color: pnlColor(summary.total_pnl),
-      bg: summary.total_pnl >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
+      label: "Realized P&L",
+      value: `${formatCurrency(summary.realized_pnl ?? 0)}`,
+      sub: summary.total_fees ? `Fees: ${formatCurrency(summary.total_fees)}` : undefined,
+      icon: Banknote,
+      color: pnlColor(summary.realized_pnl ?? 0),
+      bg: (summary.realized_pnl ?? 0) >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
     {
-      label: "Positions",
-      value: summary.position_count.toString(),
-      icon: Layers,
-      color: "text-neutral-200",
-      bg: "bg-neutral-700/30",
-    },
-    {
-      label: "Avg Win Rate",
-      value: `${summary.avg_win_rate.toFixed(1)}%`,
+      label: `${summary.position_count} Positions`,
+      value: `WR ${summary.avg_win_rate.toFixed(0)}%`,
       icon: Target,
-      color: summary.avg_win_rate >= 70 ? "text-signal-buy" : summary.avg_win_rate >= 55 ? "text-amber-400" : "text-signal-sell",
-      bg: summary.avg_win_rate >= 70 ? "bg-signal-buy/10" : summary.avg_win_rate >= 55 ? "bg-amber-500/10" : "bg-signal-sell/10",
+      color: summary.avg_win_rate >= 80 ? "text-signal-buy" : summary.avg_win_rate >= 65 ? "text-amber-400" : "text-signal-sell",
+      bg: summary.avg_win_rate >= 80 ? "bg-signal-buy/10" : summary.avg_win_rate >= 65 ? "bg-amber-500/10" : "bg-signal-sell/10",
     },
   ];
 
@@ -77,6 +71,9 @@ export function KPICards({
           <div className={cn("text-lg font-semibold", card.color)}>
             {card.value}
           </div>
+          {"sub" in card && card.sub && (
+            <div className="text-[10px] text-neutral-500 mt-0.5">{card.sub}</div>
+          )}
         </div>
       ))}
     </div>

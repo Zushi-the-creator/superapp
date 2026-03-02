@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback, memo } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { LivePulse } from "@/components/shared/LivePulse";
@@ -22,12 +22,20 @@ export function PositionsTable({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [chartTicker, setChartTicker] = useState<{ ticker: string; entry: number } | null>(null);
 
+  const handleToggle = useCallback((id: number) => {
+    setExpanded((prev) => (prev === id ? null : id));
+  }, []);
+
+  const handleChartOpen = useCallback((ticker: string, entry: number) => {
+    setChartTicker({ ticker, entry });
+  }, []);
+
   if (loading) return <TableSkeleton rows={4} />;
 
   return (
     <>
-      <div className="rounded-xl border border-neutral-800 overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="rounded-xl border border-neutral-800 overflow-x-auto">
+        <table className="w-full text-sm min-w-[700px]">
           <thead>
             <tr className="border-b border-neutral-800 bg-neutral-900/50">
               <th className="text-left px-4 py-3 text-xs text-neutral-500 font-medium">Ticker</th>
@@ -52,10 +60,8 @@ export function PositionsTable({
                   key={pos.id}
                   pos={pos}
                   isExpanded={expanded === pos.id}
-                  onToggle={() =>
-                    setExpanded(expanded === pos.id ? null : pos.id)
-                  }
-                  onChartOpen={() => setChartTicker({ ticker: pos.ticker, entry: pos.entry_price })}
+                  onToggle={handleToggle}
+                  onChartOpen={handleChartOpen}
                   replacement={replacement}
                 />
               );
@@ -76,7 +82,7 @@ export function PositionsTable({
   );
 }
 
-function PositionRow({
+const PositionRow = memo(function PositionRow({
   pos,
   isExpanded,
   onToggle,
@@ -85,21 +91,27 @@ function PositionRow({
 }: {
   pos: PositionDetail;
   isExpanded: boolean;
-  onToggle: () => void;
-  onChartOpen: () => void;
+  onToggle: (id: number) => void;
+  onChartOpen: (ticker: string, entry: number) => void;
   replacement?: ScanOpportunity;
 }) {
+  const handleToggle = useCallback(() => onToggle(pos.id), [onToggle, pos.id]);
+  const handleChartOpen = useCallback(() => onChartOpen(pos.ticker, pos.entry_price), [onChartOpen, pos.ticker, pos.entry_price]);
+
   return (
     <>
       <tr
         className="border-b border-neutral-800/50 hover:bg-neutral-800/30 transition-colors cursor-pointer"
-        onClick={onToggle}
+        onClick={handleToggle}
       >
         <td className="px-4 py-3">
           <div className="flex items-center gap-2">
             <HealthBadge issues={pos.issues} />
             <span className="font-medium text-neutral-100">{pos.ticker}</span>
             <TierBadge tier={pos.tier} />
+          </div>
+          <div className="text-[10px] text-neutral-600 mt-0.5">
+            {pos.entry_date?.slice(5)}
           </div>
         </td>
         <td className="text-right px-3 py-3 text-neutral-400">
@@ -110,11 +122,23 @@ function PositionRow({
             <span className="text-neutral-100 font-medium">
               {formatCurrency(pos.current_price)}
             </span>
-            <LivePulse positive={pos.day_change_pct >= 0} />
+            <LivePulse positive={pos.day_change_pct >= 0} session={pos.market_session} />
           </div>
           <span className={cn("text-xs", pnlColor(pos.day_change_pct))}>
             {formatPercent(pos.day_change_pct)}
           </span>
+          {/* Extended hours price (pre-market or after-hours) */}
+          {pos.ext_price != null && pos.ext_price > 0 && (
+            <div className={cn(
+              "text-[10px] mt-0.5 font-medium",
+              pos.market_session === "PRE_MARKET" ? "text-blue-400" : "text-amber-400"
+            )}>
+              {pos.market_session === "PRE_MARKET" ? "PM" : "AH"} {formatCurrency(pos.ext_price)}{" "}
+              <span className={cn(pnlColor(pos.ext_change_pct ?? 0))}>
+                {(pos.ext_change_pct ?? 0) >= 0 ? "+" : ""}{(pos.ext_change_pct ?? 0).toFixed(2)}%
+              </span>
+            </div>
+          )}
         </td>
         <td className={cn("text-right px-3 py-3 font-medium", pnlColor(pos.pnl))}>
           <div>{formatCurrency(pos.pnl)}</div>
@@ -127,7 +151,7 @@ function PositionRow({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onChartOpen();
+              handleChartOpen();
             }}
             className="group relative inline-flex items-center rounded-lg px-1.5 py-1 hover:bg-neutral-800 transition-colors"
             title={`Open ${pos.ticker} chart`}
@@ -143,41 +167,70 @@ function PositionRow({
         <td className="text-right px-3 py-3 hidden md:table-cell">
           {pos.exit_strategy ? (
             <div>
-              <span className={cn(
-                "font-medium text-xs",
-                pos.exit_triggered
-                  ? "text-signal-sell animate-pulse"
-                  : "text-amber-400"
-              )}>
-                {pos.exit_strategy}
-              </span>
-              {pos.exit_strategy?.startsWith("RSI") ? (
-                <div className={cn("text-[10px]", pos.exit_triggered ? "text-signal-sell" : "text-neutral-500")}>
-                  now {pos.rsi2?.toFixed(0)}
-                </div>
-              ) : pos.exit_strategy === "Stop8T10" ? (
-                <div className="text-[10px] text-neutral-500">
-                  -{8}% / +{10}%
-                </div>
-              ) : pos.exit_strategy === "Trail5" ? (
-                <div className="text-[10px] text-neutral-500">
-                  {pos.exit_price > 0 ? formatCurrency(pos.exit_price) : "5% trail"}
-                </div>
-              ) : pos.exit_strategy?.startsWith("Fixed") ? (
-                <div className="text-[10px] text-neutral-500">
-                  +{pos.exit_strategy_ret?.toFixed(1)}% avg
-                </div>
-              ) : pos.exit_price > 0 ? (
-                <div className={cn("text-[10px]", pos.exit_triggered ? "text-signal-sell" : "text-neutral-500")}>
-                  {formatCurrency(pos.exit_price)}
-                </div>
-              ) : null}
+              <div className="flex items-center justify-end gap-1">
+                <span className={cn(
+                  "font-medium text-xs",
+                  pos.exit_triggered
+                    ? "text-signal-sell animate-pulse"
+                    : pos.exit_momentum_override
+                    ? "text-signal-buy"
+                    : "text-amber-400"
+                )}>
+                  {pos.exit_strategy}
+                </span>
+                {pos.exit_momentum_override && (
+                  <span className="text-[9px] px-1 rounded font-medium bg-signal-buy/20 text-signal-buy">
+                    RIDING
+                  </span>
+                )}
+                {!pos.exit_momentum_override && pos.exit_strategy_validation && (
+                  <span className={cn(
+                    "text-[9px] px-1 rounded font-medium",
+                    pos.exit_strategy_validation === "VALID" ? "bg-signal-buy/20 text-signal-buy" :
+                    pos.exit_strategy_validation === "CAUTION" ? "bg-amber-500/20 text-amber-400" :
+                    pos.exit_strategy_validation === "REJECTED" ? "bg-signal-sell/20 text-signal-sell" :
+                    "bg-neutral-700 text-neutral-400"
+                  )}>
+                    {pos.exit_strategy_validation}
+                  </span>
+                )}
+              </div>
+              {/* Days progress: held / target */}
+              <div className="text-[10px] text-neutral-500">
+                <span className={cn(
+                  "font-medium",
+                  pos.exit_triggered ? "text-signal-sell" :
+                  pos.exit_momentum_override ? "text-signal-buy" :
+                  pos.exit_strategy_target_days > 0 && pos.days_held >= pos.exit_strategy_target_days ? "text-amber-400" :
+                  "text-neutral-400"
+                )}>
+                  {pos.days_held}d
+                </span>
+                {pos.exit_strategy_target_days > 0 && (
+                  <span className="text-neutral-600">/{pos.exit_strategy_target_days}d</span>
+                )}
+                {pos.exit_momentum_override && pos.exit_price > 0 && (
+                  <span className="text-signal-buy ml-1">
+                    trail ${pos.exit_price.toFixed(0)}
+                  </span>
+                )}
+                {!pos.exit_momentum_override && pos.exit_strategy_oos_wr > 0 && (
+                  <span className="ml-1">
+                    OOS {pos.exit_strategy_oos_wr.toFixed(0)}%
+                  </span>
+                )}
+                {pos.exit_strategy_overfitting > 1.3 && (
+                  <span className="text-amber-400 ml-1">
+                    {pos.exit_strategy_overfitting.toFixed(1)}x
+                  </span>
+                )}
+              </div>
             </div>
           ) : (
             <span className="text-neutral-600 text-xs">—</span>
           )}
         </td>
-        <td className="text-center px-3 py-3">
+        <td className="text-center px-3 py-3 whitespace-nowrap">
           <SignalBadge signal={pos.signal || "HOLD"} />
         </td>
         <td className="px-2">
@@ -217,15 +270,51 @@ function PositionRow({
               </div>
               <div>
                 <span className="text-neutral-500">Exit Strategy</span>
-                <div className={cn(
-                  "font-medium",
-                  pos.exit_triggered ? "text-signal-sell animate-pulse" : "text-amber-400"
-                )}>
-                  {pos.exit_strategy || "—"}
+                <div className="flex items-center gap-1.5">
+                  <span className={cn(
+                    "font-medium",
+                    pos.exit_triggered ? "text-signal-sell animate-pulse" : "text-amber-400"
+                  )}>
+                    {pos.exit_strategy || "—"}
+                  </span>
+                  {pos.exit_strategy_target_days > 0 && (
+                    <span className={cn(
+                      "text-xs font-medium",
+                      pos.days_held >= pos.exit_strategy_target_days ? "text-amber-400" : "text-neutral-400"
+                    )}>
+                      ({pos.days_held}/{pos.exit_strategy_target_days}d)
+                    </span>
+                  )}
+                  {pos.exit_strategy_validation && (
+                    <span className={cn(
+                      "text-[9px] px-1 rounded font-medium",
+                      pos.exit_strategy_validation === "VALID" ? "bg-signal-buy/20 text-signal-buy" :
+                      pos.exit_strategy_validation === "CAUTION" ? "bg-amber-500/20 text-amber-400" :
+                      pos.exit_strategy_validation === "REJECTED" ? "bg-signal-sell/20 text-signal-sell" :
+                      "bg-neutral-700 text-neutral-400"
+                    )}>
+                      {pos.exit_strategy_validation}
+                    </span>
+                  )}
                 </div>
                 {pos.exit_label && (
                   <div className="text-[10px] mt-0.5 text-neutral-400">
                     {pos.exit_label}
+                  </div>
+                )}
+                {pos.exit_strategy_oos_wr > 0 && (
+                  <div className="text-[10px] mt-0.5 text-neutral-500">
+                    IS {pos.exit_strategy_is_wr?.toFixed(0)}% → OOS {pos.exit_strategy_oos_wr.toFixed(0)}% WR
+                    {pos.exit_strategy_oos_ci_lo > 0 && (
+                      <span className="ml-1">
+                        (CI: {(pos.exit_strategy_oos_ci_lo * 100).toFixed(0)}-{(pos.exit_strategy_oos_ci_hi * 100).toFixed(0)}%)
+                      </span>
+                    )}
+                    {pos.exit_strategy_overfitting > 1.3 && (
+                      <span className="text-amber-400 ml-1">
+                        {pos.exit_strategy_overfitting.toFixed(2)}x overfit
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -234,6 +323,10 @@ function PositionRow({
                 <div className={cn("font-medium", pnlColor(pos.exit_zone_return))}>
                   {formatPercent(pos.exit_zone_return)} ({pos.exit_zone_wr?.toFixed(0)}% WR, {pos.exit_zone_trades} trades)
                 </div>
+              </div>
+              <div>
+                <span className="text-neutral-500">Entry Date</span>
+                <div className="text-neutral-200 font-medium">{pos.entry_date}</div>
               </div>
               <div>
                 <span className="text-neutral-500">Shares</span>
@@ -248,7 +341,7 @@ function PositionRow({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    onChartOpen();
+                    handleChartOpen();
                   }}
                   className="flex items-center gap-2 px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 transition-colors text-neutral-300 text-xs w-full justify-center"
                 >
@@ -370,4 +463,11 @@ function PositionRow({
       )}
     </>
   );
-}
+}, (prev, next) => {
+  // Only re-render if this row's data actually changed
+  return (
+    prev.isExpanded === next.isExpanded &&
+    prev.pos === next.pos &&
+    prev.replacement === next.replacement
+  );
+});

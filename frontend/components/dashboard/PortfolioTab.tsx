@@ -13,15 +13,18 @@ import { Sparkline } from "@/components/shared/Sparkline";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { ArrowUp, ArrowRightLeft, TrendingUp, Loader2, CheckCircle2, XCircle, Newspaper, ChevronDown, Crosshair } from "lucide-react";
-import { useState } from "react";
+import { useState, useMemo, memo } from "react";
 import type { ScanOpportunity, StockAnalysis } from "@/lib/types";
 
 export function PortfolioTab() {
   const { portfolio, scanner } = useData();
   const { data, loading, lastUpdated, refresh } = portfolio;
 
-  const upgrades = (scanner.data?.opportunities ?? []).filter(
-    (o) => o.is_upgrade && !o.vetoed
+  const upgrades = useMemo(
+    () => (scanner.data?.opportunities ?? []).filter(
+      (o) => o.is_upgrade && !o.vetoed
+    ),
+    [scanner.data?.opportunities]
   );
 
   return (
@@ -71,7 +74,7 @@ export function PortfolioTab() {
   );
 }
 
-function UpgradeSuggestions({
+const UpgradeSuggestions = memo(function UpgradeSuggestions({
   upgrades,
   scannerLoading,
   totalScanned,
@@ -141,9 +144,9 @@ function UpgradeSuggestions({
       )}
     </div>
   );
-}
+});
 
-function UpgradeCard({ opp }: { opp: ScanOpportunity }) {
+const UpgradeCard = memo(function UpgradeCard({ opp }: { opp: ScanOpportunity }) {
   const [expanded, setExpanded] = useState(false);
   const [analysis, setAnalysis] = useState<StockAnalysis | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -258,7 +261,7 @@ function UpgradeCard({ opp }: { opp: ScanOpportunity }) {
       )}
     </div>
   );
-}
+});
 
 function CheckRow({ passed, label }: { passed: boolean; label: string }) {
   return (
@@ -276,7 +279,7 @@ function CheckRow({ passed, label }: { passed: boolean; label: string }) {
 function UpgradeDetail({ analysis, opp }: { analysis: StockAnalysis; opp: ScanOpportunity }) {
   const a = analysis;
 
-  const modelPassed = a.win_rate >= 55 && a.total_trades >= 10 && a.above_sma50;
+  const modelPassed = a.win_rate >= 65 && a.total_trades >= 5 && a.above_sma50;
   const sentimentOk = a.sentiment_label !== "NEGATIVE";
   const earningsOk = !a.earnings_date;
   const allPassed = modelPassed && sentimentOk && earningsOk;
@@ -311,8 +314,8 @@ function UpgradeDetail({ analysis, opp }: { analysis: StockAnalysis; opp: ScanOp
             <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">Model Validation</div>
             <div className="space-y-1">
               <CheckRow passed={a.above_sma50} label={`Price > SMA50 (${formatCurrency(a.sma50)})`} />
-              <CheckRow passed={a.rsi2 < 30} label={`RSI(2) = ${a.rsi2.toFixed(1)} ${a.rsi2 < 20 ? "(oversold)" : a.rsi2 < 30 ? "(low)" : ""}`} />
-              <CheckRow passed={a.win_rate >= 55} label={`Win Rate: ${a.win_rate.toFixed(1)}% (${a.total_trades} trades)`} />
+              <CheckRow passed={a.rsi2 < 10} label={`RSI(2) = ${a.rsi2.toFixed(1)} ${a.rsi2 < 5 ? "(extreme)" : a.rsi2 < 10 ? "(oversold)" : ""}`} />
+              <CheckRow passed={a.win_rate >= 65} label={`Win Rate: ${a.win_rate.toFixed(1)}% (${a.total_trades} trades)`} />
               <CheckRow passed={a.exit_zone_return > 0} label={`Zone Return: ${formatPercent(a.exit_zone_return)} at RSI ${a.rsi_zone}`} />
             </div>
           </div>

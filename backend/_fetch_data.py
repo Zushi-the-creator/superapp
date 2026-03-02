@@ -2,12 +2,13 @@
 """Fetch analyst data, sentiment, and live quotes asynchronously."""
 
 import asyncio
+import os
 import aiohttp
 import feedparser
 from bs4 import BeautifulSoup
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-FINNHUB_TOKEN = "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0"
+FINNHUB_TOKEN = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
 ANALYST_TICKERS = ["TER", "GD"]
 QUOTE_TICKERS = ["COHR", "ALB", "GOOGL", "BE", "LRCX"]
 

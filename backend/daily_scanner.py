@@ -13,6 +13,7 @@ import asyncio
 import urllib.request
 import json
 import math
+import os
 import re
 import argparse
 from datetime import datetime
@@ -22,8 +23,8 @@ from pathlib import Path
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-TWELVE_DATA_KEY = "116ea8557206482e88c40543cec8128b"
-ALPHA_VANTAGE_KEY = "2DYORCDF5694R9MO"
+TWELVE_DATA_KEY = os.environ.get("TWELVEDATA_API_KEY", "116ea8557206482e88c40543cec8128b")
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "2DYORCDF5694R9MO")
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 

@@ -6,6 +6,7 @@ Then runs our hybrid model to find the best opportunities
 
 import asyncio
 import aiohttp
+import os
 import urllib.request
 import json
 import re
@@ -219,8 +220,8 @@ class TrendingStockScanner:
 
     def __init__(self):
         self.discovery = StockDiscovery()
-        self.alpha_key = "2DYORCDF5694R9MO"
-        self.twelve_key = "116ea8557206482e88c40543cec8128b"
+        self.alpha_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "2DYORCDF5694R9MO")
+        self.twelve_key = os.environ.get("TWELVEDATA_API_KEY", "116ea8557206482e88c40543cec8128b")
 
     async def scan_all(self, max_stocks: int = 100) -> List[Dict]:
         """

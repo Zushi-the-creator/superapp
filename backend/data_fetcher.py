@@ -12,6 +12,7 @@ Sources (prioritized by reliability):
 
 import asyncio
 import aiohttp
+import os
 import pandas as pd
 from typing import Optional, Dict
 from datetime import datetime, timedelta
@@ -25,11 +26,11 @@ class MultiSourceDataFetcher:
     """
 
     def __init__(self):
-        self.polygon_key = "StsDd_iAxQgokTTsI9d16T3RQf4tNlDg"
-        self.tiingo_key = "6f632a60d6188ebc1b92221e83d4fba37e2a5c42"
-        self.fmp_key = "PETzQaEtgbqcVO3FWTtLD4lZCPuH58sa"
-        self.twelve_data_key = "116ea8557206482e88c40543cec8128b"
-        self.finnhub_key = "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0"
+        self.polygon_key = os.environ.get("POLYGON_API_KEY", "StsDd_iAxQgokTTsI9d16T3RQf4tNlDg")
+        self.tiingo_key = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
+        self.fmp_key = os.environ.get("FMP_API_KEY", "PETzQaEtgbqcVO3FWTtLD4lZCPuH58sa")
+        self.twelve_data_key = os.environ.get("TWELVEDATA_API_KEY", "116ea8557206482e88c40543cec8128b")
+        self.finnhub_key = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
 
     async def fetch_stock_data(self, ticker: str, period_days: int = 30) -> Optional[pd.DataFrame]:
         """

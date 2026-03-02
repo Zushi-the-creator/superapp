@@ -8,6 +8,7 @@ import type {
   PortfolioResponse,
   ScanResponse,
   HistoryResponse,
+  PerformanceResponse,
 } from "@/lib/types";
 
 interface PollingResult<T> {
@@ -20,9 +21,9 @@ interface PollingResult<T> {
 
 interface DataContextType {
   portfolio: PollingResult<PortfolioResponse>;
-  portfolioILS: PollingResult<PortfolioResponse>;
   scanner: PollingResult<ScanResponse>;
   history: PollingResult<HistoryResponse>;
+  performance: PollingResult<PerformanceResponse>;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
@@ -31,12 +32,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const portfolio = usePolling<PortfolioResponse>({
     fetcher: api.getPortfolio,
     interval: REFRESH_INTERVALS.portfolio,
-    offHoursInterval: REFRESH_INTERVALS.portfolioOffHours,
-  });
-
-  const portfolioILS = usePolling<PortfolioResponse>({
-    fetcher: api.getILSPortfolio,
-    interval: REFRESH_INTERVALS.portfolio,
+    extendedHoursInterval: REFRESH_INTERVALS.portfolioExtHours,
     offHoursInterval: REFRESH_INTERVALS.portfolioOffHours,
   });
 
@@ -52,8 +48,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     offHoursInterval: REFRESH_INTERVALS.healthOffHours,
   });
 
+  const performance = usePolling<PerformanceResponse>({
+    fetcher: api.getPerformance,
+    interval: REFRESH_INTERVALS.health,
+    offHoursInterval: REFRESH_INTERVALS.healthOffHours,
+  });
+
   return (
-    <DataContext.Provider value={{ portfolio, portfolioILS, scanner, history }}>
+    <DataContext.Provider value={{ portfolio, scanner, history, performance }}>
       {children}
     </DataContext.Provider>
   );

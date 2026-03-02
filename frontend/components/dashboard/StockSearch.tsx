@@ -106,6 +106,46 @@ function AnalysisCard({ data }: { data: StockAnalysis }) {
         </div>
       </div>
 
+      {/* Former holding banner */}
+      {data.former_holding && (
+        <div className={cn(
+          "px-4 py-3 border-b text-xs",
+          data.former_holding.mistake
+            ? "bg-signal-sell/10 border-signal-sell/20"
+            : data.former_holding.post_exit_pnl_pct < -5
+            ? "bg-signal-buy/10 border-signal-buy/20"
+            : "bg-amber-500/10 border-amber-500/20"
+        )}>
+          <div className="flex items-center gap-2 mb-1">
+            <span className={cn(
+              "font-bold text-sm",
+              data.former_holding.mistake ? "text-signal-sell" : "text-amber-400"
+            )}>
+              {data.former_holding.mistake ? "PREMATURE EXIT" : "FORMER HOLDING"}
+            </span>
+            <span className="text-neutral-400">
+              Held {data.former_holding.entry_date} → {data.former_holding.exit_date}
+            </span>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="text-neutral-400">
+              Entry {formatCurrency(data.former_holding.entry_price)} → Exit {formatCurrency(data.former_holding.exit_price)}
+              <span className={cn("ml-1 font-medium", pnlColor(data.former_holding.exit_pnl_pct))}>
+                ({data.former_holding.exit_pnl_pct > 0 ? "+" : ""}{data.former_holding.exit_pnl_pct}%)
+              </span>
+            </span>
+            <span className={cn("font-medium", pnlColor(data.former_holding.post_exit_pnl_pct))}>
+              Since exit: {data.former_holding.post_exit_pnl_pct > 0 ? "+" : ""}{data.former_holding.post_exit_pnl_pct}%
+            </span>
+            {data.former_holding.mistake && (
+              <span className="text-signal-sell font-medium">
+                Missed ${Math.abs(data.former_holding.missed_gain_total).toFixed(0)}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Sparkline */}
       {data.sparkline.length > 0 && (
         <div className="px-4 py-2 border-b border-neutral-800/50 flex items-center gap-2">
@@ -117,9 +157,9 @@ function AnalysisCard({ data }: { data: StockAnalysis }) {
       {/* Grid */}
       <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
         {/* Technical */}
-        <Stat label="RSI(2)" value={data.rsi2.toFixed(1)} color={data.rsi2 < 20 ? "text-signal-buy" : data.rsi2 > 80 ? "text-signal-sell" : "text-neutral-200"} />
+        <Stat label="RSI(2)" value={data.rsi2.toFixed(1)} color={data.rsi2 < 10 ? "text-signal-buy" : data.rsi2 > 80 ? "text-signal-sell" : "text-neutral-200"} />
         <Stat label="SMA50" value={`${formatCurrency(data.sma50)} (${data.above_sma50 ? "ABOVE" : "BELOW"})`} color={data.above_sma50 ? "text-signal-buy" : "text-signal-sell"} />
-        <Stat label="Win Rate" value={`${data.win_rate.toFixed(1)}% (${data.total_trades}t)`} color={data.win_rate >= 70 ? "text-signal-buy" : data.win_rate >= 55 ? "text-neutral-200" : "text-signal-sell"} />
+        <Stat label="Win Rate" value={`${data.win_rate.toFixed(1)}% (${data.total_trades}t)`} color={data.win_rate >= 80 ? "text-signal-buy" : data.win_rate >= 65 ? "text-neutral-200" : "text-signal-sell"} />
         <Stat label="Avg Return" value={formatPercent(data.avg_return)} color={pnlColor(data.avg_return)} />
 
         {/* Exit zone */}

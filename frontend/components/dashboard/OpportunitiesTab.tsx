@@ -6,7 +6,7 @@ import { ScoreGauge } from "@/components/shared/ScoreGauge";
 import { RegimeBadge, SignalBadge, TierBadge } from "@/components/shared/Badges";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { api } from "@/lib/api";
-import { RefreshCw, ArrowUp, Zap } from "lucide-react";
+import { RefreshCw, ArrowUp, Zap, ShieldCheck, DollarSign } from "lucide-react";
 import { useState } from "react";
 import type { ScanOpportunity, HoldingScore } from "@/lib/types";
 
@@ -28,26 +28,28 @@ export function OpportunitiesTab() {
   const opportunities = data?.opportunities ?? [];
   const holdingsScores = data?.holdings_scores ?? [];
   const worstHolding = data?.worst_holding ?? "";
-  const worstScore = data?.worst_score ?? 0;
 
   // Filter out current holdings from opportunities
   const holdingTickers = new Set(holdingsScores.map((h) => h.ticker));
   const nonHeld = opportunities.filter((o) => !holdingTickers.has(o.ticker));
 
-  // Upgrades = stocks that beat current holdings
-  const upgrades = nonHeld.filter((o) => o.is_upgrade && !o.vetoed);
+  // Switches = stocks that beat exit-triggered holdings
+  const switches = nonHeld.filter((o) => o.is_upgrade && !o.vetoed);
 
-  // Group non-vetoed, non-held, non-upgrade by V2.2 tier (avoid duplicates with upgrades)
-  const nonVetoed = nonHeld.filter((o) => !o.vetoed && !o.is_upgrade);
-  const extreme = nonVetoed.filter((o) => o.tier === "EXTREME");
-  const strong = nonVetoed.filter((o) => o.tier === "STRONG");
-  const standard = nonVetoed.filter((o) => o.tier === "STANDARD" || o.tier === "NONE");
+  // Buy candidates = all valid non-held stocks ranked by score
+  const buyCandidates = nonHeld
+    .filter((o) => !o.vetoed && !o.is_upgrade)
+    .sort((a, b) => b.score - a.score);
+
+  // Unified recommendations: switches first (action needed), then buy candidates
+  const recommendations = [...switches, ...buyCandidates];
+
   const vetoed = nonHeld.filter((o) => o.vetoed);
 
   return (
     <div className="flex flex-col h-full">
       <Header
-        title="Scanner Opportunities"
+        title="Potential Upgrades"
         lastUpdated={lastUpdated}
         loading={loading}
         onRefresh={refresh}
@@ -57,9 +59,7 @@ export function OpportunitiesTab() {
         <div className="flex items-center gap-4 text-xs text-neutral-500">
           <span>Scanned: {data?.total_scanned?.toLocaleString() ?? 0}</span>
           <span>Passed: {data?.passed ?? 0}</span>
-          {extreme.length > 0 && <span className="text-purple-400">Extreme: {extreme.length}</span>}
-          {strong.length > 0 && <span className="text-blue-400">Strong: {strong.length}</span>}
-          <span>Upgrades: {upgrades.length}</span>
+          <span className="text-signal-buy">Recommendations: {recommendations.length}</span>
           <button
             onClick={handleForceRefresh}
             disabled={refreshing}
@@ -74,7 +74,7 @@ export function OpportunitiesTab() {
         {holdingsScores.length > 0 && (
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
             <h3 className="text-xs text-neutral-500 font-medium mb-2">
-              Current Portfolio Scores (stocks below must beat these)
+              Current Holdings
             </h3>
             <div className="flex flex-wrap gap-3">
               {holdingsScores.map((h: HoldingScore) => (
@@ -82,7 +82,9 @@ export function OpportunitiesTab() {
                   key={h.ticker}
                   className={cn(
                     "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs",
-                    h.ticker === worstHolding
+                    h.exit_triggered
+                      ? "border-signal-sell/40 bg-signal-sell/10 text-signal-sell"
+                      : h.ticker === worstHolding
                       ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
                       : "border-neutral-700 bg-neutral-800/50 text-neutral-300"
                   )}
@@ -92,7 +94,13 @@ export function OpportunitiesTab() {
                   <span className="text-neutral-500">
                     (WR {h.win_rate.toFixed(0)}% / ZR {formatPercent(h.zone_return)})
                   </span>
-                  {h.ticker === worstHolding && (
+                  {h.exit_triggered && (
+                    <span className="text-signal-sell font-bold animate-pulse">EXIT</span>
+                  )}
+                  {!h.exit_triggered && h.signal === "CAUTION" && (
+                    <span className="text-amber-400 font-medium">CAUTION</span>
+                  )}
+                  {!h.exit_triggered && h.ticker === worstHolding && (
                     <span className="text-amber-400 font-medium">WEAKEST</span>
                   )}
                 </div>
@@ -101,20 +109,20 @@ export function OpportunitiesTab() {
           </div>
         )}
 
-        {/* UPGRADE section - stocks that beat current holdings */}
-        {upgrades.length > 0 && (
+        {/* Unified Recommendations — switches + buy candidates in one list */}
+        {recommendations.length > 0 && (
           <>
             <div className="flex items-center gap-2">
               <Zap className="h-4 w-4 text-signal-buy" />
               <h3 className="text-sm font-semibold text-signal-buy">
-                Portfolio Upgrades ({upgrades.length})
+                Recommendations ({recommendations.length})
               </h3>
               <span className="text-xs text-neutral-500">
-                These stocks score higher than current holdings
+                Backtested + validated — ranked by score
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {upgrades.map((opp) => (
+              {recommendations.slice(0, 18).map((opp) => (
                 <OpportunityCard
                   key={opp.ticker}
                   opp={opp}
@@ -125,87 +133,15 @@ export function OpportunitiesTab() {
           </>
         )}
 
-        {upgrades.length === 0 && !loading && (
-          <div className="rounded-xl border border-signal-buy/20 bg-signal-buy/5 p-4 text-center">
-            <p className="text-signal-buy text-sm font-medium">
-              Portfolio is optimal - no stock beats current holdings
+        {recommendations.length === 0 && !loading && (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 text-center">
+            <p className="text-neutral-400 text-sm font-medium">
+              No recommendations right now
             </p>
             <p className="text-xs text-neutral-500 mt-1">
-              Scanned {data?.total_scanned?.toLocaleString() ?? 0} stocks
+              Scanned {data?.total_scanned?.toLocaleString() ?? 0} stocks. Run a full scan for fresh results.
             </p>
           </div>
-        )}
-
-        {/* V2.2 Tier: EXTREME */}
-        {extreme.length > 0 && (
-          <>
-            <div className="flex items-center gap-2 mt-4">
-              <div className="h-2 w-2 rounded-full bg-purple-500 ring-2 ring-purple-500/30" />
-              <h3 className="text-sm font-semibold text-purple-300">
-                V2.2 EXTREME ({extreme.length})
-              </h3>
-              <span className="text-xs text-neutral-500">
-                RSI(2) &lt; 5 + above SMA200 — highest conviction
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {extreme.map((opp) => (
-                <OpportunityCard
-                  key={opp.ticker}
-                  opp={opp}
-                  holdingsScores={holdingsScores}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* V2.2 Tier: STRONG */}
-        {strong.length > 0 && (
-          <>
-            <div className="flex items-center gap-2 mt-4">
-              <div className="h-2 w-2 rounded-full bg-blue-500 ring-2 ring-blue-500/30" />
-              <h3 className="text-sm font-semibold text-blue-300">
-                V2.2 STRONG ({strong.length})
-              </h3>
-              <span className="text-xs text-neutral-500">
-                RSI(2) &lt; 20 + dual-TF or volume spike
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {strong.map((opp) => (
-                <OpportunityCard
-                  key={opp.ticker}
-                  opp={opp}
-                  holdingsScores={holdingsScores}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* V2.2 Tier: STANDARD */}
-        {standard.length > 0 && (
-          <>
-            <div className="flex items-center gap-2 mt-4">
-              <div className="h-2 w-2 rounded-full bg-neutral-500 ring-2 ring-neutral-500/30" />
-              <h3 className="text-sm font-semibold text-neutral-400">
-                V2.2 STANDARD ({standard.length})
-              </h3>
-              <span className="text-xs text-neutral-500">
-                RSI(2) &lt; 20 + above SMA50
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {standard.slice(0, 12).map((opp) => (
-                <OpportunityCard
-                  key={opp.ticker}
-                  opp={opp}
-                  holdingsScores={holdingsScores}
-                />
-              ))}
-            </div>
-          </>
         )}
 
         {/* Vetoed section */}
@@ -260,21 +196,46 @@ function OpportunityCard({
         </div>
       )}
 
-      {/* Upgrade badge */}
-      {opp.is_upgrade && (
+      {/* Action badge */}
+      {opp.is_upgrade ? (
         <div className="flex items-center gap-1.5 mb-2 px-2 py-1 rounded bg-signal-buy/15 w-fit">
           <ArrowUp className="h-3 w-3 text-signal-buy" />
+          <span className="text-xs font-medium text-signal-sell">
+            SELL {opp.beats_holdings.join(", ")}
+          </span>
+          <span className="text-xs text-neutral-500">→</span>
           <span className="text-xs font-medium text-signal-buy">
-            BEATS {opp.beats_holdings.join(", ")}
+            BUY {opp.ticker}
           </span>
         </div>
-      )}
+      ) : !opp.vetoed ? (
+        <div className="flex items-center gap-1.5 mb-2 px-2 py-1 rounded bg-purple-500/15 w-fit">
+          <DollarSign className="h-3 w-3 text-purple-400" />
+          <span className="text-xs font-medium text-purple-300">
+            BUY WITH CASH
+          </span>
+        </div>
+      ) : null}
 
       <div className="flex items-start justify-between mb-3">
         <div>
           <div className="flex items-center gap-2">
             <span className="font-semibold text-neutral-100">{opp.ticker}</span>
             <TierBadge tier={opp.tier} />
+            {opp.wr_tier && (
+              <span
+                className={cn(
+                  "px-1.5 py-0.5 rounded text-[10px] font-bold",
+                  opp.wr_tier === "TIER1"
+                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                    : opp.wr_tier === "TIER2"
+                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                    : "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                )}
+              >
+                {opp.wr_tier === "TIER1" ? "WR 80%+" : opp.wr_tier === "TIER2" ? "WR 70%+" : "WR 65%+"}
+              </span>
+            )}
             <RegimeBadge regime={opp.regime} />
           </div>
           <span className="text-sm text-neutral-400">
@@ -284,7 +245,7 @@ function OpportunityCard({
         <ScoreGauge value={opp.win_rate} size={54} />
       </div>
 
-      <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+      <div className="grid grid-cols-3 gap-2 text-xs mb-3">
         <div>
           <span className="text-neutral-500">Zone Return</span>
           <div className={cn("font-medium", pnlColor(opp.zone_return))}>
@@ -298,18 +259,38 @@ function OpportunityCard({
           </div>
         </div>
         <div>
-          <span className="text-neutral-500">Hold</span>
-          <div className="text-neutral-200">{opp.hold_days}d</div>
+          <span className="text-neutral-500">RSI(2)</span>
+          <div className="text-neutral-200 font-medium">
+            {opp.rsi2.toFixed(0)}
+          </div>
         </div>
         <div>
           <span className="text-neutral-500">Score</span>
-          <div className={cn("font-medium", opp.is_upgrade ? "text-signal-buy" : "text-neutral-200")}>
+          <div className={cn("font-medium", opp.is_upgrade ? "text-signal-buy" : "text-purple-300")}>
             {opp.score.toFixed(2)}
           </div>
         </div>
+        <div>
+          <span className="text-neutral-500">Hold</span>
+          <div className="text-neutral-200">{opp.hold_days}d</div>
+        </div>
+        {opp.analyst_target > 0 && (
+          <div>
+            <span className="text-neutral-500">Target</span>
+            <div className={cn("font-medium", opp.analyst_upside > 0 ? "text-signal-buy" : "text-signal-sell")}>
+              {formatCurrency(opp.analyst_target)} ({opp.analyst_upside > 0 ? "+" : ""}{opp.analyst_upside.toFixed(0)}%)
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="flex items-center gap-2 text-xs">
+      <div className="flex items-center gap-2 text-xs flex-wrap">
+        {(opp.analyst_consensus || opp.sentiment_label) && (
+          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[10px]">
+            <ShieldCheck className="h-3 w-3" />
+            Validated
+          </span>
+        )}
         {opp.analyst_consensus && (
           <SignalBadge signal={opp.analyst_consensus} />
         )}

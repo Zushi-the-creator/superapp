@@ -25,9 +25,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'stock_cache.db')
-POLYGON_KEY = os.environ.get("POLYGON_API_KEY", "StsDd_iAxQgokTTsI9d16T3RQf4tNlDg")
-TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
-FMP_KEY = os.environ.get("FMP_API_KEY", "PETzQaEtgbqcVO3FWTtLD4lZCPuH58sa")
+POLYGON_KEY = os.environ.get("POLYGON_API_KEY", "")
+TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "")
+FMP_KEY = os.environ.get("FMP_API_KEY", "")
 
 
 class DataCache:
@@ -35,8 +35,18 @@ class DataCache:
 
     def __init__(self, db_path: str = DB_PATH):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.db_path = db_path
+        self._local = __import__('threading').local()
         self._create_tables()
+
+    @property
+    def conn(self):
+        """Thread-local SQLite connection — safe for concurrent access from asyncio executor threads."""
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA busy_timeout=5000")
+        return self._local.conn
 
     def _create_tables(self):
         self.conn.execute('''
@@ -79,6 +89,36 @@ class DataCache:
         df['Date'] = pd.to_datetime(df['Date'])
         df = df.set_index('Date')
         return df
+
+    def get_bulk(self, tickers: List[str], days: int = 365) -> Dict[str, pd.DataFrame]:
+        """Bulk read cached data for many tickers - single SQL query, much faster than individual reads."""
+        cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        upper_tickers = [t.upper() for t in tickers]
+
+        # Single bulk query
+        placeholders = ','.join(['?'] * len(upper_tickers))
+        rows = self.conn.execute(
+            f'SELECT ticker, date, open, high, low, close, volume FROM daily_prices '
+            f'WHERE ticker IN ({placeholders}) AND date >= ? ORDER BY ticker, date',
+            upper_tickers + [cutoff]
+        ).fetchall()
+
+        # Group by ticker
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for r in rows:
+            grouped[r[0]].append(r[1:])  # (date, open, high, low, close, volume)
+
+        result = {}
+        for ticker, data_rows in grouped.items():
+            if len(data_rows) < 50:
+                continue
+            df = pd.DataFrame(data_rows, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+            df['Date'] = pd.to_datetime(df['Date'])
+            df = df.set_index('Date')
+            result[ticker] = df
+
+        return result
 
     def get_cached_tickers(self) -> List[str]:
         """List all tickers in cache."""
@@ -163,7 +203,8 @@ class DataCache:
             async with session.get(url, params=params, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=12)) as resp:
                 if resp.status == 429:
-                    return "RATE_LIMITED"
+                    print(f"[Tiingo] Rate limited for {ticker}")
+                    return None
                 if resp.status != 200:
                     return None
                 data = await resp.json()
@@ -204,7 +245,8 @@ class DataCache:
             async with session.get(url, params=params,
                                    timeout=aiohttp.ClientTimeout(total=12)) as resp:
                 if resp.status == 429:
-                    return "RATE_LIMITED"
+                    print(f"[Polygon] Rate limited for {ticker}")
+                    return None
                 if resp.status != 200:
                     return None
                 data = await resp.json()
@@ -236,7 +278,8 @@ class DataCache:
             async with session.get(url, params=params,
                                    timeout=aiohttp.ClientTimeout(total=12)) as resp:
                 if resp.status == 429:
-                    return "RATE_LIMITED"
+                    print(f"[FMP] Rate limited for {ticker}")
+                    return None
                 if resp.status != 200:
                     return None
                 data = await resp.json()
@@ -325,7 +368,7 @@ class DataCache:
 
         # Phase 1: yfinance bulk (fastest - handles most tickers)
         print(f'\n  [Phase 1] yfinance bulk fetch...')
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         yf_batch_size = 20
 
         for i in range(0, len(to_fetch), yf_batch_size):
@@ -475,7 +518,7 @@ class DataCache:
 
         # Phase 1: yfinance bulk (fast - 20 tickers per batch, 5-day window)
         print(f'  [Phase 1] yfinance bulk refresh (5-day window)...')
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         batch_size = 20
 
         for i in range(0, len(stale), batch_size):
@@ -547,7 +590,9 @@ class DataCache:
         return {'refreshed': refreshed, 'failed': len(failed_tickers)}
 
     def close(self):
-        self.conn.close()
+        if hasattr(self._local, 'conn') and self._local.conn:
+            self._local.conn.close()
+            self._local.conn = None
 
 
 # ── CLI ──

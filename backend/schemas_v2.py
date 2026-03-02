@@ -61,15 +61,29 @@ class PositionDetail(BaseModel):
     exit_zone_wr: float = 0
     exit_zone_trades: int = 0
     # Hybrid exit strategy (per-stock optimal, backtested)
+    days_held: int = 0  # days since entry
     exit_strategy: str = ""  # e.g. "SMA10", "RSI65", "Fixed14d"
     exit_strategy_wr: float = 0
     exit_strategy_ret: float = 0  # avg return per trade
     exit_strategy_hold: float = 0  # avg hold days
+    exit_strategy_target_days: int = 0  # target hold days (e.g. 21 for Fixed21d)
     exit_triggered: bool = False  # True when exit condition is met NOW
+    exit_momentum_override: bool = False  # True when exit overridden (winner still trending)
     # Exit price: dynamic level based on selected strategy
     exit_price: float = 0
     exit_price_pct: float = 0  # % from current price to exit price
     exit_label: str = ""  # e.g. "SMA(10) $180 | +4.8% WR 94%"
+    # Walk-forward validation (OOS metrics)
+    exit_strategy_oos_wr: float = 0  # out-of-sample win rate
+    exit_strategy_is_wr: float = 0   # in-sample win rate
+    exit_strategy_overfitting: float = 0  # IS/OOS ratio (>1.5 = overfitted)
+    exit_strategy_validation: str = ""  # VALID / CAUTION / REJECTED / NO_DATA
+    exit_strategy_oos_ci_lo: float = 0  # Wilson CI lower bound
+    exit_strategy_oos_ci_hi: float = 0  # Wilson CI upper bound
+    # Extended hours (pre-market / after-hours)
+    ext_price: Optional[float] = None  # pre-market or after-hours price
+    ext_change_pct: Optional[float] = None  # change % from close
+    market_session: str = "CLOSED"  # PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
     # Signal
     signal: str = "HOLD"
     issues: List[str] = []
@@ -91,9 +105,12 @@ class PortfolioSummary(BaseModel):
     total_pnl_pct: float
     day_pnl: float = 0  # Today's P&L in dollars
     day_pnl_pct: float = 0  # Today's P&L percentage
+    realized_pnl: float = 0  # Total realized P&L from closed positions
+    total_fees: float = 0  # Total trading fees paid
     position_count: int
     avg_win_rate: float
     cash: float = 0
+    market_session: str = "CLOSED"  # PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
     timestamp: str
 
 
@@ -154,6 +171,7 @@ class ScanOpportunity(BaseModel):
     vetoed: bool = False
     veto_reason: str = ""
     score: float = 0  # zone_return * win_rate / 100
+    wr_tier: str = ""  # TIER1 (80%+), TIER2 (70%+), TIER3 (65%+)
     # Portfolio comparison
     beats_holdings: List[str] = []  # tickers in portfolio this stock beats
     is_upgrade: bool = False  # True if beats at least one holding
@@ -164,6 +182,8 @@ class HoldingScore(BaseModel):
     score: float
     zone_return: float
     win_rate: float
+    exit_triggered: bool = False
+    signal: str = "HOLD"
 
 
 class ScanResponse(BaseModel):
@@ -213,3 +233,49 @@ class TradeResult(BaseModel):
     price: float = 0
     total: float = 0
     fee: float = 1.50
+
+
+class TradePerformance(BaseModel):
+    ticker: str
+    status: str  # OPEN or CLOSED
+    entry_date: str
+    exit_date: str  # "" if still open
+    hold_days: int
+    entry_price: float
+    exit_price: float  # current_price if open
+    shares: float
+    cost: float
+    value: float
+    pnl: float
+    pnl_pct: float
+    result: str  # WIN, LOSS, OPEN
+
+
+class DailyPnL(BaseModel):
+    date: str
+    portfolio_value: float
+    total_cost: float
+    pnl: float
+    pnl_pct: float
+    positions: int
+
+
+class PerformanceResponse(BaseModel):
+    trades: List[TradePerformance]
+    daily_pnl: List[DailyPnL]
+    total_realized: float
+    total_unrealized: float
+    total_fees: float
+    total_deposited: float
+    realized_pnl_pct: float
+    tax_rate: float
+    tax_amount: float
+    net_realized: float
+    net_pnl_pct: float
+    win_count: int
+    loss_count: int
+    win_rate: float
+    avg_win_pct: float
+    avg_loss_pct: float
+    best_trade: str
+    worst_trade: str

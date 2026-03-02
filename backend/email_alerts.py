@@ -5,6 +5,7 @@ Email (SMTP/Gmail) + Telegram Bot notifications.
 Sends buy/sell signals, health alerts, upgrade opportunities, and portfolio reports.
 """
 
+import asyncio
 import json
 import os
 import smtplib
@@ -32,11 +33,23 @@ DEFAULT_CONFIG = {
 }
 
 
+_config_cache: Optional[Dict] = None
+_config_cache_time: float = 0
+
 def load_config() -> Dict:
+    """Load config with 60-second in-memory cache to avoid disk reads on every alert."""
+    global _config_cache, _config_cache_time
+    import time
+    now = time.time()
+    if _config_cache and (now - _config_cache_time) < 60:
+        return _config_cache
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
-            return {**DEFAULT_CONFIG, **json.load(f)}
-    return DEFAULT_CONFIG.copy()
+            _config_cache = {**DEFAULT_CONFIG, **json.load(f)}
+    else:
+        _config_cache = DEFAULT_CONFIG.copy()
+    _config_cache_time = now
+    return _config_cache
 
 
 def save_config(config: Dict):
@@ -47,8 +60,8 @@ def save_config(config: Dict):
 
 # ── Email via SMTP ──
 
-def _send_email(subject: str, html_body: str, config: Optional[Dict] = None) -> bool:
-    """Send an email using SMTP."""
+def _send_email_sync(subject: str, html_body: str, config: Optional[Dict] = None) -> bool:
+    """Send an email using SMTP (blocking). Use _send_email() for async callers."""
     cfg = config or load_config()
     if not cfg.get("enabled") or not cfg.get("email"):
         return False
@@ -71,15 +84,20 @@ def _send_email(subject: str, html_body: str, config: Optional[Dict] = None) -> 
         return False
 
 
-def _notify(subject: str, html_body: str, text_msg: str = "", config: Optional[Dict] = None):
-    """Send via email."""
+async def _send_email(subject: str, html_body: str, config: Optional[Dict] = None) -> bool:
+    """Send an email using SMTP in a background thread (non-blocking)."""
+    return await asyncio.to_thread(_send_email_sync, subject, html_body, config)
+
+
+async def _notify(subject: str, html_body: str, text_msg: str = "", config: Optional[Dict] = None):
+    """Send via email (non-blocking)."""
     cfg = config or load_config()
-    return _send_email(subject, html_body, cfg)
+    return await _send_email(subject, html_body, cfg)
 
 
 # ── Signal Alerts ──
 
-def send_signal_alert(signals: List[Dict]):
+async def send_signal_alert(signals: List[Dict]):
     """Send alert for buy/sell/rotation signals."""
     cfg = load_config()
     if not cfg.get("enabled"):
@@ -125,12 +143,12 @@ def send_signal_alert(signals: List[Dict]):
     wa_text = f"📊 *Trading Signal*\n" + "\n".join(lines)
 
     subject = f"{'SELL' if sell_signals else 'BUY'} Signal: {', '.join(s['ticker'] for s in signals)}"
-    _notify(subject, html, wa_text, cfg)
+    await _notify(subject, html, wa_text, cfg)
 
 
 # ── Health Alerts ──
 
-def send_health_alert(alerts: List[Dict]):
+async def send_health_alert(alerts: List[Dict]):
     """Send alert for critical health issues."""
     cfg = load_config()
     if not cfg.get("enabled") or not cfg.get("notify_critical_alerts"):
@@ -168,12 +186,12 @@ def send_health_alert(alerts: List[Dict]):
     lines = [f"🔴 {a.get('ticker','?')}: {a.get('summary','')}" for a in critical]
     wa_text = f"🚨 *CRITICAL Alert*\n" + "\n".join(lines)
 
-    _notify(f"CRITICAL: {len(critical)} alerts", html, wa_text, cfg)
+    await _notify(f"CRITICAL: {len(critical)} alerts", html, wa_text, cfg)
 
 
 # ── Upgrade Alerts ──
 
-def send_upgrade_alert(upgrades: List[Dict]):
+async def send_upgrade_alert(upgrades: List[Dict]):
     """Send alert for upgrade opportunities."""
     cfg = load_config()
     if not cfg.get("enabled") or not cfg.get("notify_upgrades"):
@@ -213,12 +231,12 @@ def send_upgrade_alert(upgrades: List[Dict]):
     lines = [f"🟢 {u['ticker']} (score {u.get('score',0):.1f}, WR {u.get('win_rate',0):.0f}%, +{u.get('zone_return',0):.1f}%) → replaces {', '.join(u.get('beats',[]))}" for u in upgrades]
     wa_text = f"📈 *Upgrade Found*\n" + "\n".join(lines)
 
-    _notify(f"Upgrade: {', '.join(u['ticker'] for u in upgrades)}", html, wa_text, cfg)
+    await _notify(f"Upgrade: {', '.join(u['ticker'] for u in upgrades)}", html, wa_text, cfg)
 
 
 # ── Price Level Alerts (Stop Loss / Target Hit) ──
 
-def send_price_level_alert(alerts: List[Dict]):
+async def send_price_level_alert(alerts: List[Dict]):
     """
     Send alert when price hits stop loss or target.
     Each alert: {ticker, alert_type, price, level, entry_price, pnl_pct, shares}
@@ -287,12 +305,69 @@ def send_price_level_alert(alerts: List[Dict]):
         lines.append(f"{emoji} {a['ticker']} ${a.get('price',0):.2f} ({'+' if a.get('pnl_pct',0) >= 0 else ''}{a.get('pnl_pct',0):.1f}%)")
     wa_text = f"{'🚨' if stop_alerts else '🎯'} *{types}*\n" + "\n".join(lines)
 
-    _notify(f"{types}: {tickers}", html, wa_text, cfg)
+    await _notify(f"{types}: {tickers}", html, wa_text, cfg)
+
+
+# ── Exit Strategy Trigger Alerts ──
+
+async def send_exit_trigger_alert(triggers: List[Dict]):
+    """
+    Send alert when a per-stock exit strategy fires (SMA crossover, RSI threshold, fixed hold, etc.).
+    Each trigger: {ticker, strategy, price, entry_price, pnl_pct, oos_wr, is_wr, overfit, validation, ci_lo, ci_hi, label}
+    """
+    cfg = load_config()
+    if not cfg.get("enabled") or not cfg.get("notify_sell_signals"):
+        return
+    if not triggers:
+        return
+
+    rows = ""
+    for t in triggers:
+        val = t.get("validation", "")
+        val_color = "#10b981" if val == "VALID" else "#f59e0b" if val in ("CAUTION", "LOW_DATA") else "#ef4444"
+        pnl_pct = t.get("pnl_pct", 0)
+        pnl_color = "#10b981" if pnl_pct >= 0 else "#ef4444"
+        overfit = t.get("overfit", 0)
+        overfit_warn = f' <span style="color:#f59e0b">{overfit:.1f}x</span>' if overfit > 1.3 else ""
+        rows += f"""
+        <tr>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#fff;font-weight:bold">{t['ticker']}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#f59e0b;font-weight:bold">{t['strategy']}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#fff">${t.get('price', 0):.2f}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:{pnl_color}">{'+' if pnl_pct >= 0 else ''}{pnl_pct:.1f}%</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:#aaa">OOS {t.get('oos_wr', 0):.0f}%{overfit_warn}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:{val_color};font-weight:bold">{val}</td>
+        </tr>"""
+
+    html = f"""
+    <div style="background:#0a0a0a;padding:24px;font-family:monospace;max-width:650px">
+        <h2 style="color:#f59e0b;margin:0 0 8px">Exit Strategy Triggered</h2>
+        <p style="color:#aaa;margin:0 0 16px;font-size:13px">
+            Walk-forward validated exit conditions met. Review and consider selling.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <tr style="color:#666;font-size:11px">
+                <th style="padding:8px;text-align:left">Ticker</th>
+                <th style="padding:8px;text-align:left">Strategy</th>
+                <th style="padding:8px;text-align:left">Price</th>
+                <th style="padding:8px;text-align:left">P&L</th>
+                <th style="padding:8px;text-align:left">OOS WR</th>
+                <th style="padding:8px;text-align:left">Status</th>
+            </tr>
+            {rows}
+        </table>
+        <p style="color:#666;font-size:11px;margin-top:16px;border-top:1px solid #333;padding-top:12px">
+            {datetime.now().strftime('%Y-%m-%d %H:%M')} | ATLAS V2 Exit Monitor
+        </p>
+    </div>"""
+
+    tickers = ", ".join(t["ticker"] for t in triggers)
+    await _notify(f"EXIT: {tickers}", html, "", cfg)
 
 
 # ── Portfolio Report ──
 
-def send_portfolio_report(positions: List[Dict], buy_signals: List[Dict], upgrades: List[Dict]) -> bool:
+async def send_portfolio_report(positions: List[Dict], buy_signals: List[Dict], upgrades: List[Dict]) -> bool:
     """
     Send full portfolio report with:
     - Current holdings with P&L and signals
@@ -427,12 +502,12 @@ def send_portfolio_report(positions: List[Dict], buy_signals: List[Dict], upgrad
     wa_text = "\n".join(wa_lines)
 
     subject = f"Portfolio: ${total_value:,.0f} ({'+' if total_pnl >= 0 else ''}${total_pnl:,.0f})"
-    return _notify(subject, html, wa_text, cfg)
+    return await _notify(subject, html, wa_text, cfg)
 
 
 # ── Test Functions ──
 
-def send_test_email() -> bool:
+async def send_test_email() -> bool:
     """Send a test email to verify email configuration."""
     html = f"""
     <div style="background:#0a0a0a;padding:24px;font-family:monospace;max-width:600px">
@@ -442,6 +517,6 @@ def send_test_email() -> bool:
             {datetime.now().strftime('%Y-%m-%d %H:%M')} | Trading Dashboard
         </p>
     </div>"""
-    return _send_email("Test - Notifications Working", html)
+    return await _send_email("Test - Notifications Working", html)
 
 

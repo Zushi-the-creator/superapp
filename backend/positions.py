@@ -27,93 +27,104 @@ class PositionManager:
     def _init_database(self):
         """Create database tables if they don't exist"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        # Positions table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                entry_date TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                shares INTEGER NOT NULL,
-                position_type TEXT DEFAULT 'LONG',
-                status TEXT DEFAULT 'OPEN',
-                exit_date TEXT,
-                exit_price REAL,
-                notes TEXT,
-                created_at INTEGER NOT NULL,
-                UNIQUE(ticker, entry_date, entry_price)
-            )
-        """)
-
-        # Allow fractional shares
         try:
-            cursor.execute("SELECT typeof(shares) FROM positions LIMIT 1")
-        except Exception:
-            pass
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            cursor = conn.cursor()
 
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_ticker ON positions(ticker)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status)")
+            # Positions table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    entry_date TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    shares INTEGER NOT NULL,
+                    position_type TEXT DEFAULT 'LONG',
+                    status TEXT DEFAULT 'OPEN',
+                    exit_date TEXT,
+                    exit_price REAL,
+                    notes TEXT,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(ticker, entry_date, entry_price)
+                )
+            """)
 
-        # Transactions table - tracks all buys/sells with fees
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                position_id INTEGER,
-                ticker TEXT NOT NULL,
-                action TEXT NOT NULL,
-                date TEXT NOT NULL,
-                price REAL NOT NULL,
-                shares REAL NOT NULL,
-                total REAL NOT NULL,
-                fee REAL DEFAULT 1.50,
-                realized_pnl REAL,
-                notes TEXT,
-                created_at TEXT
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_ticker ON transactions(ticker)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(date)")
+            # Allow fractional shares
+            try:
+                cursor.execute("SELECT typeof(shares) FROM positions LIMIT 1")
+            except Exception:
+                pass
 
-        # Position history - daily snapshots of position value
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS position_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                position_id INTEGER NOT NULL,
-                date TEXT NOT NULL,
-                current_price REAL NOT NULL,
-                unrealized_pnl REAL NOT NULL,
-                unrealized_pnl_pct REAL NOT NULL,
-                signal TEXT,
-                signal_strength INTEGER,
-                rsi REAL,
-                timestamp INTEGER NOT NULL,
-                FOREIGN KEY(position_id) REFERENCES positions(id),
-                UNIQUE(position_id, date)
-            )
-        """)
+            # Add currency column if missing (backward compat: default USD)
+            try:
+                cursor.execute("ALTER TABLE positions ADD COLUMN currency TEXT DEFAULT 'USD'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_hist_date ON position_history(date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_ticker ON positions(ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status)")
 
-        conn.commit()
-        conn.close()
+            # Transactions table - tracks all buys/sells with fees
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    position_id INTEGER,
+                    ticker TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    shares REAL NOT NULL,
+                    total REAL NOT NULL,
+                    fee REAL DEFAULT 1.50,
+                    realized_pnl REAL,
+                    notes TEXT,
+                    created_at TEXT
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_ticker ON transactions(ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(date)")
+
+            # Position history - daily snapshots of position value
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS position_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    position_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    current_price REAL NOT NULL,
+                    unrealized_pnl REAL NOT NULL,
+                    unrealized_pnl_pct REAL NOT NULL,
+                    signal TEXT,
+                    signal_strength INTEGER,
+                    rsi REAL,
+                    timestamp INTEGER NOT NULL,
+                    FOREIGN KEY(position_id) REFERENCES positions(id),
+                    UNIQUE(position_id, date)
+                )
+            """)
+
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_hist_date ON position_history(date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_hist_pos_date ON position_history(position_id, date)")
+
+            conn.commit()
+        finally:
+            conn.close()
 
         print(f"Position database initialized at {self.db_path}")
 
     async def add_position(self, ticker: str, entry_date: str, entry_price: float,
-                          shares: int, notes: str = "") -> Dict:
+                          shares: float, notes: str = "", currency: str = "USD") -> Dict:
         """Add a new position"""
         try:
             return await asyncio.to_thread(
-                self._add_position_sync, ticker, entry_date, entry_price, shares, notes
+                self._add_position_sync, ticker, entry_date, entry_price, shares, notes, currency
             )
         except Exception as e:
             print(f"Error adding position: {e}")
             return {"error": str(e)}
 
     def _add_position_sync(self, ticker: str, entry_date: str, entry_price: float,
-                           shares: int, notes: str) -> Dict:
+                           shares: float, notes: str, currency: str = "USD") -> Dict:
         """Synchronous version of add_position"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -121,15 +132,16 @@ class PositionManager:
         try:
             cursor.execute("""
                 INSERT INTO positions
-                (ticker, entry_date, entry_price, shares, notes, created_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
+                (ticker, entry_date, entry_price, shares, notes, created_at, status, currency)
+                VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """, (
                 ticker.upper(),
                 entry_date,
                 entry_price,
                 shares,
                 notes,
-                int(datetime.now().timestamp())
+                int(datetime.now().timestamp()),
+                currency.upper(),
             ))
 
             position_id = cursor.lastrowid
@@ -165,29 +177,30 @@ class PositionManager:
     def _close_position_sync(self, position_id: int, exit_date: str, exit_price: float) -> Dict:
         """Synchronous version of close_position"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        # Get position details
-        cursor.execute("SELECT * FROM positions WHERE id = ?", (position_id,))
-        row = cursor.fetchone()
+            # Get position details
+            cursor.execute("SELECT * FROM positions WHERE id = ?", (position_id,))
+            row = cursor.fetchone()
 
-        if not row:
+            if not row:
+                return {"error": "Position not found"}
+
+            columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
+            position = dict(zip(columns, row))
+
+            # Update position
+            cursor.execute("""
+                UPDATE positions
+                SET status = 'CLOSED', exit_date = ?, exit_price = ?
+                WHERE id = ?
+            """, (exit_date, exit_price, position_id))
+
+            conn.commit()
+        finally:
             conn.close()
-            return {"error": "Position not found"}
-
-        columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                   'status', 'exit_date', 'exit_price', 'notes', 'created_at']
-        position = dict(zip(columns, row))
-
-        # Update position
-        cursor.execute("""
-            UPDATE positions
-            SET status = 'CLOSED', exit_date = ?, exit_price = ?
-            WHERE id = ?
-        """, (exit_date, exit_price, position_id))
-
-        conn.commit()
-        conn.close()
 
         # Calculate realized P&L
         entry_value = position['entry_price'] * position['shares']
@@ -208,35 +221,44 @@ class PositionManager:
             "realized_pnl_pct": round(realized_pnl_pct, 2)
         }
 
-    async def get_open_positions(self) -> List[Dict]:
-        """Get all open positions"""
+    async def get_open_positions(self, currency: str = None) -> List[Dict]:
+        """Get all open positions, optionally filtered by currency"""
         try:
-            return await asyncio.to_thread(self._get_open_positions_sync)
+            return await asyncio.to_thread(self._get_open_positions_sync, currency)
         except Exception as e:
             print(f"Error getting open positions: {e}")
             return []
 
-    def _get_open_positions_sync(self) -> List[Dict]:
+    def _get_open_positions_sync(self, currency: str = None) -> List[Dict]:
         """Synchronous version of get_open_positions"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT * FROM positions
-            WHERE status = 'OPEN'
-            ORDER BY entry_date DESC
-        """)
+            if currency:
+                cursor.execute("""
+                    SELECT * FROM positions
+                    WHERE status = 'OPEN' AND UPPER(COALESCE(currency, 'USD')) = ?
+                    ORDER BY entry_date DESC
+                """, (currency.upper(),))
+            else:
+                cursor.execute("""
+                    SELECT * FROM positions
+                    WHERE status = 'OPEN'
+                    ORDER BY entry_date DESC
+                """)
 
-        columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                   'status', 'exit_date', 'exit_price', 'notes', 'created_at']
+            columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
 
-        positions = []
-        for row in cursor.fetchall():
-            position = dict(zip(columns, row))
-            positions.append(position)
+            positions = []
+            for row in cursor.fetchall():
+                position = dict(zip(columns, row))
+                positions.append(position)
 
-        conn.close()
-        return positions
+            return positions
+        finally:
+            conn.close()
 
     async def get_position_performance(self, position_id: int, current_price: float,
                                       current_signal: Optional[Dict] = None) -> Dict:
@@ -263,44 +285,44 @@ class PositionManager:
                                        current_signal: Optional[Dict]) -> Dict:
         """Synchronous version of get_position_performance"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        # Get position
-        cursor.execute("SELECT * FROM positions WHERE id = ?", (position_id,))
-        row = cursor.fetchone()
+            # Get position
+            cursor.execute("SELECT * FROM positions WHERE id = ?", (position_id,))
+            row = cursor.fetchone()
 
-        if not row:
+            if not row:
+                return {"error": "Position not found"}
+
+            columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
+            position = dict(zip(columns, row))
+
+            # Calculate P&L
+            entry_value = position['entry_price'] * position['shares']
+            current_value = current_price * position['shares']
+            unrealized_pnl = current_value - entry_value
+            unrealized_pnl_pct = (unrealized_pnl / entry_value) * 100
+
+            # Get historical snapshots
+            cursor.execute("""
+                SELECT date, unrealized_pnl_pct, signal, rsi
+                FROM position_history
+                WHERE position_id = ?
+                ORDER BY date ASC
+            """, (position_id,))
+
+            history = []
+            for hist_row in cursor.fetchall():
+                history.append({
+                    "date": hist_row[0],
+                    "pnl_pct": hist_row[1],
+                    "signal": hist_row[2],
+                    "rsi": hist_row[3]
+                })
+        finally:
             conn.close()
-            return {"error": "Position not found"}
-
-        columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                   'status', 'exit_date', 'exit_price', 'notes', 'created_at']
-        position = dict(zip(columns, row))
-
-        # Calculate P&L
-        entry_value = position['entry_price'] * position['shares']
-        current_value = current_price * position['shares']
-        unrealized_pnl = current_value - entry_value
-        unrealized_pnl_pct = (unrealized_pnl / entry_value) * 100
-
-        # Get historical snapshots
-        cursor.execute("""
-            SELECT date, unrealized_pnl_pct, signal, rsi
-            FROM position_history
-            WHERE position_id = ?
-            ORDER BY date ASC
-        """, (position_id,))
-
-        history = []
-        for hist_row in cursor.fetchall():
-            history.append({
-                "date": hist_row[0],
-                "pnl_pct": hist_row[1],
-                "signal": hist_row[2],
-                "rsi": hist_row[3]
-            })
-
-        conn.close()
 
         # Calculate days held
         entry_dt = datetime.strptime(position['entry_date'], '%Y-%m-%d')
@@ -391,43 +413,44 @@ class PositionManager:
                                        signal: str, signal_strength: int, rsi: float):
         """Synchronous version of update_position_snapshot"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        # Get position to calculate P&L
-        cursor.execute("SELECT entry_price, shares FROM positions WHERE id = ?", (position_id,))
-        row = cursor.fetchone()
+            # Get position to calculate P&L
+            cursor.execute("SELECT entry_price, shares FROM positions WHERE id = ?", (position_id,))
+            row = cursor.fetchone()
 
-        if not row:
+            if not row:
+                return
+
+            entry_price, shares = row
+            entry_value = entry_price * shares
+            current_value = current_price * shares
+            unrealized_pnl = current_value - entry_value
+            unrealized_pnl_pct = (unrealized_pnl / entry_value) * 100
+
+            today = datetime.now().strftime('%Y-%m-%d')
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO position_history
+                (position_id, date, current_price, unrealized_pnl, unrealized_pnl_pct,
+                 signal, signal_strength, rsi, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position_id,
+                today,
+                current_price,
+                unrealized_pnl,
+                unrealized_pnl_pct,
+                signal,
+                signal_strength,
+                rsi,
+                int(datetime.now().timestamp())
+            ))
+
+            conn.commit()
+        finally:
             conn.close()
-            return
-
-        entry_price, shares = row
-        entry_value = entry_price * shares
-        current_value = current_price * shares
-        unrealized_pnl = current_value - entry_value
-        unrealized_pnl_pct = (unrealized_pnl / entry_value) * 100
-
-        today = datetime.now().strftime('%Y-%m-%d')
-
-        cursor.execute("""
-            INSERT OR REPLACE INTO position_history
-            (position_id, date, current_price, unrealized_pnl, unrealized_pnl_pct,
-             signal, signal_strength, rsi, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            position_id,
-            today,
-            current_price,
-            unrealized_pnl,
-            unrealized_pnl_pct,
-            signal,
-            signal_strength,
-            rsi,
-            int(datetime.now().timestamp())
-        ))
-
-        conn.commit()
-        conn.close()
 
     async def get_all_positions(self, include_closed: bool = False) -> List[Dict]:
         """Get all positions"""
@@ -440,27 +463,29 @@ class PositionManager:
     def _get_all_positions_sync(self, include_closed: bool) -> List[Dict]:
         """Synchronous version of get_all_positions"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        if include_closed:
-            cursor.execute("SELECT * FROM positions ORDER BY entry_date DESC")
-        else:
-            cursor.execute("""
-                SELECT * FROM positions
-                WHERE status = 'OPEN'
-                ORDER BY entry_date DESC
-            """)
+            if include_closed:
+                cursor.execute("SELECT * FROM positions ORDER BY entry_date DESC")
+            else:
+                cursor.execute("""
+                    SELECT * FROM positions
+                    WHERE status = 'OPEN'
+                    ORDER BY entry_date DESC
+                """)
 
-        columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                   'status', 'exit_date', 'exit_price', 'notes', 'created_at']
+            columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
 
-        positions = []
-        for row in cursor.fetchall():
-            position = dict(zip(columns, row))
-            positions.append(position)
+            positions = []
+            for row in cursor.fetchall():
+                position = dict(zip(columns, row))
+                positions.append(position)
 
-        conn.close()
-        return positions
+            return positions
+        finally:
+            conn.close()
 
     async def delete_position(self, position_id: int) -> Dict:
         """Delete a position and its history"""
@@ -473,17 +498,19 @@ class PositionManager:
     def _delete_position_sync(self, position_id: int) -> Dict:
         """Synchronous version of delete_position"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        # Delete history first
-        cursor.execute("DELETE FROM position_history WHERE position_id = ?", (position_id,))
+            # Delete history first
+            cursor.execute("DELETE FROM position_history WHERE position_id = ?", (position_id,))
 
-        # Delete position
-        cursor.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+            # Delete position
+            cursor.execute("DELETE FROM positions WHERE id = ?", (position_id,))
 
-        deleted = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
+            deleted = cursor.rowcount > 0
+            conn.commit()
+        finally:
+            conn.close()
 
         if deleted:
             return {"success": True, "message": "Position deleted"}
@@ -497,31 +524,33 @@ class PositionManager:
                         notes: str = "", position_id: int = None) -> Dict:
         """Record a buy/sell transaction."""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        total = price * shares
-        now = datetime.now()
+        try:
+            cursor = conn.cursor()
+            total = price * shares
+            now = datetime.now()
 
-        cursor.execute("""
-            INSERT INTO transactions
-            (position_id, ticker, action, date, price, shares, total, fee, realized_pnl, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            position_id,
-            ticker.upper(),
-            action.upper(),
-            now.strftime('%Y-%m-%d'),
-            price,
-            shares,
-            total,
-            fee,
-            realized_pnl,
-            notes,
-            now.isoformat(),
-        ))
+            cursor.execute("""
+                INSERT INTO transactions
+                (position_id, ticker, action, date, price, shares, total, fee, realized_pnl, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position_id,
+                ticker.upper(),
+                action.upper(),
+                now.strftime('%Y-%m-%d'),
+                price,
+                shares,
+                total,
+                fee,
+                realized_pnl,
+                notes,
+                now.isoformat(),
+            ))
 
-        tx_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+            tx_id = cursor.lastrowid
+            conn.commit()
+        finally:
+            conn.close()
 
         return {
             "success": True,
@@ -537,44 +566,65 @@ class PositionManager:
     def get_transactions(self, ticker: str = None, limit: int = 100) -> List[Dict]:
         """Get transaction history, optionally filtered by ticker."""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        if ticker:
-            cursor.execute("""
-                SELECT id, position_id, ticker, action, date, price, shares, total, fee,
-                       realized_pnl, notes, created_at
-                FROM transactions
-                WHERE ticker = ?
-                ORDER BY date DESC, id DESC
-                LIMIT ?
-            """, (ticker.upper(), limit))
-        else:
-            cursor.execute("""
-                SELECT id, position_id, ticker, action, date, price, shares, total, fee,
-                       realized_pnl, notes, created_at
-                FROM transactions
-                ORDER BY date DESC, id DESC
-                LIMIT ?
-            """, (limit,))
+            if ticker:
+                cursor.execute("""
+                    SELECT id, position_id, ticker, action, date, price, shares, total, fee,
+                           realized_pnl, notes, created_at
+                    FROM transactions
+                    WHERE ticker = ?
+                    ORDER BY date DESC, id DESC
+                    LIMIT ?
+                """, (ticker.upper(), limit))
+            else:
+                cursor.execute("""
+                    SELECT id, position_id, ticker, action, date, price, shares, total, fee,
+                           realized_pnl, notes, created_at
+                    FROM transactions
+                    ORDER BY date DESC, id DESC
+                    LIMIT ?
+                """, (limit,))
 
-        columns = ['id', 'position_id', 'ticker', 'action', 'date', 'price',
-                    'shares', 'total', 'fee', 'realized_pnl', 'notes', 'created_at']
-        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        conn.close()
-        return rows
+            columns = ['id', 'position_id', 'ticker', 'action', 'date', 'price',
+                        'shares', 'total', 'fee', 'realized_pnl', 'notes', 'created_at']
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return rows
+        finally:
+            conn.close()
 
     def get_transaction_summary(self) -> Dict:
-        """Get total fees paid and realized P&L."""
+        """Get total fees paid and realized P&L.
+        Fee rule: 10 free actions per month, $1.50 per action after that.
+        """
+        FREE_PER_MONTH = 10
+        FEE_PER_TRADE = 1.50
+
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        cursor.execute("SELECT COALESCE(SUM(fee), 0), COUNT(*) FROM transactions")
-        total_fees, count = cursor.fetchone()
+            cursor.execute("SELECT COALESCE(SUM(realized_pnl), 0) FROM transactions WHERE realized_pnl IS NOT NULL")
+            total_pnl = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COALESCE(SUM(realized_pnl), 0) FROM transactions WHERE realized_pnl IS NOT NULL")
-        total_pnl = cursor.fetchone()[0]
+            # Calculate fees with 10-free-per-month rule
+            cursor.execute("SELECT date FROM transactions ORDER BY date")
+            rows = cursor.fetchall()
+            count = len(rows)
 
-        conn.close()
+            monthly_counts: Dict[str, int] = {}
+            for (tx_date,) in rows:
+                month = tx_date[:7]  # "YYYY-MM"
+                monthly_counts[month] = monthly_counts.get(month, 0) + 1
+
+            total_fees = 0.0
+            for month, tx_count in monthly_counts.items():
+                paid_trades = max(0, tx_count - FREE_PER_MONTH)
+                total_fees += paid_trades * FEE_PER_TRADE
+        finally:
+            conn.close()
+
         return {
             "total_fees": total_fees,
             "total_realized_pnl": total_pnl,

@@ -43,7 +43,7 @@ from data_cache import DataCache
 _UNIVERSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_stock_universe.txt")
 
 
-def _load_universe(max_stocks: int = 800) -> List[str]:
+def _load_universe(max_stocks: int = 3000) -> List[str]:
     """Load top US stocks from file (sorted by market cap), capped at max_stocks."""
     if os.path.exists(_UNIVERSE_FILE):
         with open(_UNIVERSE_FILE) as f:
@@ -216,45 +216,39 @@ class DeepScanner:
 
     async def phase1_fetch_data(self, tickers: List[str]) -> Dict[str, pd.DataFrame]:
         """
-        Phase 1: Load historical data from SQLite cache.
+        Phase 1: Load historical data from SQLite cache using BULK read.
         Only fetches missing tickers via Tiingo (500 req/hr).
-        After initial population, this phase completes in < 1 second.
         """
         print(f"\n{'='*60}")
         print(f"PHASE 1: Load Historical Data ({len(tickers)} tickers)")
         print(f"{'='*60}")
 
-        data = {}
-        missing = []
+        import time
+        t0 = time.time()
 
-        # Stage 1: Read from SQLite cache (instant)
-        for ticker in tickers:
-            df = self.cache.get(ticker, 365)
-            if df is not None:
-                data[ticker] = df
-                self.stats["cache_hits"] += 1
-            else:
-                missing.append(ticker)
+        # Stage 1: Bulk read from SQLite cache (much faster than individual reads)
+        data = self.cache.get_bulk(tickers, 365)
+        self.stats["cache_hits"] = len(data)
+        missing = [t for t in tickers if t not in data]
 
-        print(f"  Cache: {self.stats['cache_hits']} hits | {len(missing)} missing")
+        print(f"  Cache: {self.stats['cache_hits']} hits in {time.time()-t0:.1f}s | {len(missing)} missing")
 
-        # Stage 2: Fetch missing via Tiingo and cache them
-        if missing:
+        # Stage 2: Fetch missing via Tiingo (only if few and coverage is low)
+        coverage = len(data) / max(len(tickers), 1) * 100
+        if missing and len(missing) < 50 and coverage < 95:
             print(f"  Fetching {len(missing)} missing tickers via Tiingo...")
             result = await self.cache.populate(missing)
             self.stats["tiingo_fetched"] = result['fetched']
             self.stats["fetch_failed"] = result['failed']
 
             # Read the newly cached data
-            for ticker in missing:
-                df = self.cache.get(ticker, 365)
-                if df is not None:
-                    data[ticker] = df
+            new_data = self.cache.get_bulk(missing, 365)
+            data.update(new_data)
+        elif missing:
+            print(f"  Skipping {len(missing)} missing tickers (too many to fetch)")
+            self.stats["fetch_failed"] = len(missing)
 
-        print(f"\n  Phase 1 complete: {len(data)} stocks with data "
-              f"(Cache: {self.stats['cache_hits']}, "
-              f"Tiingo: {self.stats['tiingo_fetched']}, "
-              f"Failed: {self.stats['fetch_failed']})")
+        print(f"  Phase 1 complete: {len(data)} stocks with data in {time.time()-t0:.1f}s")
         return data
 
     # ─── Phase 2: RSI Filter + Deep Backtest ─────────────────────────────
@@ -262,7 +256,9 @@ class DeepScanner:
     def _backtest_stock(self, ticker: str, df: pd.DataFrame,
                         source: str = "") -> Optional[ScanResult]:
         """Full ATLAS V2 backtest with RSI zone analysis, volume filter, variable hold, regime filter."""
-        closes = df['Close'].dropna().tolist()
+        # Drop NaN closes first to keep all arrays aligned
+        df = df.dropna(subset=['Close'])
+        closes = df['Close'].tolist()
         if len(closes) < 60:
             return None
 
@@ -278,8 +274,8 @@ class DeepScanner:
         if price <= sma50:
             return None
 
-        # RSI(2) must be < 35 (oversold or approaching)
-        if rsi2 >= 35:
+        # V2.4: RSI(2) must be < 10 for entry
+        if rsi2 >= 10:
             return None
 
         # Regime detection
@@ -301,22 +297,44 @@ class DeepScanner:
         # GAP 2 FIX: Variable hold period based on current RSI
         hold_days = self._hold_days(rsi2)
 
-        # Full backtest: entries where RSI(2) < 20 AND price > SMA(50)
-        # Uses variable hold days per-entry based on RSI at entry time
+        # Full backtest + zone analysis in ONE pass (was two O(n^2) loops)
+        # V2.4: RSI(2) < 10, next-day open entry, fee-adjusted
+        _FEE_PCT = 0.30
+        opens_list = df["Open"].tolist() if "Open" in df.columns else closes
+
+        # RSI zone for current price
+        zone_lo = int(rsi2 // 10) * 10
+        zone_hi = zone_lo + 10
+        zone_label = f"{zone_lo}-{zone_hi}"
+
         trades = []
-        for i in range(50, len(closes) - 14):  # ensure room for 14-day hold
+        zone_trades_list = []
+        last_exit_day = -1  # Prevent overlapping trades
+        for i in range(50, len(closes) - 15):  # ensure room for 14-day hold + 1
             hist_closes = closes[:i+1]
             hist_rsi2 = self.entry_engine.calc_rsi(hist_closes, 2)
             hist_sma50 = self.entry_engine.calc_sma(hist_closes, 50)
 
-            if hist_rsi2 < 20 and hist_closes[-1] > hist_sma50:
-                entry_price = closes[i]
-                fwd = self._hold_days(hist_rsi2)
-                if i + fwd < len(closes):
-                    exit_price = closes[i + fwd]
-                    ret = ((exit_price - entry_price) / entry_price) * 100
-                    trades.append({"return": ret, "win": ret > 0, "rsi": hist_rsi2,
-                                   "hold": fwd})
+            if hist_closes[-1] <= hist_sma50:
+                continue
+
+            # V2.4: next-day open entry, fee-adjusted
+            entry_price = opens_list[i + 1] if i + 1 < len(opens_list) and opens_list[i + 1] > 0 else closes[i]
+            fwd = self._hold_days(hist_rsi2)
+            if i + 1 + fwd >= len(closes):
+                continue
+            exit_price = closes[i + 1 + fwd]
+            ret = ((exit_price - entry_price) / entry_price) * 100 - _FEE_PCT
+
+            # Collect entry trades (RSI < 10, no overlap)
+            if hist_rsi2 < 10 and i > last_exit_day:
+                trades.append({"return": ret, "win": ret > 0, "rsi": hist_rsi2,
+                               "hold": fwd})
+                last_exit_day = i + 1 + fwd
+
+            # Collect zone trades (current RSI zone, above SMA50 — separate from entry)
+            if zone_lo <= hist_rsi2 < zone_hi:
+                zone_trades_list.append({"return": ret, "win": ret > 0})
 
         if len(trades) < 10:
             return None
@@ -325,27 +343,17 @@ class DeepScanner:
         win_rate = wins / len(trades) * 100
         avg_return = sum(t["return"] for t in trades) / len(trades)
 
-        if win_rate < 55:
+        if win_rate < 65:
             return None
 
-        # RSI zone analysis for CURRENT RSI zone (with variable hold)
-        zone_lo = int(rsi2 // 10) * 10
-        zone_hi = zone_lo + 10
-        zone_label = f"{zone_lo}-{zone_hi}"
-
-        zone_trades_list = []
-        for i in range(50, len(closes) - 14):
-            hist_closes = closes[:i+1]
-            hist_rsi2 = self.entry_engine.calc_rsi(hist_closes, 2)
-            hist_sma50 = self.entry_engine.calc_sma(hist_closes, 50)
-
-            if zone_lo <= hist_rsi2 < zone_hi and hist_closes[-1] > hist_sma50:
-                entry_price = closes[i]
-                fwd = self._hold_days(hist_rsi2)
-                if i + fwd < len(closes):
-                    exit_price = closes[i + fwd]
-                    ret = ((exit_price - entry_price) / entry_price) * 100
-                    zone_trades_list.append({"return": ret, "win": ret > 0})
+        # Recency check: last 10 trades must also show positive edge
+        # Prevents stocks whose pattern worked at $5 but fails at $25
+        if len(trades) >= 10:
+            recent = trades[-10:]
+            recent_wr = sum(1 for t in recent if t["win"]) / len(recent) * 100
+            recent_avg = sum(t["return"] for t in recent) / len(recent)
+            if recent_wr < 40 or recent_avg < -2:
+                return None  # Recent pattern is broken
 
         if not zone_trades_list:
             zone_return = avg_return
@@ -367,7 +375,7 @@ class DeepScanner:
         above_sma200 = price > sma200 if sma200 > 0 else False
         vol_spike = vol_ratio > 1.5
         is_extreme = rsi2 < 5 and above_sma200
-        is_strong = rsi2 < 20 and (rsi14 < 40 or vol_spike)
+        is_strong = rsi2 < 10 and (rsi14 < 40 or vol_spike)
         tier = "EXTREME" if is_extreme else ("STRONG" if is_strong else "STANDARD")
 
         # ML-discovered features (SHAP importance: #1, #2, #5)
@@ -413,13 +421,35 @@ class DeepScanner:
 
     def phase2_backtest(self, stock_data: Dict[str, pd.DataFrame],
                         discovered_tickers: List[str]) -> List[ScanResult]:
-        """Phase 2: Filter by RSI(2) + backtest all candidates."""
+        """Phase 2: Fast RSI pre-filter then deep backtest on candidates only."""
         print(f"\n{'='*60}")
         print(f"PHASE 2: RSI(2) Filter + Deep Backtest ({len(stock_data)} stocks)")
         print(f"{'='*60}")
 
-        results = []
+        # FAST PRE-FILTER: Only compute RSI(2) + SMA50 check (< 1ms per stock)
+        # Skip expensive full backtest for stocks that can't possibly pass
+        candidates = {}
+        skipped = 0
         for ticker, df in stock_data.items():
+            closes = df['Close'].dropna().tolist()
+            if len(closes) < 60:
+                skipped += 1
+                continue
+            rsi2 = self.entry_engine.calc_rsi(closes, 2)
+            if rsi2 >= 10:
+                skipped += 1
+                continue
+            sma50 = self.entry_engine.calc_sma(closes, 50)
+            if closes[-1] <= sma50:
+                skipped += 1
+                continue
+            candidates[ticker] = df
+
+        print(f"  Pre-filter: {len(candidates)} candidates (skipped {skipped} not oversold/below SMA50)")
+
+        # Deep backtest only on pre-filtered candidates
+        results = []
+        for ticker, df in candidates.items():
             source = "finviz_discovery" if ticker in discovered_tickers else "universe"
             result = self._backtest_stock(ticker, df, source)
             if result:
@@ -429,19 +459,19 @@ class DeepScanner:
         self.stats["candidates"] = len(results)
 
         print(f"  Phase 2 complete: {len(results)} stocks passed all filters")
-        print(f"  (RSI(2)<35 + above SMA50 + not BEAR + WR>=55% + 10+ trades + zone return > 0)")
+        print(f"  (RSI(2)<10 + above SMA50 + not BEAR + WR>=65% + 10+ trades + zone return > 0)")
         return results
 
     # ─── Phase 3: Validate Top N ─────────────────────────────────────────
 
     async def _check_earnings(self, session: aiohttp.ClientSession,
                               ticker: str) -> Optional[Dict]:
-        """Check if stock has earnings within 14 days using Finnhub."""
+        """Check if stock has earnings within 7 days using Finnhub."""
         try:
             import json as _json
             today = datetime.now()
-            from_date = (today - timedelta(days=1)).strftime('%Y-%m-%d')
-            to_date = (today + timedelta(days=14)).strftime('%Y-%m-%d')
+            from_date = today.strftime('%Y-%m-%d')  # Fixed: only future earnings
+            to_date = (today + timedelta(days=7)).strftime('%Y-%m-%d')  # Fixed: 7 days per CLAUDE.md
             url = (f'https://finnhub.io/api/v1/calendar/earnings'
                    f'?from={from_date}&to={to_date}'
                    f'&symbol={ticker}&token={self.FINNHUB_KEY}')
@@ -465,7 +495,7 @@ class DeepScanner:
             pass
         return None
 
-    FINNHUB_KEY = "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0"
+    FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
 
     async def phase3_validate(self, results: List[ScanResult],
                               top_n: int = 15) -> List[ScanResult]:
@@ -485,49 +515,59 @@ class DeepScanner:
         sentiment_engine = SentimentEngine()
 
         async with aiohttp.ClientSession() as session:
-            for r in top:
-                # 1. Earnings check (VETO if < 7 days)
-                try:
-                    earnings = await self._check_earnings(session, r.ticker)
-                    if earnings:
-                        r.vetoed = True
-                        r.veto_reason = f"Earnings on {earnings['date']} (<7 days)"
-                        print(f"  {r.ticker}: EARNINGS VETO - reporting {earnings['date']}")
-                        continue  # Skip other checks, already vetoed
-                except Exception:
-                    pass
+            # Parallel validation — all tickers validated concurrently
+            sem = asyncio.Semaphore(5)  # Cap concurrent network calls
 
-                # 2. Analyst data (Finviz)
-                try:
-                    adata = await analyst_fetcher.fetch_analyst_data(r.ticker)
-                    if adata:
-                        r.analyst_consensus = adata.get("consensus", "")
-                        r.analyst_target = adata.get("price_target_avg", 0)
-                        if r.analyst_target > 0:
-                            r.analyst_upside = round(
-                                ((r.analyst_target - r.price) / r.price) * 100, 1)
-                        if r.analyst_target > 0 and r.price > r.analyst_target:
+            async def _validate_one(r):
+                async with sem:
+                    # 1. Earnings check (VETO if < 7 days)
+                    try:
+                        earnings = await self._check_earnings(session, r.ticker)
+                        if earnings:
                             r.vetoed = True
-                            r.veto_reason = f"Overvalued (${r.price} > target ${r.analyst_target})"
-                except Exception:
-                    pass
+                            r.veto_reason = f"Earnings on {earnings['date']} (within 7 days)"
+                            print(f"  {r.ticker}: EARNINGS VETO - reporting {earnings['date']}")
+                            return
+                    except Exception as e:
+                        print(f"  {r.ticker}: Earnings check failed: {e}")
 
-                # 3. Sentiment (Google News + VADER)
-                try:
-                    sdata = await sentiment_engine.get_ticker_sentiment(r.ticker)
-                    if sdata:
-                        r.sentiment_label = sdata.get("sentiment_label", "NEUTRAL")
-                        r.sentiment_score = sdata.get("sentiment_score", 0)
-                        if r.sentiment_score < -0.3:
-                            r.vetoed = True
-                            r.veto_reason = f"Negative sentiment ({r.sentiment_score:.2f})"
-                except Exception:
-                    pass
+                    # 2. Analyst data (Finviz)
+                    try:
+                        adata = await analyst_fetcher.fetch_analyst_data(r.ticker)
+                        if adata:
+                            r.analyst_consensus = adata.get("consensus", "")
+                            r.analyst_target = adata.get("price_target_avg", 0)
+                            if r.analyst_target > 0:
+                                r.analyst_upside = round(
+                                    ((r.analyst_target - r.price) / r.price) * 100, 1)
+                            if r.analyst_target > 0 and r.price > r.analyst_target:
+                                r.vetoed = True
+                                r.veto_reason = f"Overvalued (${r.price} > target ${r.analyst_target})"
+                            # V2.4: VETO Hold/Sell/Underperform consensus
+                            if not r.vetoed and r.analyst_consensus in ("Hold", "Sell", "Underperform"):
+                                r.vetoed = True
+                                r.veto_reason = f"Analyst says {r.analyst_consensus}"
+                    except Exception as e:
+                        print(f"  {r.ticker}: Analyst check failed: {e}")
 
-                status = "VETO" if r.vetoed else "OK"
-                print(f"  {r.ticker}: Analyst={r.analyst_consensus or 'N/A'} "
-                      f"Target=${r.analyst_target:.0f} "
-                      f"Sentiment={r.sentiment_label} [{status}]")
+                    # 3. Sentiment (Google News + VADER)
+                    try:
+                        sdata = await sentiment_engine.get_ticker_sentiment(r.ticker)
+                        if sdata:
+                            r.sentiment_label = sdata.get("sentiment_label", "NEUTRAL")
+                            r.sentiment_score = sdata.get("sentiment_score", 0)
+                            if r.sentiment_score < -0.3:
+                                r.vetoed = True
+                                r.veto_reason = f"Negative sentiment ({r.sentiment_score:.2f})"
+                    except Exception as e:
+                        print(f"  {r.ticker}: Sentiment check failed: {e}")
+
+                    status = "VETO" if r.vetoed else "OK"
+                    print(f"  {r.ticker}: Analyst={r.analyst_consensus or 'N/A'} "
+                          f"Target=${r.analyst_target:.0f} "
+                          f"Sentiment={r.sentiment_label} [{status}]")
+
+            await asyncio.gather(*[_validate_one(r) for r in top])
 
         vetoed = sum(1 for r in top if r.vetoed)
         print(f"  Phase 3 complete: {len(top) - vetoed} passed, {vetoed} vetoed")

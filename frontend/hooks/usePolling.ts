@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 interface UsePollingOptions<T> {
   fetcher: () => Promise<T>;
   interval: number;
+  extendedHoursInterval?: number; // Polling during pre-market / after-hours
   offHoursInterval?: number; // Slower polling outside US market hours
   enabled?: boolean;
 }
@@ -17,18 +18,23 @@ interface UsePollingResult<T> {
   lastUpdated: Date | null;
 }
 
-function isUSMarketOpen(): boolean {
+type MarketSession = "REGULAR" | "EXTENDED" | "CLOSED";
+
+function getMarketSession(): MarketSession {
   const now = new Date();
   const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
   const day = et.getDay();
-  if (day === 0 || day === 6) return false;
+  if (day === 0 || day === 6) return "CLOSED";
   const minutes = et.getHours() * 60 + et.getMinutes();
-  return minutes >= 570 && minutes <= 960; // 9:30 AM - 4:00 PM ET
+  if (minutes >= 570 && minutes <= 960) return "REGULAR"; // 9:30 AM - 4:00 PM ET
+  if ((minutes >= 240 && minutes < 570) || (minutes > 960 && minutes <= 1200)) return "EXTENDED"; // 4-9:30 AM or 4-8 PM
+  return "CLOSED";
 }
 
 export function usePolling<T>({
   fetcher,
   interval,
+  extendedHoursInterval,
   offHoursInterval,
   enabled = true,
 }: UsePollingOptions<T>): UsePollingResult<T> {
@@ -62,10 +68,12 @@ export function usePolling<T>({
 
     refresh();
 
-    // Use dynamic interval based on market hours
+    // Use dynamic interval based on market session (3-tier)
     const getInterval = () => {
-      if (!offHoursInterval) return interval;
-      return isUSMarketOpen() ? interval : offHoursInterval;
+      const session = getMarketSession();
+      if (session === "REGULAR") return interval;
+      if (session === "EXTENDED" && extendedHoursInterval) return extendedHoursInterval;
+      return offHoursInterval || interval;
     };
 
     // Exponential backoff on errors: 30s, 60s, 120s, 240s... capped at normal interval
@@ -80,7 +88,7 @@ export function usePolling<T>({
     timeoutId = setTimeout(tick, getInterval());
 
     return () => clearTimeout(timeoutId);
-  }, [refresh, interval, offHoursInterval, enabled]);
+  }, [refresh, interval, extendedHoursInterval, offHoursInterval, enabled]);
 
   return { data, loading, error, refresh, lastUpdated };
 }

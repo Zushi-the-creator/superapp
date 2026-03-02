@@ -9,3 +9,6 @@ frontend/.next
 __pycache__
 *.pyc
 ralph/
+client/
+data/
+claude-scientific-skills/
