@@ -522,14 +522,21 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
         exit_price = 0  # No price target for RSI exits
 
     elif strat_def.get("type") == "fixed":
-        # Fixed hold: exit after N days from entry
+        # Fixed hold: exit after N TRADING days from entry
+        # Backtest uses OHLCV bars (trading days only), so live must match
         exit_price = round(current_price * (1 + cached.get("avg_ret", 0) / 100), 2)
         if entry_date:
             try:
                 from datetime import date as _date
-                days_held = (_date.today() - _date.fromisoformat(entry_date)).days
+                entry_d = _date.fromisoformat(entry_date)
+                today_d = _date.today()
+                # Count only weekdays (Mon-Fri) to match backtest bars
+                trading_days_held = sum(
+                    1 for n in range((today_d - entry_d).days)
+                    if (entry_d + timedelta(days=n + 1)).weekday() < 5
+                )
                 hold_days = strat_def.get("days", 7)
-                triggered = days_held >= hold_days
+                triggered = trading_days_held >= hold_days
             except Exception:
                 triggered = False
         else:
@@ -985,11 +992,16 @@ async def get_portfolio():
                 signal = "OVERBOUGHT"
             _signal_cache[ticker] = (signal, issues, datetime.now())
 
-        # Days held calculation
+        # Days held calculation (trading days to match backtest bars)
         days_held = 0
         try:
             from datetime import date as _date
-            days_held = (_date.today() - _date.fromisoformat(pos.get("entry_date", ""))).days
+            entry_d = _date.fromisoformat(pos.get("entry_date", ""))
+            today_d = _date.today()
+            days_held = sum(
+                1 for n in range((today_d - entry_d).days)
+                if (entry_d + timedelta(days=n + 1)).weekday() < 5
+            )
         except Exception:
             pass
 
