@@ -16,6 +16,7 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   try {
     const res = await fetch(`${API_URL}${path}`, {
       headers: { "Content-Type": "application/json" },
+      cache: "no-store",
       signal: controller.signal,
       ...options,
     });

@@ -4,5 +4,14 @@
       "source": "/api/:path*",
       "destination": "https://superapp-ke5bhg.fly.dev/api/:path*"
     }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate" },
+        { "key": "Pragma", "value": "no-cache" }
+      ]
+    }
   ]
 }
