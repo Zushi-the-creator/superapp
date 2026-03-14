@@ -80,6 +80,10 @@ class PositionDetail(BaseModel):
     exit_strategy_validation: str = ""  # VALID / CAUTION / REJECTED / NO_DATA
     exit_strategy_oos_ci_lo: float = 0  # Wilson CI lower bound
     exit_strategy_oos_ci_hi: float = 0  # Wilson CI upper bound
+    # 2yr safety gate (catches regime changes 1yr misses)
+    wr_2yr: float = 0
+    avg_ret_2yr: float = 0
+    trades_2yr: int = 0
     # Extended hours (pre-market / after-hours)
     ext_price: Optional[float] = None  # pre-market or after-hours price
     ext_change_pct: Optional[float] = None  # change % from close
@@ -107,6 +111,7 @@ class PortfolioSummary(BaseModel):
     day_pnl_pct: float = 0  # Today's P&L percentage
     realized_pnl: float = 0  # Total realized P&L from closed positions
     total_fees: float = 0  # Total trading fees paid
+    total_deposited: float = 0  # Total capital deposited
     position_count: int
     avg_win_rate: float
     cash: float = 0
@@ -157,10 +162,11 @@ class ScanOpportunity(BaseModel):
     zone_trades: int
     zone_win_rate: float
     volume_ratio: float = 0
-    hold_days: int = 14
+    hold_days: int = 21
     # ML-discovered features
     low52_dist: float = 0  # % distance from 52-week low
     atr_pct: float = 0     # ATR(14) as % of price
+    sma50_buffer: float = 0  # % above SMA50 (V2.5: must be >= 10%)
     ret20: float = 0       # 20-day price momentum %
     ml_score: float = 0    # composite ML-weighted score
     analyst_consensus: str = ""
@@ -172,6 +178,11 @@ class ScanOpportunity(BaseModel):
     veto_reason: str = ""
     score: float = 0  # zone_return * win_rate / 100
     wr_tier: str = ""  # TIER1 (80%+), TIER2 (70%+), TIER3 (65%+)
+    # Composite ranking (loose filters)
+    quality_tier: str = ""        # BEST/GOOD/FAIR/WEAK/POOR
+    composite_score: float = 0    # 0-100 continuous ranking score
+    ranking_factors: str = ""     # "ZR:8.2 WR:75 RSI:3 ATR:5.1 ..."
+    meets_strict: bool = False    # passes all original strict ATLAS V2.5 criteria
     # Portfolio comparison
     beats_holdings: List[str] = []  # tickers in portfolio this stock beats
     is_upgrade: bool = False  # True if beats at least one holding
@@ -190,6 +201,7 @@ class ScanResponse(BaseModel):
     timestamp: str
     total_scanned: int
     passed: int
+    ranked_count: int = 0  # total stocks ranked (includes non-strict)
     opportunities: List[ScanOpportunity]
     holdings_scores: List[HoldingScore] = []  # current portfolio scores for comparison
     worst_holding: str = ""

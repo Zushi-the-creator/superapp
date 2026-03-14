@@ -9,6 +9,7 @@ pandas==2.2.0
 numpy==1.26.3
 ta==0.11.0
 python-dateutil==2.8.2
+yfinance==0.2.36
 
 # News & Sentiment
 beautifulsoup4==4.12.3

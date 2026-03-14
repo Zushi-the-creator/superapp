@@ -176,15 +176,15 @@ function AnalysisCard({ data }: { data: StockAnalysis }) {
       {/* Exit strategy */}
       <div className="px-4 pb-4 grid grid-cols-3 gap-3">
         <div className="p-2 rounded-lg bg-signal-sell/10 border border-signal-sell/20 text-center">
-          <div className="text-[10px] text-neutral-500">Stop Loss (-8%)</div>
+          <div className="text-[10px] text-neutral-500">Stop Loss ({data.live_price > 0 ? `${(((data.stop_loss / data.live_price) - 1) * 100).toFixed(0)}%` : "—"})</div>
           <div className="text-sm font-medium text-signal-sell">{formatCurrency(data.stop_loss)}</div>
         </div>
         <div className="p-2 rounded-lg bg-signal-buy/10 border border-signal-buy/20 text-center">
-          <div className="text-[10px] text-neutral-500">Target 1 (+10%)</div>
+          <div className="text-[10px] text-neutral-500">Target 1 ({data.live_price > 0 ? `+${(((data.target_1 / data.live_price) - 1) * 100).toFixed(0)}%` : "—"})</div>
           <div className="text-sm font-medium text-signal-buy">{formatCurrency(data.target_1)}</div>
         </div>
         <div className="p-2 rounded-lg bg-signal-buy/10 border border-signal-buy/20 text-center">
-          <div className="text-[10px] text-neutral-500">Target 2 (+20%)</div>
+          <div className="text-[10px] text-neutral-500">Target 2 ({data.live_price > 0 ? `+${(((data.target_2 / data.live_price) - 1) * 100).toFixed(0)}%` : "—"})</div>
           <div className="text-sm font-medium text-signal-buy">{formatCurrency(data.target_2)}</div>
         </div>
       </div>

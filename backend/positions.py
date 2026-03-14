@@ -596,11 +596,8 @@ class PositionManager:
 
     def get_transaction_summary(self) -> Dict:
         """Get total fees paid and realized P&L.
-        Fee rule: 10 free actions per month, $1.50 per action after that.
+        Uses actual fees recorded per transaction (broker-verified).
         """
-        FREE_PER_MONTH = 10
-        FEE_PER_TRADE = 1.50
-
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
@@ -608,20 +605,11 @@ class PositionManager:
             cursor.execute("SELECT COALESCE(SUM(realized_pnl), 0) FROM transactions WHERE realized_pnl IS NOT NULL")
             total_pnl = cursor.fetchone()[0]
 
-            # Calculate fees with 10-free-per-month rule
-            cursor.execute("SELECT date FROM transactions ORDER BY date")
-            rows = cursor.fetchall()
-            count = len(rows)
-
-            monthly_counts: Dict[str, int] = {}
-            for (tx_date,) in rows:
-                month = tx_date[:7]  # "YYYY-MM"
-                monthly_counts[month] = monthly_counts.get(month, 0) + 1
-
-            total_fees = 0.0
-            for month, tx_count in monthly_counts.items():
-                paid_trades = max(0, tx_count - FREE_PER_MONTH)
-                total_fees += paid_trades * FEE_PER_TRADE
+            # Use actual fees from transactions (broker-verified)
+            cursor.execute("SELECT COALESCE(SUM(fee), 0), COUNT(*) FROM transactions")
+            row = cursor.fetchone()
+            total_fees = row[0]
+            count = row[1]
         finally:
             conn.close()
 

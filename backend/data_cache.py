@@ -17,6 +17,7 @@ Usage:
 import sqlite3
 import os
 import sys
+import io
 import asyncio
 import aiohttp
 import argparse
@@ -73,7 +74,7 @@ class DataCache:
 
     # ── Read ──
 
-    def get(self, ticker: str, days: int = 365) -> Optional[pd.DataFrame]:
+    def get(self, ticker: str, days: int = 730) -> Optional[pd.DataFrame]:
         """Read cached data - INSTANT, no API calls."""
         cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         rows = self.conn.execute(
@@ -90,7 +91,7 @@ class DataCache:
         df = df.set_index('Date')
         return df
 
-    def get_bulk(self, tickers: List[str], days: int = 365) -> Dict[str, pd.DataFrame]:
+    def get_bulk(self, tickers: List[str], days: int = 730) -> Dict[str, pd.DataFrame]:
         """Bulk read cached data for many tickers - single SQL query, much faster than individual reads."""
         cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         upper_tickers = [t.upper() for t in tickers]
@@ -181,23 +182,34 @@ class DataCache:
         self.conn.executemany(
             'INSERT OR REPLACE INTO daily_prices VALUES (?, ?, ?, ?, ?, ?, ?)', rows
         )
+        # Get actual total row count for this ticker (not just inserted rows)
+        actual_count = self.conn.execute(
+            'SELECT COUNT(*) FROM daily_prices WHERE ticker = ?', (ticker,)
+        ).fetchone()[0]
+        # Get actual date range from stored data
+        date_range = self.conn.execute(
+            'SELECT MIN(date), MAX(date) FROM daily_prices WHERE ticker = ?', (ticker,)
+        ).fetchone()
         self.conn.execute(
             'INSERT OR REPLACE INTO cache_meta VALUES (?, ?, ?, ?, ?)',
             (ticker, datetime.now().strftime('%Y-%m-%d'),
-             rows[0][1], rows[-1][1], len(rows))
+             date_range[0] or rows[0][1], date_range[1] or rows[-1][1], actual_count)
         )
         self.conn.commit()
 
     # ── Tiingo Fetch ──
 
     async def _fetch_tiingo(self, session: aiohttp.ClientSession,
-                            ticker: str, days: int = 400) -> Optional[pd.DataFrame]:
-        """Fetch from Tiingo API (500 req/hr free tier). Returns None on rate limit."""
+                            ticker: str, days: int = 800,
+                            min_rows: int = 0) -> Optional[pd.DataFrame]:
+        """Fetch from Tiingo API (500 req/hr free tier). Returns None on rate limit.
+        min_rows: minimum rows required (0 = use 50 for full fetch, 1 for refresh)."""
         start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         end = datetime.now().strftime('%Y-%m-%d')
         url = f'https://api.tiingo.com/tiingo/daily/{ticker}/prices'
         params = {'startDate': start, 'endDate': end, 'token': TIINGO_KEY}
         headers = {'Content-Type': 'application/json'}
+        required = min_rows if min_rows > 0 else (50 if days > 30 else 1)
 
         try:
             async with session.get(url, params=params, headers=headers,
@@ -208,7 +220,7 @@ class DataCache:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
-                if not data or not isinstance(data, list) or len(data) < 50:
+                if not data or not isinstance(data, list) or len(data) < required:
                     return None
 
                 df = pd.DataFrame(data)
@@ -235,7 +247,7 @@ class DataCache:
                              ticker: str) -> Optional[pd.DataFrame]:
         """Fetch from Polygon.io - unlimited calls, full history."""
         end = datetime.now()
-        start = end - timedelta(days=400)
+        start = end - timedelta(days=800)
         url = (f'https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/'
                f'{start.strftime("%Y-%m-%d")}/{end.strftime("%Y-%m-%d")}')
         params = {'adjusted': 'true', 'sort': 'asc', 'limit': 5000,
@@ -300,6 +312,34 @@ class DataCache:
         except Exception:
             return None
 
+    # ── Stooq Fetch (unlimited, no API key) ──
+
+    async def _fetch_stooq(self, session: aiohttp.ClientSession,
+                           ticker: str, days: int = 800) -> Optional[pd.DataFrame]:
+        """Fetch from Stooq (unlimited, no API key needed). Primary free source."""
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        url = (f"https://stooq.com/q/d/l/?s={ticker.lower()}.us"
+               f"&d1={start.strftime('%Y%m%d')}&d2={end.strftime('%Y%m%d')}&i=d")
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                text = await resp.text()
+                if 'Date' not in text or len(text) < 100:
+                    return None
+                df = pd.read_csv(io.StringIO(text))
+                if len(df) < 50:
+                    return None
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.set_index('Date').sort_index()
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                return df
+        except Exception:
+            return None
+
     # ── yfinance Fetch (sync, called from async via executor) ──
 
     def _fetch_yfinance_batch(self, tickers: List[str]) -> Dict[str, pd.DataFrame]:
@@ -312,7 +352,7 @@ class DataCache:
         results = {}
         batch_str = " ".join(tickers)
         try:
-            data = yf.download(batch_str, period="1y", progress=False,
+            data = yf.download(batch_str, period="2y", progress=False,
                              timeout=30, group_by="ticker", threads=True)
             if data.empty:
                 return {}
@@ -346,7 +386,8 @@ class DataCache:
         - Polygon: 5/min free tier (slow but reliable)
         - Tiingo: 500/hr (~8/min)
         - FMP: 250/day (~4/min)
-        Fallback chain: yfinance → Polygon → Tiingo → FMP
+        - Stooq: Unlimited, no API key (final fallback)
+        Fallback chain: yfinance → Polygon → Tiingo → FMP → Stooq
         """
         import time
         tickers = [t.upper() for t in tickers]
@@ -359,7 +400,7 @@ class DataCache:
 
         print(f'[CACHE] Multi-source fetch: {len(to_fetch)} tickers '
               f'({len(cached)} already cached)')
-        print(f'  Sources: yfinance (bulk) + Polygon (5/min) + Tiingo (8/min) + FMP (4/min)')
+        print(f'  Sources: yfinance (bulk) + Polygon (5/min) + Tiingo (8/min) + FMP (4/min) + Stooq (unlimited)')
 
         fetched = 0
         failed_tickers = set()
@@ -392,64 +433,90 @@ class DataCache:
 
         print(f'  [Phase 1] yfinance: {fetched} fetched')
 
-        # Phase 2: API fallback for yfinance failures
+        # Phase 2: Stooq-first fast path for remaining tickers
+        # Stooq is unlimited with no API key — perfect for bulk population.
+        # Only fall back to Polygon/Tiingo/FMP if Stooq fails AND keys exist.
         remaining = [t for t in to_fetch if t not in fetched_tickers]
         if remaining:
-            print(f'\n  [Phase 2] API fallback for {len(remaining)} remaining...')
-
-            # Rate limit semaphores per source
-            polygon_sem = asyncio.Semaphore(1)  # 5/min → 1 at a time with delay
-            tiingo_sem = asyncio.Semaphore(2)   # 500/hr → 2 concurrent
-            fmp_sem = asyncio.Semaphore(1)      # 250/day → 1 at a time
+            has_api_keys = bool(POLYGON_KEY or TIINGO_KEY or FMP_KEY)
+            print(f'\n  [Phase 2] Stooq fast-path for {len(remaining)} remaining...')
 
             api_fetched = 0
+            stooq_sem = asyncio.Semaphore(10)  # 10 concurrent Stooq requests
 
             async with aiohttp.ClientSession() as session:
-                async def fetch_with_fallback(ticker):
+                async def fetch_stooq_fast(ticker):
                     nonlocal api_fetched
-                    # Try Polygon
-                    async with polygon_sem:
-                        result = await self._fetch_polygon(session, ticker)
+                    async with stooq_sem:
+                        result = await self._fetch_stooq(session, ticker)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
                             api_fetched += 1
                             fetched_tickers.add(ticker)
                             return
-                        await asyncio.sleep(12)  # 5/min = 12s between calls
-
-                    # Try Tiingo
-                    async with tiingo_sem:
-                        result = await self._fetch_tiingo(session, ticker)
-                        if isinstance(result, pd.DataFrame):
-                            self.store(ticker, result)
-                            api_fetched += 1
-                            fetched_tickers.add(ticker)
-                            return
-                        await asyncio.sleep(7)  # ~8/min
-
-                    # Try FMP
-                    async with fmp_sem:
-                        result = await self._fetch_fmp(session, ticker)
-                        if isinstance(result, pd.DataFrame):
-                            self.store(ticker, result)
-                            api_fetched += 1
-                            fetched_tickers.add(ticker)
-                            return
-                        await asyncio.sleep(15)
-
+                        await asyncio.sleep(0.5)
                     failed_tickers.add(ticker)
 
-                # Process in batches of 10 for API fallback
-                for i in range(0, len(remaining), 10):
-                    batch = remaining[i:i + 10]
-                    await asyncio.gather(*[fetch_with_fallback(t) for t in batch])
-                    done = min(i + 10, len(remaining))
-                    if done % 50 == 0 or done == len(remaining):
-                        print(f'    [{done}/{len(remaining)}] API fetched: {api_fetched} | '
-                              f'Failed: {len(failed_tickers)}')
+                # Process in batches of 20 with concurrent Stooq fetches
+                for i in range(0, len(remaining), 20):
+                    batch = remaining[i:i + 20]
+                    await asyncio.gather(*[fetch_stooq_fast(t) for t in batch])
+                    done = min(i + 20, len(remaining))
+                    elapsed = time.time() - start_time
+                    rate = api_fetched / elapsed * 60 if elapsed > 0 else 0
+                    if done % 100 == 0 or done == len(remaining):
+                        print(f'    [{done}/{len(remaining)}] Stooq: {api_fetched} OK | '
+                              f'{len(failed_tickers)} failed | {elapsed:.0f}s | ~{rate:.0f}/min')
+                    await asyncio.sleep(1)  # Brief pause between batches
+
+            # Phase 3: API fallback for Stooq failures (only if API keys configured)
+            stooq_failed = list(failed_tickers)
+            if stooq_failed and has_api_keys:
+                print(f'\n  [Phase 3] API fallback for {len(stooq_failed)} Stooq failures...')
+                polygon_sem = asyncio.Semaphore(1)
+                tiingo_sem = asyncio.Semaphore(2)
+                fmp_sem = asyncio.Semaphore(1)
+
+                async with aiohttp.ClientSession() as session:
+                    async def fetch_with_api(ticker):
+                        nonlocal api_fetched
+                        if POLYGON_KEY:
+                            async with polygon_sem:
+                                result = await self._fetch_polygon(session, ticker)
+                                if isinstance(result, pd.DataFrame):
+                                    self.store(ticker, result)
+                                    api_fetched += 1
+                                    fetched_tickers.add(ticker)
+                                    failed_tickers.discard(ticker)
+                                    return
+                                await asyncio.sleep(12)
+                        if TIINGO_KEY:
+                            async with tiingo_sem:
+                                result = await self._fetch_tiingo(session, ticker)
+                                if isinstance(result, pd.DataFrame):
+                                    self.store(ticker, result)
+                                    api_fetched += 1
+                                    fetched_tickers.add(ticker)
+                                    failed_tickers.discard(ticker)
+                                    return
+                                await asyncio.sleep(7)
+                        if FMP_KEY:
+                            async with fmp_sem:
+                                result = await self._fetch_fmp(session, ticker)
+                                if isinstance(result, pd.DataFrame):
+                                    self.store(ticker, result)
+                                    api_fetched += 1
+                                    fetched_tickers.add(ticker)
+                                    failed_tickers.discard(ticker)
+                                    return
+                                await asyncio.sleep(15)
+
+                    for i in range(0, len(stooq_failed), 10):
+                        batch = stooq_failed[i:i + 10]
+                        await asyncio.gather(*[fetch_with_api(t) for t in batch])
 
             fetched += api_fetched
-            print(f'  [Phase 2] APIs: {api_fetched} fetched, {len(failed_tickers)} failed')
+            print(f'  [Phase 2] Total: {api_fetched} fetched, {len(failed_tickers)} failed')
 
         elapsed = time.time() - start_time
         print(f'\n[CACHE] Done in {elapsed:.0f}s: {fetched} fetched, '
@@ -555,7 +622,7 @@ class DataCache:
                     nonlocal api_refreshed
                     async with sem:
                         # Try Tiingo (best for incremental updates)
-                        result = await self._fetch_tiingo(session, ticker, days=10)
+                        result = await self._fetch_tiingo(session, ticker, days=10, min_rows=1)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
                             api_refreshed += 1
@@ -565,6 +632,14 @@ class DataCache:
 
                         # Try Polygon
                         result = await self._fetch_polygon(session, ticker)
+                        if isinstance(result, pd.DataFrame):
+                            self.store(ticker, result)
+                            api_refreshed += 1
+                            refreshed_tickers.add(ticker)
+                            return
+
+                        # Try Stooq (unlimited, no API key)
+                        result = await self._fetch_stooq(session, ticker, days=10)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
                             api_refreshed += 1

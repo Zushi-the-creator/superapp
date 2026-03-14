@@ -103,20 +103,27 @@ async def send_signal_alert(signals: List[Dict]):
     if not cfg.get("enabled"):
         return
 
-    sell_signals = [s for s in signals if s.get("action") in ("SELL", "ROTATION")]
+    sell_signals = [s for s in signals if s.get("action") in ("SELL", "ROTATION", "CRASH", "SELL BEFORE EARNINGS")]
+    caution_signals = [s for s in signals if s.get("action") == "CAUTION"]
     buy_signals = [s for s in signals if s.get("action") == "BUY"]
 
-    if not sell_signals and not buy_signals:
+    if not sell_signals and not caution_signals and not buy_signals:
         return
 
     # HTML for email
     rows = ""
     for s in signals:
-        color = "#ef4444" if s["action"] in ("SELL", "ROTATION") else "#10b981"
+        action = s["action"]
+        if action in ("SELL", "ROTATION", "CRASH", "SELL BEFORE EARNINGS"):
+            color = "#ef4444"
+        elif action == "CAUTION":
+            color = "#f59e0b"
+        else:
+            color = "#10b981"
         rows += f"""
         <tr>
             <td style="padding:8px;border-bottom:1px solid #333;color:#fff">{s['ticker']}</td>
-            <td style="padding:8px;border-bottom:1px solid #333;color:{color};font-weight:bold">{s['action']}</td>
+            <td style="padding:8px;border-bottom:1px solid #333;color:{color};font-weight:bold">{action}</td>
             <td style="padding:8px;border-bottom:1px solid #333;color:#aaa">${s.get('price', 0):.2f}</td>
             <td style="padding:8px;border-bottom:1px solid #333;color:#aaa">{s.get('reason', '')}</td>
         </tr>"""
@@ -139,10 +146,17 @@ async def send_signal_alert(signals: List[Dict]):
     </div>"""
 
     # WhatsApp text
-    lines = [f"{'🔴' if s['action'] in ('SELL', 'ROTATION') else '🟢'} {s['action']} {s['ticker']} ${s.get('price', 0):.2f}" for s in signals]
+    def _emoji(action):
+        if action in ("SELL", "ROTATION", "CRASH", "SELL BEFORE EARNINGS"):
+            return "🔴"
+        elif action == "CAUTION":
+            return "🟡"
+        return "🟢"
+    lines = [f"{_emoji(s['action'])} {s['action']} {s['ticker']} ${s.get('price', 0):.2f}" for s in signals]
     wa_text = f"📊 *Trading Signal*\n" + "\n".join(lines)
 
-    subject = f"{'SELL' if sell_signals else 'BUY'} Signal: {', '.join(s['ticker'] for s in signals)}"
+    sig_type = "SELL" if sell_signals else ("CAUTION" if caution_signals else "BUY")
+    subject = f"{sig_type} Signal: {', '.join(s['ticker'] for s in signals)}"
     await _notify(subject, html, wa_text, cfg)
 
 

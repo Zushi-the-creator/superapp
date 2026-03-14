@@ -43,6 +43,7 @@ export function PositionsTable({
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium">Live</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium">P&L</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Weight</th>
+              <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Expected</th>
               <th className="text-center px-3 py-3 text-xs text-neutral-500 font-medium hidden lg:table-cell">20d</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Exit Strategy</th>
               <th className="text-center px-3 py-3 text-xs text-neutral-500 font-medium">Signal</th>
@@ -147,6 +148,25 @@ const PositionRow = memo(function PositionRow({
         <td className="text-right px-3 py-3 text-neutral-400 hidden md:table-cell">
           {pos.weight.toFixed(1)}%
         </td>
+        <td className="text-right px-3 py-3 hidden md:table-cell">
+          <div className={cn("font-medium text-xs", pnlColor(pos.exit_zone_return))}>
+            {pos.exit_zone_return !== 0
+              ? `${pos.exit_zone_return > 0 ? "+" : ""}${pos.exit_zone_return.toFixed(1)}%`
+              : "—"}
+          </div>
+          <div className={cn(
+            "text-[10px]",
+            pos.exit_zone_wr >= 80 ? "text-signal-buy" :
+            pos.exit_zone_wr >= 65 ? "text-amber-400" :
+            pos.exit_zone_wr > 0 ? "text-signal-sell" :
+            "text-neutral-600"
+          )}>
+            {pos.exit_zone_wr > 0 ? `${pos.exit_zone_wr.toFixed(0)}% WR` : "—"}
+          </div>
+          {pos.exit_zone_trades > 0 && (
+            <div className="text-[9px] text-neutral-600">{pos.exit_zone_trades}t</div>
+          )}
+        </td>
         <td className="text-center px-3 py-3 hidden lg:table-cell">
           <button
             onClick={(e) => {
@@ -244,7 +264,7 @@ const PositionRow = memo(function PositionRow({
 
       {isExpanded && (
         <tr className="bg-neutral-900/30">
-          <td colSpan={9} className="px-4 py-3">
+          <td colSpan={10} className="px-4 py-3">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
               <div>
                 <span className="text-neutral-500">RSI(2)</span>
@@ -465,9 +485,14 @@ const PositionRow = memo(function PositionRow({
   );
 }, (prev, next) => {
   // Only re-render if this row's data actually changed
+  // Compare by ticker + key fields instead of object identity
   return (
     prev.isExpanded === next.isExpanded &&
-    prev.pos === next.pos &&
+    prev.pos.ticker === next.pos.ticker &&
+    prev.pos.live_price === next.pos.live_price &&
+    prev.pos.pnl_pct === next.pos.pnl_pct &&
+    prev.pos.signal === next.pos.signal &&
+    prev.pos.days_held === next.pos.days_held &&
     prev.replacement === next.replacement
   );
 });

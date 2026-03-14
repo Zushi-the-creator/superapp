@@ -170,18 +170,25 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
                 check.volume_ratio = volumes[-1] / avg_vol
                 check.volume_confirmed = check.volume_ratio >= 1.5
 
-        # Full backtest
+        # Full backtest — V2.6: RSI<10, next-day open, 30d hold, fee-adjusted, non-overlapping
+        _FEE_PCT = 0.30
+        _HOLD = 30
+        opens = df["Open"].tolist() if "Open" in df.columns else closes
         trades = []
-        for i in range(50, len(closes) - 7):
+        last_exit_day = -1
+        for i in range(50, len(closes) - _HOLD - 1):
+            if i <= last_exit_day:
+                continue
             hist_closes = closes[:i + 1]
             hist_rsi2 = entry.calc_rsi(hist_closes, 2)
             hist_sma50 = entry.calc_sma(hist_closes, 50)
 
-            if hist_rsi2 < 20 and hist_closes[-1] > hist_sma50:
-                entry_p = closes[i]
-                exit_p = closes[i + 7]
-                ret = ((exit_p - entry_p) / entry_p) * 100
+            if hist_rsi2 < 10 and hist_closes[-1] > hist_sma50:
+                entry_p = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
+                exit_p = closes[i + 1 + _HOLD]
+                ret = ((exit_p - entry_p) / entry_p) * 100 - _FEE_PCT
                 trades.append({"return": ret, "win": ret > 0, "rsi": hist_rsi2})
+                last_exit_day = i + 1 + _HOLD
 
         if trades:
             check.overall_trades = len(trades)
@@ -199,6 +206,12 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
             check.zone_wr = sum(1 for t in zone_trades if t["win"]) / len(zone_trades) * 100
 
         # RULE CHECKS
+        # Zone quality: fails ATLAS V2.4 entry VETO = rotate out
+        if check.zone_trades >= 10 and check.zone_return < 0:
+            check.issues.append(f"NEGATIVE zone return ({check.zone_return:+.1f}%, {check.zone_wr:.0f}% WR, {check.zone_trades}t)")
+        elif check.zone_trades >= 10 and check.zone_wr < 65:
+            check.issues.append(f"Zone WR below 65% ({check.zone_wr:.0f}%, {check.zone_return:+.1f}% ret, {check.zone_trades}t)")
+
         if not check.above_sma50:
             check.issues.append(f"BELOW SMA50 (${check.live_price:.2f} < ${check.sma50:.2f}, gap {(check.live_price-check.sma50)/check.sma50*100:+.1f}%)")
 
@@ -307,7 +320,11 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
     print("  [7/8] Generating signals...", end=" ", flush=True)
     for check in results:
         # Priority order: most critical issues first
-        if any("BELOW SMA50" in i for i in check.issues):
+        # NOTE: BELOW SMA50 alone is NOT an exit trigger — ATLAS V2.4 uses per-stock
+        # exit strategies (Fixed14d, RSI80, etc.). SMA50 breach is a CAUTION, not SELL.
+        if any("NEGATIVE zone return" in i for i in check.issues):
+            check.signal = "SELL"
+        elif any("Zone WR below 65%" in i for i in check.issues):
             check.signal = "SELL"
         elif any("CRASH" in i for i in check.issues):
             check.signal = "CRASH"
@@ -317,6 +334,8 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
             check.signal = "SELL"
         elif any("WR below" in i for i in check.issues):
             check.signal = "SELL"
+        elif any("BELOW SMA50" in i for i in check.issues):
+            check.signal = "CAUTION"
         elif any("NEGATIVE sentiment" in i for i in check.issues):
             check.signal = "CAUTION"
         elif any("OVERVALUED" in i for i in check.issues):

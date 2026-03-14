@@ -25,7 +25,7 @@ from macro_policy import (
     adjust_signal_for_macro,
     full_macro_analysis
 )
-from api_v2 import router as v2_router, background_monitor, price_level_monitor, warmup_signal_cache, quote_refresh_loop, cache_refresh_loop, extended_hours_refresh_loop
+from api_v2 import router as v2_router, background_monitor, price_level_monitor, warmup_signal_cache, quote_refresh_loop, cache_refresh_loop, extended_hours_refresh_loop, technicals_refresh_loop
 
 # Optional: RAG/LLM (not installed in production slim build)
 try:
@@ -130,6 +130,9 @@ async def startup_event():
 
     # Centralized quote refresh (replaces per-endpoint Finnhub calls)
     asyncio.create_task(_safe_task("quote_refresh_loop", quote_refresh_loop))
+
+    # Background technicals computation (runs _get_technicals in worker thread)
+    asyncio.create_task(_safe_task("technicals_refresh_loop", technicals_refresh_loop))
 
     # Daily historical cache refresh (keeps stock_cache.db fresh for scanner/backtest)
     asyncio.create_task(_safe_task("cache_refresh_loop", cache_refresh_loop))

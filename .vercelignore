@@ -1,0 +1,7 @@
+backend/
+client/
+claude-scientific-skills/
+data/
+*.db
+*.sqlite
+health_check.sh

@@ -41,15 +41,19 @@ from data_cache import DataCache
 # Regenerate with: python3 -c "from deep_scanner import refresh_universe; import asyncio; asyncio.run(refresh_universe())"
 
 _UNIVERSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_stock_universe.txt")
+# On Fly.io, /app/data is a volume mount — file may be at /app/ instead
+_UNIVERSE_FILE_ALT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "us_stock_universe.txt")
 
 
 def _load_universe(max_stocks: int = 3000) -> List[str]:
     """Load top US stocks from file (sorted by market cap), capped at max_stocks."""
-    if os.path.exists(_UNIVERSE_FILE):
-        with open(_UNIVERSE_FILE) as f:
-            tickers = [line.strip() for line in f if line.strip()]
-        if len(tickers) > 100:
-            return tickers[:max_stocks]
+    for path in [_UNIVERSE_FILE, _UNIVERSE_FILE_ALT]:
+        if os.path.exists(path):
+            with open(path) as f:
+                tickers = [line.strip() for line in f if line.strip()]
+            if len(tickers) > 100:
+                print(f"[Universe] Loaded {len(tickers)} stocks from {path}")
+                return tickers[:max_stocks]
 
     # Fallback: core stocks if file not generated yet
     return [
@@ -110,11 +114,12 @@ class ScanResult:
     zone_trades: int
     zone_win_rate: float
     volume_ratio: float = 0.0  # current vol / 20-day avg vol
-    hold_days: int = 14  # 14-day hold (backtested optimal)
+    hold_days: int = 30  # 30-day hold (V2.6 mega-backtest: +4.31% avg, 61% WR, PF 2.21)
     tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
     # ML-discovered features (SHAP importance ranked #1, #2, #5)
     low52_dist: float = 0.0   # % distance from 52-week low (closer=better bounce)
     atr_pct: float = 0.0      # ATR(14) as % of price (higher volatility=bigger bounce)
+    sma50_buffer: float = 0.0 # % above SMA50 (V2.5: must be >= 10%)
     ret20: float = 0.0        # 20-day price momentum %
     ml_score: float = 0.0     # composite score combining zone_return + ML features
     # Phase 3 (filled later for top candidates)
@@ -141,8 +146,8 @@ class DeepScanner:
 
     @staticmethod
     def _hold_days(rsi: float) -> int:
-        """Fixed 14-day hold period — backtested: 87.7% WR, +11.29% avg (vs 7d: 84%, +6.03%)."""
-        return 14
+        """Fixed 30-day hold period — V2.6 mega-backtest: +4.31% avg, 61% WR, PF 2.21."""
+        return 30
 
     def __init__(self):
         self.entry_engine = EntryEngine()
@@ -217,7 +222,8 @@ class DeepScanner:
     async def phase1_fetch_data(self, tickers: List[str]) -> Dict[str, pd.DataFrame]:
         """
         Phase 1: Load historical data from SQLite cache using BULK read.
-        Only fetches missing tickers via Tiingo (500 req/hr).
+        Fetches missing tickers via ALL APIs (yfinance, Polygon, Tiingo, FMP, Stooq).
+        On cold cache: prioritizes discovered (oversold) stocks for fetching.
         """
         print(f"\n{'='*60}")
         print(f"PHASE 1: Load Historical Data ({len(tickers)} tickers)")
@@ -227,26 +233,43 @@ class DeepScanner:
         t0 = time.time()
 
         # Stage 1: Bulk read from SQLite cache (much faster than individual reads)
-        data = self.cache.get_bulk(tickers, 365)
+        data = self.cache.get_bulk(tickers, 730)
         self.stats["cache_hits"] = len(data)
         missing = [t for t in tickers if t not in data]
 
         print(f"  Cache: {self.stats['cache_hits']} hits in {time.time()-t0:.1f}s | {len(missing)} missing")
 
-        # Stage 2: Fetch missing via Tiingo (only if few and coverage is low)
+        # Stage 2: Fetch missing via ALL APIs
         coverage = len(data) / max(len(tickers), 1) * 100
-        if missing and len(missing) < 50 and coverage < 95:
-            print(f"  Fetching {len(missing)} missing tickers via Tiingo...")
-            result = await self.cache.populate(missing)
-            self.stats["tiingo_fetched"] = result['fetched']
-            self.stats["fetch_failed"] = result['failed']
+        if missing:
+            if len(missing) <= 50:
+                # Small gap: fetch all missing (fast)
+                print(f"  Fetching {len(missing)} missing tickers via all APIs...")
+                fetch_list = missing
+            elif coverage < 30:
+                # Cold/warm cache: ONLY fetch discovered oversold stocks (front of list).
+                # Universe stocks will be populated by cache_refresh_loop background task.
+                # Discovered stocks are always at the FRONT of tickers list.
+                # This keeps scan fast (fetch 30-50 vs 200+ stocks).
+                n_discovered = sum(1 for t in missing if tickers.index(t) < 100)
+                fetch_list = [t for t in missing if tickers.index(t) < 100][:50]
+                print(f"  Fetching {len(fetch_list)} discovered oversold stocks "
+                      f"({len(missing)} total missing, cache {coverage:.0f}% warm)")
+            else:
+                # Warm cache (>30%): skip missing (background task will populate)
+                fetch_list = []
+                print(f"  Skipping {len(missing)} missing tickers (cache {coverage:.0f}% warm)")
 
-            # Read the newly cached data
-            new_data = self.cache.get_bulk(missing, 365)
-            data.update(new_data)
-        elif missing:
-            print(f"  Skipping {len(missing)} missing tickers (too many to fetch)")
-            self.stats["fetch_failed"] = len(missing)
+            if fetch_list:
+                result = await self.cache.populate(fetch_list)
+                self.stats["tiingo_fetched"] = result['fetched']
+                self.stats["fetch_failed"] = result['failed']
+
+                # Read the newly cached data
+                new_data = self.cache.get_bulk(fetch_list, 730)
+                data.update(new_data)
+            else:
+                self.stats["fetch_failed"] = len(missing)
 
         print(f"  Phase 1 complete: {len(data)} stocks with data in {time.time()-t0:.1f}s")
         return data
@@ -274,8 +297,21 @@ class DeepScanner:
         if price <= sma50:
             return None
 
-        # V2.4: RSI(2) must be < 10 for entry
+        # V2.6: RSI(2) < 10 required for entry signal
         if rsi2 >= 10:
+            return None
+
+        sma50_buffer = ((price - sma50) / sma50 * 100) if sma50 > 0 else 0
+
+        # V2.6: ATR(14) as % of price >= 3% (strongest predictor of big winners)
+        atr_values_pre = []
+        for j in range(max(1, len(closes) - 14), len(closes)):
+            tr = max(highs[j] - lows[j],
+                     abs(highs[j] - closes[j - 1]),
+                     abs(lows[j] - closes[j - 1]))
+            atr_values_pre.append(tr)
+        atr_pct_pre = (sum(atr_values_pre) / len(atr_values_pre) / price * 100) if atr_values_pre and price > 0 else 0
+        if atr_pct_pre < 3.0:
             return None
 
         # Regime detection
@@ -309,8 +345,9 @@ class DeepScanner:
 
         trades = []
         zone_trades_list = []
-        last_exit_day = -1  # Prevent overlapping trades
-        for i in range(50, len(closes) - 15):  # ensure room for 14-day hold + 1
+        last_exit_day = -1  # Prevent overlapping entry trades
+        zone_last_exit = -1  # Prevent overlapping zone trades (was inflating returns)
+        for i in range(50, len(closes) - 31):  # ensure room for 30-day hold + 1
             hist_closes = closes[:i+1]
             hist_rsi2 = self.entry_engine.calc_rsi(hist_closes, 2)
             hist_sma50 = self.entry_engine.calc_sma(hist_closes, 50)
@@ -326,34 +363,27 @@ class DeepScanner:
             exit_price = closes[i + 1 + fwd]
             ret = ((exit_price - entry_price) / entry_price) * 100 - _FEE_PCT
 
-            # Collect entry trades (RSI < 10, no overlap)
+            # Collect entry trades (RSI < 10 strict V2.6, no overlap)
             if hist_rsi2 < 10 and i > last_exit_day:
                 trades.append({"return": ret, "win": ret > 0, "rsi": hist_rsi2,
                                "hold": fwd})
                 last_exit_day = i + 1 + fwd
 
-            # Collect zone trades (current RSI zone, above SMA50 — separate from entry)
-            if zone_lo <= hist_rsi2 < zone_hi:
+            # Collect zone trades (current RSI zone, above SMA50 — non-overlapping)
+            if zone_lo <= hist_rsi2 < zone_hi and i > zone_last_exit:
                 zone_trades_list.append({"return": ret, "win": ret > 0})
+                zone_last_exit = i + 1 + fwd
 
-        if len(trades) < 10:
+        if len(trades) < 5:
             return None
 
         wins = sum(1 for t in trades if t["win"])
         win_rate = wins / len(trades) * 100
         avg_return = sum(t["return"] for t in trades) / len(trades)
 
-        if win_rate < 65:
+        # V2.6 price filter
+        if price < 10:
             return None
-
-        # Recency check: last 10 trades must also show positive edge
-        # Prevents stocks whose pattern worked at $5 but fails at $25
-        if len(trades) >= 10:
-            recent = trades[-10:]
-            recent_wr = sum(1 for t in recent if t["win"]) / len(recent) * 100
-            recent_avg = sum(t["return"] for t in recent) / len(recent)
-            if recent_wr < 40 or recent_avg < -2:
-                return None  # Recent pattern is broken
 
         if not zone_trades_list:
             zone_return = avg_return
@@ -363,9 +393,6 @@ class DeepScanner:
             zone_return = sum(t["return"] for t in zone_trades_list) / len(zone_trades_list)
             zone_wr = sum(1 for t in zone_trades_list if t["win"]) / len(zone_trades_list) * 100
             zone_count = len(zone_trades_list)
-
-        if zone_return <= 0:
-            return None
 
         self.stats["passed"] += 1
 
@@ -414,6 +441,7 @@ class DeepScanner:
             tier=tier,
             low52_dist=round(low52_dist, 1),
             atr_pct=round(atr_pct, 2),
+            sma50_buffer=round(sma50_buffer, 1),
             ret20=round(ret20, 1),
             ml_score=round(ml_score, 2),
             source=source,
@@ -426,13 +454,17 @@ class DeepScanner:
         print(f"PHASE 2: RSI(2) Filter + Deep Backtest ({len(stock_data)} stocks)")
         print(f"{'='*60}")
 
-        # FAST PRE-FILTER: Only compute RSI(2) + SMA50 check (< 1ms per stock)
-        # Skip expensive full backtest for stocks that can't possibly pass
+        # PRE-FILTER: RSI(2)<10 + above SMA50 + price>=$10 + ATR>=3%
         candidates = {}
         skipped = 0
         for ticker, df in stock_data.items():
-            closes = df['Close'].dropna().tolist()
+            df_clean = df.dropna(subset=['Close'])
+            closes = df_clean['Close'].tolist()
             if len(closes) < 60:
+                skipped += 1
+                continue
+            # V2.6: price >= $10
+            if closes[-1] < 10:
                 skipped += 1
                 continue
             rsi2 = self.entry_engine.calc_rsi(closes, 2)
@@ -443,9 +475,22 @@ class DeepScanner:
             if closes[-1] <= sma50:
                 skipped += 1
                 continue
+            # V2.6: ATR(14)% >= 3%
+            highs = df_clean['High'].tolist() if 'High' in df_clean.columns else closes
+            lows = df_clean['Low'].tolist() if 'Low' in df_clean.columns else closes
+            atr_vals = []
+            for j in range(max(1, len(closes) - 14), len(closes)):
+                tr = max(highs[j] - lows[j],
+                         abs(highs[j] - closes[j - 1]),
+                         abs(lows[j] - closes[j - 1]))
+                atr_vals.append(tr)
+            atr_pct = (sum(atr_vals) / len(atr_vals) / closes[-1] * 100) if atr_vals and closes[-1] > 0 else 0
+            if atr_pct < 3.0:
+                skipped += 1
+                continue
             candidates[ticker] = df
 
-        print(f"  Pre-filter: {len(candidates)} candidates (skipped {skipped} not oversold/below SMA50)")
+        print(f"  Pre-filter: {len(candidates)} candidates (skipped {skipped} — RSI<10/above SMA50/price>=$10/ATR>=3%)")
 
         # Deep backtest only on pre-filtered candidates
         results = []
@@ -458,8 +503,8 @@ class DeepScanner:
         results.sort(key=lambda r: r.ml_score, reverse=True)
         self.stats["candidates"] = len(results)
 
-        print(f"  Phase 2 complete: {len(results)} stocks passed all filters")
-        print(f"  (RSI(2)<10 + above SMA50 + not BEAR + WR>=65% + 10+ trades + zone return > 0)")
+        print(f"  Phase 2 complete: {len(results)} stocks passed V2.6 filters")
+        print(f"  (RSI(2)<10 + above SMA50 + price>=$10 + ATR>=3% + not BEAR + 3+ trades)")
         return results
 
     # ─── Phase 3: Validate Top N ─────────────────────────────────────────
@@ -540,13 +585,7 @@ class DeepScanner:
                             if r.analyst_target > 0:
                                 r.analyst_upside = round(
                                     ((r.analyst_target - r.price) / r.price) * 100, 1)
-                            if r.analyst_target > 0 and r.price > r.analyst_target:
-                                r.vetoed = True
-                                r.veto_reason = f"Overvalued (${r.price} > target ${r.analyst_target})"
-                            # V2.4: VETO Hold/Sell/Underperform consensus
-                            if not r.vetoed and r.analyst_consensus in ("Hold", "Sell", "Underperform"):
-                                r.vetoed = True
-                                r.veto_reason = f"Analyst says {r.analyst_consensus}"
+                            # Overvalued + analyst consensus are now ranking factors, not vetos
                     except Exception as e:
                         print(f"  {r.ticker}: Analyst check failed: {e}")
 

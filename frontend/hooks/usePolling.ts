@@ -46,12 +46,14 @@ export function usePolling<T>({
   fetcherRef.current = fetcher;
 
   const errorCountRef = useRef(0);
+  const hasDataRef = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
-      setLoading((prev) => data === null ? true : prev); // Only show loading on first fetch
+      setLoading((prev) => !hasDataRef.current ? true : prev); // Only show loading on first fetch
       const result = await fetcherRef.current();
       setData(result);
+      hasDataRef.current = true;
       setError(null);
       setLastUpdated(new Date());
       errorCountRef.current = 0;
@@ -61,7 +63,7 @@ export function usePolling<T>({
     } finally {
       setLoading(false);
     }
-  }, [data]);
+  }, []); // No dependencies — uses refs for mutable state
 
   useEffect(() => {
     if (!enabled) return;

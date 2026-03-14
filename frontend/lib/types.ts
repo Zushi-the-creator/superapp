@@ -82,6 +82,7 @@ export interface PortfolioSummary {
   day_pnl_pct: number;
   realized_pnl: number;
   total_fees: number;
+  total_deposited: number;
   position_count: number;
   avg_win_rate: number;
   cash: number;
@@ -133,6 +134,8 @@ export interface ScanOpportunity {
   zone_win_rate: number;
   volume_ratio: number;
   hold_days: number;
+  atr_pct: number;
+  sma50_buffer: number;
   analyst_consensus: string;
   analyst_target: number;
   analyst_upside: number;
@@ -142,6 +145,11 @@ export interface ScanOpportunity {
   veto_reason: string;
   score: number;
   wr_tier: string; // TIER1 (80%+), TIER2 (70%+), TIER3 (65%+)
+  // Composite ranking
+  quality_tier: string; // BEST, GOOD, FAIR, WEAK, POOR
+  composite_score: number; // 0-100
+  ranking_factors: string; // "ZR:8.2 WR:75 RSI:3 ATR:5.1 ..."
+  meets_strict: boolean; // passes all original strict ATLAS V2.5 criteria
   beats_holdings: string[];
   is_upgrade: boolean;
 }
@@ -159,6 +167,7 @@ export interface ScanResponse {
   timestamp: string;
   total_scanned: number;
   passed: number;
+  ranked_count: number; // total stocks ranked (includes non-strict)
   opportunities: ScanOpportunity[];
   holdings_scores: HoldingScore[];
   worst_holding: string;

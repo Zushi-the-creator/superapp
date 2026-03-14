@@ -11,10 +11,11 @@ const nextConfig: NextConfig = {
   async rewrites() {
     // Only proxy in dev — in production, vercel.json rewrites handle this
     if (process.env.NODE_ENV === "production") return [];
+    const dest = process.env.API_PROXY || "http://localhost:8000/api/:path*";
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        destination: dest,
       },
     ];
   },

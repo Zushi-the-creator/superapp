@@ -22,10 +22,24 @@ export function KPICards({
     );
   }
 
+  // Total P&L = realized + unrealized - all fees (commissions + broker tax)
+  const totalPnl = (summary.realized_pnl ?? 0) + summary.total_pnl - summary.total_fees;
+  const totalPnlPct = (summary.total_deposited ?? 0) > 0
+    ? (totalPnl / summary.total_deposited) * 100 : 0;
+
   const cards = [
+    {
+      label: "Total P&L",
+      value: `${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(1)}%`,
+      sub: formatCurrency(totalPnl),
+      icon: TrendingUp,
+      color: pnlColor(totalPnlPct),
+      bg: totalPnlPct >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
+    },
     {
       label: "Portfolio Value",
       value: formatCurrency(summary.total_value),
+      sub: `Cash: ${formatCurrency(summary.cash ?? 0)} · ${formatCurrency(summary.total_deposited ?? 0)} invested`,
       icon: DollarSign,
       color: "text-blue-400",
       bg: "bg-blue-500/10",
@@ -40,7 +54,7 @@ export function KPICards({
     {
       label: "Realized P&L",
       value: `${formatCurrency(summary.realized_pnl ?? 0)}`,
-      sub: summary.total_fees ? `Fees: ${formatCurrency(summary.total_fees)}` : undefined,
+      sub: `Fees: ${formatCurrency(summary.total_fees)}`,
       icon: Banknote,
       color: pnlColor(summary.realized_pnl ?? 0),
       bg: (summary.realized_pnl ?? 0) >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",

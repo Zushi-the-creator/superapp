@@ -14,6 +14,9 @@ const MILESTONES: { date: string; label: string; color: string }[] = [
   { date: "2026-02-06", label: "Sentiment Veto", color: "#8b5cf6" },
   { date: "2026-02-12", label: "Earnings Veto", color: "#f59e0b" },
   { date: "2026-02-18", label: "V2.3 14d Hold", color: "#06b6d4" },
+  { date: "2026-02-27", label: "$3.5K Deposit", color: "#22c55e" },
+  { date: "2026-02-28", label: "V2.4 + Iran War", color: "#ef4444" },
+  { date: "2026-03-02", label: "TradingDays Fix", color: "#a855f7" },
 ];
 
 function linearRegression(points: { x: number; y: number }[]) {
@@ -146,9 +149,9 @@ export function PerformanceTab() {
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 pb-20 md:pb-6">
         {/* Summary cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-          {/* Portfolio P&L % (realized + unrealized) */}
+          {/* 1. Total P&L — the real number */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Portfolio P&L %</span>
+            <span className="text-xs text-neutral-500">Total P&L</span>
             {(() => {
               const totalPnl = (data?.total_realized ?? 0) + (data?.total_unrealized ?? 0) - (data?.total_fees ?? 0);
               const totalPct = (data?.total_deposited ?? 0) > 0
@@ -159,21 +162,43 @@ export function PerformanceTab() {
                     {totalPct >= 0 ? "+" : ""}{totalPct.toFixed(1)}%
                   </div>
                   <span className={cn("text-[10px]", pnlColor(totalPnl))}>
-                    {formatCurrency(totalPnl)} total
+                    {formatCurrency(totalPnl)}
                   </span>
                 </>
               );
             })()}
           </div>
+          {/* 2. Unrealized — open positions */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Realized P&L %</span>
-            <div className={cn("text-xl font-bold", pnlColor(data?.realized_pnl_pct ?? 0))}>
-              {(data?.realized_pnl_pct ?? 0) >= 0 ? "+" : ""}{data?.realized_pnl_pct?.toFixed(1) ?? 0}%
+            <span className="text-xs text-neutral-500">Unrealized</span>
+            <div className={cn("text-xl font-bold", pnlColor(data?.total_unrealized ?? 0))}>
+              {formatCurrency(data?.total_unrealized ?? 0)}
             </div>
             <span className="text-[10px] text-neutral-500">
-              on {formatCurrency(data?.total_deposited ?? 0)} invested
+              open positions
             </span>
           </div>
+          {/* 3. Realized — closed trades */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+            <span className="text-xs text-neutral-500">Realized</span>
+            <div className={cn("text-xl font-bold", pnlColor(data?.total_realized ?? 0))}>
+              {formatCurrency(data?.total_realized ?? 0)}
+            </div>
+            <span className="text-[10px] text-neutral-500">
+              closed trades
+            </span>
+          </div>
+          {/* 4. Net After Tax */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+            <span className="text-xs text-neutral-500">Net After Tax</span>
+            <div className={cn("text-xl font-bold", pnlColor(data?.net_realized ?? 0))}>
+              {formatCurrency(data?.net_realized ?? 0)}
+            </div>
+            <span className="text-[10px] text-neutral-500">
+              -{formatCurrency(data?.tax_amount ?? 0)} tax
+            </span>
+          </div>
+          {/* 5. Win Rate */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Win Rate</span>
             <div className={cn("text-xl font-bold", (data?.win_rate ?? 0) >= 50 ? "text-signal-buy" : "text-signal-sell")}>
@@ -183,38 +208,29 @@ export function PerformanceTab() {
               {data?.win_count ?? 0}W / {data?.loss_count ?? 0}L
             </span>
           </div>
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Realized P&L</span>
-            <div className={cn("text-xl font-bold", pnlColor(data?.total_realized ?? 0))}>
-              {formatCurrency(data?.total_realized ?? 0)}
-            </div>
-          </div>
+          {/* 6. Total Fees */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Total Fees</span>
             <div className="text-xl font-bold text-neutral-400">
               {formatCurrency(data?.total_fees ?? 0)}
             </div>
+            <span className="text-[10px] text-neutral-500">
+              on {formatCurrency(data?.total_deposited ?? 0)}
+            </span>
           </div>
+          {/* 7. Avg Win */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Avg Win</span>
             <div className="text-xl font-bold text-signal-buy">
               +{data?.avg_win_pct?.toFixed(1) ?? 0}%
             </div>
           </div>
+          {/* 8. Avg Loss */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Avg Loss</span>
             <div className="text-xl font-bold text-signal-sell">
               {data?.avg_loss_pct?.toFixed(1) ?? 0}%
             </div>
-          </div>
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Tax ({data?.tax_rate ?? 25}%)</span>
-            <div className="text-xl font-bold text-amber-400">
-              -{formatCurrency(data?.tax_amount ?? 0)}
-            </div>
-            <span className={cn("text-[10px]", pnlColor(data?.net_realized ?? 0))}>
-              Net: {formatCurrency(data?.net_realized ?? 0)}
-            </span>
           </div>
         </div>
 

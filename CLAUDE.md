@@ -18,7 +18,7 @@
 - **EARNINGS CALENDAR**: ALWAYS check earnings calendar (Finnhub) before ANY buy recommendation. VETO any stock with earnings within 7 days. Also check portfolio holdings for upcoming earnings and WARN user. Use `python3 deep_scanner.py` which has built-in earnings VETO (MANDATORY)
 - **WEIGHTED ALLOCATION**: When deploying new capital, weight by zone expected return - NOT equal weight. Stocks with higher zone returns get more capital (MANDATORY)
 - **TRUST BACKTESTS**: If backtests are valid (WR > 55%, 10+ trades, zone trades >= 5), trust the data regardless of stock price. Only filter penny stocks under $5. Be confident with all stocks the model validates (MANDATORY)
-- **NEVER SELL BEFORE EXIT TRIGGERS**: NEVER recommend selling a position before its backtested exit strategy triggers. The /analyze endpoint scores are for NEW entries only — a stock's current score dropping does NOT invalidate the original entry signal. If the exit strategy says Fixed21d, hold for 21 days. If Stop8T10, hold until stop or target hits. NO manual overrides, NO "rotation" before exit. This is the #1 rule that prevents emotional trading (MANDATORY)
+- **EXIT TRIGGERS (UPDATED 2026-03-09)**: Hold positions until backtested exit strategy triggers (Fixed14d/21d, stop loss, target hit). But these are VALID early exit reasons: (a) Earnings within 7 days — binary event risk, always EXIT. (b) Stock-specific negative sentiment (downgrade, earnings miss, product failure) — EXIT. (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT. What is NOT a valid exit: market-wide crash headlines, war panic across all stocks, RSI rising (trade working). Distinguish STOCK-SPECIFIC bad news from MARKET-WIDE noise. (MANDATORY)
 
 ---
 
