@@ -762,7 +762,8 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
 
     # Use 2yr stats as primary when they have more trades (more reliable)
     # 1yr with 3-5 trades showing 100% WR is misleading — 2yr with 8-10 trades is real
-    if trades_2yr >= 6 and trades_2yr > len(trades):
+    # Threshold lowered from 6 to 4: with Fixed30d + overlap prevention, 4 trades in 2yr is meaningful
+    if trades_2yr >= 4 and trades_2yr > len(trades):
         wr = wr_2yr
         avg_ret = avg_ret_2yr
     else:
@@ -827,7 +828,7 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
         "regime": regime,
         "tier": tier,
         "win_rate": round(wr, 1),
-        "total_trades": trades_2yr if trades_2yr >= 6 and trades_2yr > len(trades) else len(trades),
+        "total_trades": trades_2yr if trades_2yr >= 4 and trades_2yr > len(trades) else len(trades),
         "avg_return": round(avg_ret, 2),
         "zone_return": round(zone_ret, 2),
         "zone_wr": round(zone_wr, 1),
