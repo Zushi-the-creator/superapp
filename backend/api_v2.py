@@ -2184,7 +2184,12 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     vetoed = r.get("vetoed", False)
     veto_reason = r.get("veto_reason", "")
 
-    # VETO filters — aligned with CLAUDE.md V2.6
+    # VETO filters — aligned with CLAUDE.md V2.6 + research best practices
+    trades_count = r.get("trades", 0)
+    # 0. Minimum 10 trades (below this, WR is statistically meaningless)
+    if not vetoed and trades_count < 10:
+        vetoed = True
+        veto_reason = f"Too few trades ({trades_count} < 10 minimum)"
     # 1. Price minimum
     if not vetoed and price < 10:
         vetoed = True
