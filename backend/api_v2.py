@@ -1118,6 +1118,8 @@ async def get_portfolio():
                 issues.append("Below SMA50")
             if rsi2 > 80:
                 issues.append("Overbought (RSI > 80) — trade working")
+            if atlas_trades > 0 and atlas_trades < 6:
+                issues.append(f"Low sample ({atlas_trades} trades) — WR {atlas_wr:.0f}% may be unreliable")
         # Crash warning — note but DON'T override signal for existing positions.
         # Crash filter is for NEW entries (veto buying). For holdings, trust exit strategy.
         # See lesson #28: during broad crashes, selling on panic = emotional trading.
