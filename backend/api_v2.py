@@ -666,13 +666,33 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
     return result
 
 
+def _wilson_lower(wins: int, total: int, z: float = 1.96) -> float:
+    """Wilson score lower bound — 95% CI floor for win rate."""
+    if total == 0:
+        return 0.0
+    p = wins / total
+    denom = 1 + z**2 / total
+    center = (p + z**2 / (2 * total)) / denom
+    spread = z * ((p * (1 - p) + z**2 / (4 * total)) / total) ** 0.5 / denom
+    return round(max(0, center - spread) * 100, 1)
+
+# Universe prior for Bayesian shrinkage (from 27,877-trade mega-backtest)
+_UNIVERSE_WR = 53.5  # pooled WR across 2,683 stocks
+_BAYESIAN_PRIOR_WEIGHT = 10  # equivalent to 10 "phantom" trades at universe WR
+
+def _bayesian_wr(wins: int, total: int) -> float:
+    """Bayesian shrinkage: pull observed WR toward universe prior.
+    Small samples get pulled hard; large samples trusted at face value."""
+    prior_wins = _UNIVERSE_WR / 100 * _BAYESIAN_PRIOR_WEIGHT
+    prior_losses = _BAYESIAN_PRIOR_WEIGHT - prior_wins
+    return round((wins + prior_wins) / (total + _BAYESIAN_PRIOR_WEIGHT) * 100, 1)
+
+
 def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -> Dict:
     """Get RSI, SMA50, regime, backtest stats from cache.
-    Dual-timeframe: 1yr (365d) for primary signal, 2yr (730d) as safety gate.
-    Validated on 23 past trades: 1yr accuracy 52%, 2yr accuracy 61%.
-    2yr catches more losses (9/13 vs 6/13) — use as conservative filter.
+    5yr (1260d) lookback for robust backtests.
     """
-    df = _cache.get(ticker, 365)
+    df = _cache.get(ticker, 1260)
     if df is None or len(df) < 60:
         # Fallback: try fetching from Stooq directly (for cold cache on Fly)
         try:
@@ -729,46 +749,14 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
             trades.append({"return": ret, "win": ret > 0, "rsi": hist_rsi})
             last_exit_day = i + 1 + 30
 
-    wr_1yr = sum(1 for t in trades if t["win"]) / len(trades) * 100 if trades else 0
-    avg_ret_1yr = sum(t["return"] for t in trades) / len(trades) if trades else 0
+    wins_count = sum(1 for t in trades if t["win"])
+    wr = wins_count / len(trades) * 100 if trades else 0
+    avg_ret = sum(t["return"] for t in trades) / len(trades) if trades else 0
 
-    # 2yr safety gate: same backtest on 730d data (catches regime changes 1yr misses)
-    # V2.6: Fixed30d hold period (was 21d)
-    df_2yr = _cache.get(ticker, 730)
+    # 2yr safety gate removed — primary lookback is now 5yr (1260d)
     wr_2yr = 0.0
     avg_ret_2yr = 0.0
     trades_2yr = 0
-    if df_2yr is not None and len(df_2yr) >= 60:
-        df_2yr = df_2yr.dropna(subset=["Close"])
-        if len(df_2yr) >= 60:
-            c2 = df_2yr["Close"].tolist()
-            o2 = df_2yr["Open"].tolist() if "Open" in df_2yr.columns else c2
-            _last_exit_2yr = -1
-            _trades_2yr = []
-            for i in range(50, len(c2) - 32):
-                if i <= _last_exit_2yr:
-                    continue
-                _hc = c2[:i + 1]
-                _hr = _entry.calc_rsi(_hc, 2)
-                _hs = _entry.calc_sma(_hc, 50)
-                if _hr < 10 and _hc[-1] > _hs:
-                    _ep = o2[i + 1] if i + 1 < len(o2) and o2[i + 1] > 0 else c2[i]
-                    _r = ((c2[i + 1 + 30] - _ep) / _ep) * 100 - _FEE_PCT
-                    _trades_2yr.append({"return": _r, "win": _r > 0})
-                    _last_exit_2yr = i + 1 + 30
-            wr_2yr = sum(1 for t in _trades_2yr if t["win"]) / len(_trades_2yr) * 100 if _trades_2yr else 0
-            avg_ret_2yr = sum(t["return"] for t in _trades_2yr) / len(_trades_2yr) if _trades_2yr else 0
-            trades_2yr = len(_trades_2yr)
-
-    # Use 2yr stats as primary when they have more trades (more reliable)
-    # 1yr with 3-5 trades showing 100% WR is misleading — 2yr with 8-10 trades is real
-    # Threshold lowered from 6 to 4: with Fixed30d + overlap prevention, 4 trades in 2yr is meaningful
-    if trades_2yr >= 4 and trades_2yr > len(trades):
-        wr = wr_2yr
-        avg_ret = avg_ret_2yr
-    else:
-        wr = wr_1yr
-        avg_ret = avg_ret_1yr
 
     # RSI zone (buy-signal trades only — for entry analysis)
     zone_low = min(int(rsi2 // 10) * 10, 90)  # Cap at 90 so zone 90-100 includes RSI=100
@@ -828,7 +816,10 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
         "regime": regime,
         "tier": tier,
         "win_rate": round(wr, 1),
-        "total_trades": trades_2yr if trades_2yr >= 4 and trades_2yr > len(trades) else len(trades),
+        "bayesian_wr": _bayesian_wr(wins_count, len(trades)),
+        "wilson_lower": _wilson_lower(wins_count, len(trades)),
+        "trades_per_year": round(len(trades) / max(len(closes) / 252, 0.5), 1),
+        "total_trades": len(trades),
         "avg_return": round(avg_ret, 2),
         "zone_return": round(zone_ret, 2),
         "zone_wr": round(zone_wr, 1),
@@ -1177,6 +1168,9 @@ async def get_portfolio():
             regime=regime,
             tier="NONE" if (tech and tech.get("exit_triggered", False)) else (tech.get("tier", "NONE") if tech else "NONE"),
             win_rate=tech.get("win_rate", 0) if tech else 0,
+            bayesian_wr=tech.get("bayesian_wr", tech.get("win_rate", 0)) if tech else 0,
+            wilson_lower=tech.get("wilson_lower", 0) if tech else 0,
+            trades_per_year=tech.get("trades_per_year", 0) if tech else 0,
             total_trades=tech.get("total_trades", 0) if tech else 0,
             avg_return=tech.get("avg_return", 0) if tech else 0,
             zone_return=tech.get("zone_return", 0) if tech else 0,
@@ -1931,9 +1925,9 @@ async def get_best_replacement(sell_ticker: str):
 
 
 def _backtest_7day(ticker: str) -> dict:
-    """Backtest using ATLAS V2.5: RSI<10 entry, 21-day fixed hold, price > SMA50.
+    """Backtest using ATLAS V2.5: RSI<10 entry, 30-day fixed hold, price > SMA50.
     Fallback for holdings scoring when hybrid exit data unavailable."""
-    df = _cache.get(ticker, 365)
+    df = _cache.get(ticker, 1260)
     if df is None or len(df) < 60:
         return {}
 
@@ -1960,12 +1954,14 @@ def _backtest_7day(ticker: str) -> dict:
             trades.append({"return": ret, "win": ret > 0})
             last_exit_day = i + 1 + 30
 
-    if len(trades) < 5:
+    if len(trades) < 10:
         return {}
 
-    wr = sum(1 for t in trades if t["win"]) / len(trades) * 100
+    wins_7d = sum(1 for t in trades if t["win"])
+    wr = wins_7d / len(trades) * 100
     avg_ret = sum(t["return"] for t in trades) / len(trades)
-    return {"win_rate": round(wr, 1), "avg_return": round(avg_ret, 2), "trades": len(trades)}
+    return {"win_rate": round(wr, 1), "avg_return": round(avg_ret, 2), "trades": len(trades),
+            "bayesian_wr": _bayesian_wr(wins_7d, len(trades))}
 
 
 def _get_holdings_scores() -> tuple:
@@ -1980,6 +1976,8 @@ def _get_holdings_scores() -> tuple:
         # Use hybrid strategy return if available, fallback to fixed 7d
         strat_ret = tech.get("exit_strategy_ret", 0) if tech else 0
         strat_wr = tech.get("exit_strategy_wr", 0) if tech else 0
+        if tech and tech.get("bayesian_wr"):
+            strat_wr = min(strat_wr, tech["bayesian_wr"])  # Use the more conservative estimate
         if strat_ret == 0 or strat_wr == 0:
             try:
                 bt = _backtest_7day(ticker)
@@ -2196,10 +2194,12 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     if not vetoed and r.get("sentiment_score", 0) < -0.3:
         vetoed = True
         veto_reason = f"Negative sentiment ({r.get('sentiment_score', 0):.2f})"
-    # 4. Zone WR < 65% (with sufficient zone trades)
-    if not vetoed and zone_trades >= 5 and zone_wr < 65:
-        vetoed = True
-        veto_reason = f"Zone WR too low ({zone_wr:.0f}% < 65%, {zone_trades} trades)"
+    # 4. Zone WR < 55% Bayesian (shrunk toward universe prior)
+    if not vetoed and zone_trades >= 5:
+        _bayes_zone = _bayesian_wr(int(zone_wr * zone_trades / 100), zone_trades)
+        if _bayes_zone < 55:
+            vetoed = True
+            veto_reason = f"Bayesian zone WR too low ({_bayes_zone:.0f}% < 55%, raw {zone_wr:.0f}%)"
     # 5. Zone trades < 5 (insufficient sample)
     if not vetoed and zone_trades < 5 and r.get("trades", 0) < 10:
         vetoed = True

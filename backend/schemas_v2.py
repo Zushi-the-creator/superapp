@@ -80,7 +80,11 @@ class PositionDetail(BaseModel):
     exit_strategy_validation: str = ""  # VALID / CAUTION / REJECTED / NO_DATA
     exit_strategy_oos_ci_lo: float = 0  # Wilson CI lower bound
     exit_strategy_oos_ci_hi: float = 0  # Wilson CI upper bound
-    # 2yr safety gate (catches regime changes 1yr misses)
+    # Bayesian / statistical confidence
+    bayesian_wr: float = 0
+    wilson_lower: float = 0
+    trades_per_year: float = 0
+    # 2yr safety gate (legacy, kept for backward compat)
     wr_2yr: float = 0
     avg_ret_2yr: float = 0
     trades_2yr: int = 0
@@ -169,6 +173,7 @@ class ScanOpportunity(BaseModel):
     sma50_buffer: float = 0  # % above SMA50 (V2.5: must be >= 10%)
     ret20: float = 0       # 20-day price momentum %
     ml_score: float = 0    # composite ML-weighted score
+    bayesian_wr: float = 0
     analyst_consensus: str = ""
     analyst_target: float = 0
     analyst_upside: float = 0

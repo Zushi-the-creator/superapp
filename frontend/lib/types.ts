@@ -59,6 +59,10 @@ export interface PositionDetail {
   ext_price: number | null;
   ext_change_pct: number | null;
   market_session: string; // PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
+  // Bayesian stats
+  bayesian_wr?: number;
+  wilson_lower?: number;
+  trades_per_year?: number;
   // Signal
   signal: string;
   issues: string[];
@@ -150,6 +154,7 @@ export interface ScanOpportunity {
   composite_score: number; // 0-100
   ranking_factors: string; // "ZR:8.2 WR:75 RSI:3 ATR:5.1 ..."
   meets_strict: boolean; // passes all original strict ATLAS V2.5 criteria
+  bayesian_wr?: number;
   beats_holdings: string[];
   is_upgrade: boolean;
 }

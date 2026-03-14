@@ -285,7 +285,30 @@ const PositionRow = memo(function PositionRow({
               <div>
                 <span className="text-neutral-500">Win Rate</span>
                 <div className="text-neutral-200 font-medium">
-                  {pos.win_rate.toFixed(1)}% ({pos.total_trades} trades)
+                  {(pos.bayesian_wr ?? pos.win_rate).toFixed(1)}%
+                  {pos.bayesian_wr != null && Math.abs(pos.bayesian_wr - pos.win_rate) >= 2 && (
+                    <span className="text-[10px] text-neutral-500 ml-1">(raw: {pos.win_rate.toFixed(0)}%)</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className={cn(
+                    "text-[10px] font-medium",
+                    (pos.total_trades ?? 0) < 10 ? "text-signal-sell" :
+                    (pos.total_trades ?? 0) < 20 ? "text-amber-400" :
+                    "text-neutral-500"
+                  )}>
+                    {pos.total_trades} trades
+                  </span>
+                  {pos.trades_per_year != null && (
+                    <span className="text-[10px] text-neutral-600">
+                      ({pos.trades_per_year.toFixed(0)}/yr)
+                    </span>
+                  )}
+                  {pos.wilson_lower != null && pos.wilson_lower > 0 && (
+                    <span className="text-[10px] text-neutral-600">
+                      CI&ge;{pos.wilson_lower.toFixed(0)}%
+                    </span>
+                  )}
                 </div>
               </div>
               <div>

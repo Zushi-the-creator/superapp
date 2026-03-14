@@ -233,7 +233,7 @@ class DeepScanner:
         t0 = time.time()
 
         # Stage 1: Bulk read from SQLite cache (much faster than individual reads)
-        data = self.cache.get_bulk(tickers, 730)
+        data = self.cache.get_bulk(tickers, 1260)
         self.stats["cache_hits"] = len(data)
         missing = [t for t in tickers if t not in data]
 
@@ -266,7 +266,7 @@ class DeepScanner:
                 self.stats["fetch_failed"] = result['failed']
 
                 # Read the newly cached data
-                new_data = self.cache.get_bulk(fetch_list, 730)
+                new_data = self.cache.get_bulk(fetch_list, 1260)
                 data.update(new_data)
             else:
                 self.stats["fetch_failed"] = len(missing)
@@ -374,7 +374,7 @@ class DeepScanner:
                 zone_trades_list.append({"return": ret, "win": ret > 0})
                 zone_last_exit = i + 1 + fwd
 
-        if len(trades) < 5:
+        if len(trades) < 10:
             return None
 
         wins = sum(1 for t in trades if t["win"])

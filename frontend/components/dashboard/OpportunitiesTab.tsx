@@ -339,7 +339,18 @@ function OpportunityCard({
         <div>
           <span className="text-neutral-500">Win Rate</span>
           <div className="text-neutral-200 font-medium">
-            {opp.win_rate.toFixed(1)}%
+            {(opp.bayesian_wr ?? opp.win_rate).toFixed(1)}%
+            {opp.bayesian_wr != null && Math.abs(opp.bayesian_wr - opp.win_rate) >= 2 && (
+              <span className="text-[10px] text-neutral-500 ml-1">(raw: {opp.win_rate.toFixed(0)}%)</span>
+            )}
+          </div>
+          <div className={cn(
+            "text-[10px] font-medium",
+            (opp.trades ?? 0) < 10 ? "text-signal-sell" :
+            (opp.trades ?? 0) < 20 ? "text-amber-400" :
+            "text-neutral-500"
+          )}>
+            {opp.trades} trades
           </div>
         </div>
         <div>

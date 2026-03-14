@@ -24,7 +24,7 @@ def calc_sma(closes, period=50):
     return _entry.calc_sma(closes, period)
 
 
-def backtest_stock(ticker: str, days=365):
+def backtest_stock(ticker: str, days=1260):
     """Run the EXACT same backtest as _get_technicals in api_v2.py."""
     df = _cache.get(ticker, days)
     if df is None or len(df) < 60:
