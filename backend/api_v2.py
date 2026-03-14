@@ -2251,6 +2251,10 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     if not vetoed and analyst_con in ("Hold", "Sell", "Underperform", "Strong Sell"):
         vetoed = True
         veto_reason = f"Analyst says {analyst_con}"
+    # 9. Missing validation — stock skipped Phase 3 (no analyst OR sentiment data)
+    if not vetoed and not analyst_con and not r.get("sentiment_label"):
+        vetoed = True
+        veto_reason = "Not validated (no analyst/sentiment data)"
 
     # Composite ranking score
     composite, ranking_factors = _compute_composite_score(r)

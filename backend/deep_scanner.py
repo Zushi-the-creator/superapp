@@ -652,8 +652,10 @@ class DeepScanner:
         # Phase 2: RSI filter + backtest
         results = self.phase2_backtest(stock_data, discovered)
 
-        # Phase 3: Validate top candidates
-        results = await self.phase3_validate(results, top_n=min(15, len(results)))
+        # Phase 3: Validate ALL non-BEAR candidates (analyst + sentiment + earnings)
+        # With 63x backtest speedup, Phase 2 is fast — Phase 3 API calls are the bottleneck
+        # Validate up to 50 (was 15) — covers all realistic candidates
+        results = await self.phase3_validate(results, top_n=min(50, len(results)))
 
         # Save cache
         if results:
