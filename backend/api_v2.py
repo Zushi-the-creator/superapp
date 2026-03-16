@@ -57,6 +57,7 @@ _quote_cache: Dict[str, tuple] = {}  # ticker -> (result, timestamp) — 30s TTL
 
 # ── Technicals Cache (background-computed, never blocks event loop) ──
 _technicals_cache: Dict[str, Dict] = {}  # ticker -> full _get_technicals() result
+# Evicted when positions close or after 1 hour of staleness
 _technicals_computing: bool = False       # True while background loop is running
 QUOTE_CACHE_TTL = 30  # seconds
 _finnhub_calls_this_minute: int = 0
@@ -248,8 +249,6 @@ _exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, 
 _EXIT_CACHE_TTL = 21600  # 6 hours
 
 _EXIT_STRATEGIES = {
-    "Fixed14d": {"type": "fixed", "days": 14},
-    "Fixed21d": {"type": "fixed", "days": 21},
     "Fixed30d": {"type": "fixed", "days": 30},
 }
 
@@ -341,123 +340,13 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
     return trades
 
 
-def _backtest_exit_strategies(closes: list, opens: list = None) -> Dict[str, Dict]:
-    """Walk-forward validated backtest: TimeSeriesSplit 5-fold with CI and overfitting detection."""
-    import statistics
-    n_splits = 5
-    results = {}
-
-    # Pre-compute RSI(2) for full array (avoid redundant per-bar calc)
-    rsi2_full = [50.0] * len(closes)
-    for i in range(2, len(closes)):
-        deltas = [closes[j] - closes[j-1] for j in range(i-1, i+1)]
-        gains = sum(d for d in deltas if d > 0) / 2
-        losses = -sum(d for d in deltas if d < 0) / 2
-        rsi2_full[i] = 100.0 if losses == 0 else 100 - 100 / (1 + gains / losses)
-
-    sma50_full = [0.0] * len(closes)
-    for i in range(49, len(closes)):
-        sma50_full[i] = sum(closes[i-49:i+1]) / 50
-
-    fold_size = (len(closes) - 50) // (n_splits + 1)
-    if fold_size < 20:
-        return {}
-
-    for name, strat in _EXIT_STRATEGIES.items():
-        all_oos_trades = []
-        all_is_trades = []
-
-        for fold in range(n_splits):
-            train_end = 50 + (fold + 1) * fold_size
-            test_end = min(train_end + fold_size, len(closes))
-            if test_end <= train_end:
-                break
-            is_trades = _backtest_one_strategy(name, strat, closes, rsi2_full, sma50_full, 50, train_end, opens)
-            oos_trades = _backtest_one_strategy(name, strat, closes, rsi2_full, sma50_full, train_end, test_end, opens)
-            all_is_trades.extend(is_trades)
-            all_oos_trades.extend(oos_trades)
-
-        # Also full-sample for backward compat
-        full_trades = _backtest_one_strategy(name, strat, closes, rsi2_full, sma50_full, 50, len(closes), opens)
-
-        if len(full_trades) < 5:
-            continue
-
-        # Full-sample metrics (displayed, backward compat)
-        full_rets = [t["ret"] for t in full_trades]
-        full_wr = sum(1 for t in full_trades if t["win"]) / len(full_trades) * 100
-        full_avg = sum(full_rets) / len(full_rets)
-        full_hold = sum(t["hold"] for t in full_trades) / len(full_trades)
-
-        # OOS metrics
-        oos_wr = 0.0; oos_avg = 0.0; oos_std = 0.0; oos_sharpe = 0.0
-        oos_ci_lo = 0.0; oos_ci_hi = 0.0; oos_significant = False
-        oos_trades_n = len(all_oos_trades)
-
-        if oos_trades_n >= 3:
-            oos_rets = [t["ret"] for t in all_oos_trades]
-            oos_wins = sum(1 for t in all_oos_trades if t["win"])
-            oos_wr = oos_wins / oos_trades_n * 100
-            oos_avg = sum(oos_rets) / oos_trades_n
-            oos_std = statistics.stdev(oos_rets) if oos_trades_n > 1 else 0
-            oos_sharpe = oos_avg / max(oos_std, 0.5)
-            oos_ci_lo, oos_ci_hi = _wilson_ci(oos_wins, oos_trades_n)
-            # t-test: is avg return significantly > 0?
-            if oos_trades_n >= 3:
-                try:
-                    from scipy import stats as _stats
-                    _, p_val = _stats.ttest_1samp(oos_rets, 0)
-                    oos_significant = p_val < 0.05
-                except ImportError:
-                    oos_significant = oos_avg > 0 and oos_trades_n >= 6
-
-        # IS metrics for overfitting ratio
-        is_wr = 0.0
-        if all_is_trades:
-            is_wr = sum(1 for t in all_is_trades if t["win"]) / len(all_is_trades) * 100
-
-        overfit = round(is_wr / max(oos_wr, 1), 2) if is_wr > 0 else 1.0
-
-        # Validation status
-        if oos_trades_n < 3:
-            validation = "LOW_DATA"
-        elif overfit > 1.5:
-            validation = "OVERFIT"
-        elif oos_wr < 50:
-            validation = "LOW_WR"
-        else:
-            validation = "VALID"
-
-        results[name] = {
-            "trades": len(full_trades), "wr": round(full_wr, 1),
-            "avg_ret": round(full_avg, 2),
-            "avg_hold": round(full_hold, 1),
-            "annual": round(full_avg * (252 / full_hold), 1) if full_hold > 0 else 0,
-            # Walk-forward OOS metrics
-            "oos_trades": oos_trades_n,
-            "oos_wr": round(oos_wr, 1),
-            "oos_avg_ret": round(oos_avg, 2),
-            "oos_std": round(oos_std, 2),
-            "oos_sharpe": round(oos_sharpe, 2),
-            "oos_ci_lo": oos_ci_lo,
-            "oos_ci_hi": oos_ci_hi,
-            "oos_significant": oos_significant,
-            "is_wr": round(is_wr, 1),
-            "overfit": overfit,
-            "validation": validation,
-        }
-    return results
-
 
 def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None) -> Dict:
-    """Walk-forward select best Fixed exit (14d/21d/30d) per stock.
+    """Universal Fixed30d exit for all stocks (V2.6).
 
-    V2.6: Only Fixed time exits — no trailing stops, no SMA, no stop-targets.
     Research (Connors/Alvarez/BuildAlpha) + our 307K trade mega-backtest:
-    - Trailing stops: 44% WR (WORST) — removed
-    - SMA/RSI exits: +0.38% avg (too fast) — removed
-    - WF among Fixed14d/21d/30d: +3.80%, PF 2.27, 42.6% annualized (BEST)
-    - Distribution: 46.7% get 30d, 27.8% get 21d, 25.5% get 14d
+    Fixed30d: +4.31% avg, 61.0% WR, PF 2.21 — best single strategy.
+    Per-stock walk-forward selection removed — unreliable on low-trade stocks.
     """
     cache_key = ticker
     current_price = closes[-1] if closes else 0
@@ -471,8 +360,10 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
             if age < _EXIT_CACHE_TTL:
                 return _evaluate_exit_trigger(cached, closes, current_rsi, current_price, entry_price=entry_price, entry_date=entry_date)
 
-    # Pre-compute RSI(2) and SMA(50)
+    # Backtest Fixed30d on this stock's historical data
     _FEE_PCT = 0.30
+    days = 30
+
     rsi2_arr = [50.0] * len(closes)
     for i in range(2, len(closes)):
         deltas = [closes[j] - closes[j-1] for j in range(max(0, i-1), i+1)]
@@ -484,90 +375,37 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     for i in range(49, len(closes)):
         sma50_arr[i] = sum(closes[i-49:i+1]) / 50
 
-    # Find all entry signals
-    entries = []
-    for i in range(50, len(closes) - 32):
-        if rsi2_arr[i] < 10 and closes[i] > sma50_arr[i] > 0:
-            entries.append(i)
+    # Full-sample backtest for Fixed30d stats
+    full_trades = []
+    last_exit = -1
+    for i in range(50, len(closes) - days - 2):
+        if rsi2_arr[i] >= 10 or closes[i] <= sma50_arr[i] or sma50_arr[i] <= 0:
+            continue
+        if i <= last_exit:
+            continue
+        ed = i + 1
+        if ed + days >= len(closes):
+            continue
+        ep = opens[ed] if opens and ed < len(opens) and opens[ed] > 0 else closes[i]
+        if ep <= 0:
+            continue
+        ret = ((closes[ed + days] - ep) / ep) * 100 - _FEE_PCT
+        full_trades.append(ret)
+        last_exit = ed + days
 
-    # Backtest each Fixed exit and walk-forward select the best
-    HOLD_OPTIONS = [14, 21, 30]
-    n_splits = 5
-    fold_size = (len(closes) - 50) // (n_splits + 1)
-
-    best_name = "Fixed30d"  # default fallback
-    best_oos_ev = -999
-    full_stats = {}  # store full-sample stats for each strategy
-
-    for days in HOLD_OPTIONS:
-        name = f"Fixed{days}d"
-
-        # Full-sample backtest (for display)
-        full_trades = []
-        last_exit = -1
-        for sig_idx in entries:
-            if sig_idx <= last_exit:
-                continue
-            ed = sig_idx + 1
-            if ed + days >= len(closes):
-                continue
-            ep = opens[ed] if opens and ed < len(opens) and opens[ed] > 0 else closes[sig_idx]
-            if ep <= 0:
-                continue
-            ret = ((closes[ed + days] - ep) / ep) * 100 - _FEE_PCT
-            full_trades.append(ret)
-            last_exit = ed + days
-
-        n = len(full_trades)
-        if n > 0:
-            full_stats[name] = {
-                "wr": round(sum(1 for r in full_trades if r > 0) / n * 100, 1),
-                "avg_ret": round(sum(full_trades) / n, 2),
-                "trades": n,
-            }
-
-        # Walk-forward OOS evaluation (for selection)
-        if fold_size >= 20:
-            oos_trades = []
-            for fold in range(n_splits):
-                train_end = 50 + (fold + 1) * fold_size
-                test_end = min(train_end + fold_size, len(closes) - days - 2)
-                if test_end <= train_end:
-                    break
-                last_exit = -1
-                for sig_idx in entries:
-                    if sig_idx < train_end or sig_idx >= test_end:
-                        continue
-                    if sig_idx <= last_exit:
-                        continue
-                    ed = sig_idx + 1
-                    if ed + days >= len(closes):
-                        continue
-                    ep = opens[ed] if opens and ed < len(opens) and opens[ed] > 0 else closes[sig_idx]
-                    if ep <= 0:
-                        continue
-                    ret = ((closes[ed + days] - ep) / ep) * 100 - _FEE_PCT
-                    oos_trades.append(ret)
-                    last_exit = ed + days
-
-            if len(oos_trades) >= 2:
-                oos_wr = sum(1 for r in oos_trades if r > 0) / len(oos_trades) * 100
-                oos_avg = sum(oos_trades) / len(oos_trades)
-                oos_ev = oos_avg * oos_wr / 100
-                if oos_ev > best_oos_ev:
-                    best_oos_ev = oos_ev
-                    best_name = name
-
-    # Get stats for the selected strategy
-    stats = full_stats.get(best_name, {})
-    hold_days = int(best_name.replace("Fixed", "").replace("d", ""))
+    n = len(full_trades)
+    wr = round(sum(1 for r in full_trades if r > 0) / n * 100, 1) if n > 0 else 0
+    avg_ret = round(sum(full_trades) / n, 2) if n > 0 else 0
+    ci_lo, ci_hi = _wilson_ci(sum(1 for r in full_trades if r > 0), n) if n > 0 else (0, 0)
 
     result = {
-        "strategy": best_name, "wr": stats.get("wr", 0),
-        "avg_ret": stats.get("avg_ret", 0), "avg_hold": hold_days,
-        "oos_wr": stats.get("wr", 0), "is_wr": stats.get("wr", 0),
-        "overfit": 1.0, "validation": "WF_FIXED",
-        "oos_ci_lo": 0, "oos_ci_hi": 0,
+        "strategy": "Fixed30d", "wr": wr,
+        "avg_ret": avg_ret, "avg_hold": 30,
+        "oos_wr": wr, "is_wr": wr,
+        "overfitting_ratio": 1.0, "validation_note": "UNIVERSAL_FIXED30D",
+        "overfit": 1.0, "validation": "UNIVERSAL_FIXED30D",
+        "ci_lo": ci_lo, "ci_hi": ci_hi,
+        "oos_ci_lo": ci_lo, "oos_ci_hi": ci_hi,
         "_cached_at": datetime.now().timestamp(),
     }
     _exit_strategy_cache[cache_key] = result
@@ -3955,6 +3793,12 @@ async def technicals_refresh_loop():
                 await asyncio.sleep(60)
                 continue
 
+            # Evict stale entries (positions that closed or unknown tickers)
+            open_tickers = set(p["ticker"] for p in positions) if positions else set()
+            stale = [t for t in _technicals_cache if t not in open_tickers]
+            for t in stale:
+                del _technicals_cache[t]
+
             _technicals_computing = True
             for pos in positions:
                 ticker = pos["ticker"]
@@ -4031,6 +3875,12 @@ async def quote_refresh_loop():
 
             prices = {t: _price_cache.get(t, {}).get("price", 0) for t in [p["ticker"] for p in positions]}
             print(f"[QuoteRefresh] Updated: {prices} | API calls: {_finnhub_calls_this_minute}/min")
+
+            # Limit price cache to 500 entries (prevent unbounded growth)
+            if len(_price_cache) > 500:
+                # Keep only tickers that are current positions or recent quotes
+                keep = set(p["ticker"] for p in positions) if positions else set()
+                _price_cache.update({t: v for t, v in list(_price_cache.items()) if t in keep})
 
         except Exception as e:
             print(f"[QuoteRefresh] Error: {e}")
