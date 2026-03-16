@@ -2332,7 +2332,7 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
         ranking_factors=ranking_factors,
         meets_strict=strict,
         beats_holdings=beats,
-        is_upgrade=len(beats) > 0,
+        is_upgrade=not vetoed and score >= 3.0,  # All validated non-vetoed entries are "upgrades" (new entry opportunities)
     )
 
 
