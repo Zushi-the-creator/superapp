@@ -1673,7 +1673,7 @@ def _check_market_regime() -> dict:
               "vix": 0, "vix_regime": "UNKNOWN", "spy_5d_return": 0,
               "position_size_pct": 100}
     try:
-        spy_df = _cache.get("SPY", 30)
+        spy_df = _cache.get("SPY", 365)
         if spy_df is not None and len(spy_df) >= 6:
             closes = spy_df["Close"].dropna().tolist()
             ret_5d = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if len(closes) >= 6 else 0
@@ -1682,8 +1682,8 @@ def _check_market_regime() -> dict:
             result["spy_below_sma50"] = closes[-1] < sma50
 
         # VIX regime — read from cache ONLY (never block event loop with HTTP)
-        # VIX data populated by cache_refresh_loop background task
-        vix_df = _cache.get("VIX", 30)
+        # Use 365d lookback so cache.get returns enough rows (min 50 required by cache)
+        vix_df = _cache.get("VIX", 365)
 
         vix = 0
         if vix_df is not None and len(vix_df) >= 1:
@@ -4124,8 +4124,8 @@ async def cache_refresh_loop():
                     return 0
                 for _idx_ticker in ["SPY", "VIX"]:
                     # Always fetch VIX/SPY on first run (old Stooq data may be stale/empty)
-                    existing = _cache.get(_idx_ticker, 30)
-                    need_fetch = existing is None or len(existing) < 5
+                    existing = _cache.get(_idx_ticker, 365)
+                    need_fetch = existing is None or len(existing) < 20
                     if need_fetch:
                         try:
                             n = await asyncio.wait_for(asyncio.to_thread(_fetch_index, _idx_ticker), timeout=15)
