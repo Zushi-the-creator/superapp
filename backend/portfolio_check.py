@@ -133,7 +133,7 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
     # ── Step 2: Technical analysis (SMA50, RSI, regime, backtest, volume, crash) ──
     print("  [2/8] Technical + crash + volume...", end=" ", flush=True)
     for check in results:
-        df = cache.get(check.ticker, 1260)
+        df = cache.get(check.ticker, 730)
         if df is None:
             check.issues.append("NO CACHED DATA - cannot validate")
             continue
