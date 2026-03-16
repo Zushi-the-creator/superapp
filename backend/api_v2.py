@@ -240,10 +240,9 @@ async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Opt
 #   - Stop losses HURT mean reversion (Connors: "stops hurt performance on hundreds of thousands of trades")
 #   - SMA/RSI exits too fast for volatile stocks (+0.38% avg vs Fixed30d +4.31%)
 #   - ONLY Fixed time exits work for mean reversion
-# Walk-forward selection among Fixed14d/21d/30d ONLY:
-#   - WF_Fixed: +3.80%, PF 2.27, 22.5d avg hold, 42.6% annualized (BEST)
-#   - Fixed30d: +3.99%, PF 2.08, 30.0d avg hold, 33.5% annualized
-#   - Per-stock pick: 46.7% get 30d, 27.8% get 21d, 25.5% get 14d
+# V2.6: Universal Fixed30d for all stocks (no per-stock walk-forward selection)
+#   - Fixed30d: +4.31% avg, 61.0% WR, PF 2.21 — best single strategy
+#   - Per-stock WF unreliable on low-trade stocks (e.g., LIND got Trail5 = 3.7%)
 
 _exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, ...}
 _EXIT_CACHE_TTL = 21600  # 6 hours
