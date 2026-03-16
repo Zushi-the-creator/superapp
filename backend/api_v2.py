@@ -1024,20 +1024,22 @@ async def get_portfolio():
         if exit_triggered:
             signal = "EXIT"
             issues.append(f"Exit triggered ({tech.get('exit_strategy', '')}: {tech.get('exit_label', '')})")
-        elif ez_trades >= 10 and ez_ret < 0 and atlas_wr < 65:
+        elif ez_trades >= 20 and ez_ret < -2 and atlas_wr < 50:
+            # Only EXIT on backtest stats if STRONG evidence (20+ trades, clearly negative)
             signal = "EXIT"
-            issues.append(f"Negative zone return ({ez_ret:+.1f}%, {ez_wr:.0f}% WR) + ATLAS {atlas_wr:.0f}% WR")
-        elif ez_trades >= 10 and ez_wr < 65 and (atlas_trades < 10 or atlas_wr < 65):
-            signal = "EXIT"
-            issues.append(f"Zone WR {ez_wr:.0f}% + ATLAS WR {atlas_wr:.0f}% — both fail 65% VETO")
+            issues.append(f"Bad backtest ({ez_ret:+.1f}% zone, {atlas_wr:.0f}% WR on {atlas_trades}t)")
         else:
-            # Existing positions: HOLD. Note issues but DON'T change signal.
+            # Existing positions: HOLD. Note concerns but DON'T trigger EXIT on weak data.
             if not above_sma50:
                 issues.append("Below SMA50")
             if rsi2 > 80:
                 issues.append("Overbought (RSI > 80) — trade working")
-            if atlas_trades > 0 and atlas_trades < 6:
-                issues.append(f"Low sample ({atlas_trades} trades) — WR {atlas_wr:.0f}% may be unreliable")
+            if atlas_trades > 0 and atlas_trades < 10:
+                issues.append(f"Low sample ({atlas_trades} trades)")
+            if ez_trades >= 10 and ez_wr < 65:
+                issues.append(f"Zone WR {ez_wr:.0f}% below 65% ({ez_trades}t) — monitor")
+            if atlas_trades >= 10 and atlas_wr < 55:
+                issues.append(f"ATLAS WR {atlas_wr:.0f}% below 55% ({atlas_trades}t) — weak")
         # Crash warning — note but DON'T override signal for existing positions.
         # Crash filter is for NEW entries (veto buying). For holdings, trust exit strategy.
         # See lesson #28: during broad crashes, selling on panic = emotional trading.
@@ -4092,15 +4094,31 @@ async def cache_refresh_loop():
             if first_run:
                 # Populate VIX + SPY for market regime detection (in thread, non-blocking)
                 def _fetch_index(sym):
+                    """Fetch VIX/SPY from Yahoo Finance (Stooq blocked on Fly.io)."""
+                    import requests as _req
                     try:
-                        stooq_sym = '%5E' + sym.lower() if sym == 'VIX' else sym.lower() + '.us'
-                        url = f"https://stooq.com/q/d/l/?s={stooq_sym}&d1={(datetime.now() - timedelta(days=60)).strftime('%Y%m%d')}&d2={datetime.now().strftime('%Y%m%d')}&i=d"
-                        df = pd.read_csv(url, timeout=10)
-                        if len(df) >= 5:
-                            df['Date'] = pd.to_datetime(df['Date'])
-                            df = df.set_index('Date').sort_index()
-                            _cache.store(sym, df)
-                            return len(df)
+                        yahoo_sym = '%5EVIX' if sym == 'VIX' else sym
+                        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}?range=60d&interval=1d"
+                        r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+                        if r.status_code == 200:
+                            chart = r.json().get("chart", {}).get("result", [{}])[0]
+                            ts = chart.get("timestamp", [])
+                            quotes = chart.get("indicators", {}).get("quote", [{}])[0]
+                            closes = quotes.get("close", [])
+                            opens = quotes.get("open", [])
+                            highs = quotes.get("high", [])
+                            lows = quotes.get("low", [])
+                            vols = quotes.get("volume", [])
+                            if ts and closes and len(ts) >= 5:
+                                from datetime import datetime as _dt
+                                dates = [_dt.utcfromtimestamp(t).strftime('%Y-%m-%d') for t in ts]
+                                df = pd.DataFrame({"Date": dates, "Open": opens, "High": highs,
+                                                   "Low": lows, "Close": closes, "Volume": vols})
+                                df["Date"] = pd.to_datetime(df["Date"])
+                                df = df.set_index("Date").sort_index().dropna(subset=["Close"])
+                                if len(df) >= 5:
+                                    _cache.store(sym, df)
+                                    return len(df)
                     except Exception:
                         pass
                     return 0
