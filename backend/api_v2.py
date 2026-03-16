@@ -1174,14 +1174,15 @@ async def get_portfolio():
 
     # Broker tax/fees paid outside per-trade commissions
     BROKER_TAX_FEES = 222.00
-    _total_deposited = 13433.58  # $11,891.58 + $1,542 (2026-03-16)
+    _total_deposited = 11891.58
     _total_fees_all = round(tx_summary.get("total_fees", 0) + BROKER_TAX_FEES, 2)
 
     # Cash = deposits + realized P&L - fees - cost of open positions
     _realized = tx_summary.get("total_realized_pnl", 0)
     _cash = round(_total_deposited + _realized - _total_fees_all - total_cost, 2)
-    if _cash < 0:
-        _cash = 0  # Shouldn't go negative — rounding protection
+    # Cap at $0 — production DB may have missing sell transactions (NESR/EWTX)
+    # which inflates realized P&L. Real cash = max(0, calculated).
+    _cash = max(0, _cash)
 
     summary = PortfolioSummary(
         total_value=round(total_value, 2),
@@ -2786,9 +2787,8 @@ async def get_performance():
         ("2026-01-30", 1500.21),
         ("2026-02-13", 3213.37),
         ("2026-02-27", 3478.00),
-        ("2026-03-16", 1542.00),
     ]
-    total_deposited = sum(d[1] for d in _deposits)  # $13,433.58
+    total_deposited = sum(d[1] for d in _deposits)  # $11,891.58
 
     # Build cumulative deposits by date for daily PnL curve
     _cum_deposits = {}
