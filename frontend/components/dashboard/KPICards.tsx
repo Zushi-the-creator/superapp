@@ -1,21 +1,25 @@
 "use client";
 
-import { DollarSign, TrendingUp, Calendar, Layers, Target, Banknote } from "lucide-react";
+import { DollarSign, TrendingUp, Calendar, Layers, Target, Banknote, Activity, HeartPulse } from "lucide-react";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
-import type { PortfolioSummary } from "@/lib/types";
+import type { PortfolioSummary, MarketRegime, StrategyHealth } from "@/lib/types";
 import { CardSkeleton } from "@/components/shared/Skeleton";
 
 export function KPICards({
   summary,
   loading,
+  marketRegime,
+  strategyHealth,
 }: {
   summary: PortfolioSummary | null;
   loading: boolean;
+  marketRegime?: MarketRegime | null;
+  strategyHealth?: StrategyHealth | null;
 }) {
   if (loading || !summary) {
     return (
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        {Array.from({ length: 5 }).map((_, i) => (
+      <div className="grid grid-cols-2 lg:grid-cols-7 gap-3">
+        {Array.from({ length: 7 }).map((_, i) => (
           <CardSkeleton key={i} />
         ))}
       </div>
@@ -68,8 +72,36 @@ export function KPICards({
     },
   ];
 
+  // VIX regime card
+  const regime = marketRegime;
+  const regimeColor = !regime || regime.regime === "UNKNOWN"
+    ? "text-neutral-400"
+    : regime.regime === "HEALTHY"
+    ? "text-signal-buy"
+    : regime.regime === "CAUTION"
+    ? "text-amber-400"
+    : "text-signal-sell";
+  const regimeBg = !regime || regime.regime === "UNKNOWN"
+    ? "bg-neutral-700/10"
+    : regime.regime === "HEALTHY"
+    ? "bg-signal-buy/10"
+    : regime.regime === "CAUTION"
+    ? "bg-amber-500/10"
+    : "bg-signal-sell/10";
+  const regimeLabel = regime
+    ? regime.regime === "CRISIS"
+      ? `VIX ${regime.vix} — PAUSED`
+      : regime.regime === "FEAR"
+      ? `VIX ${regime.vix} — ${regime.position_size_pct}% Size`
+      : regime.regime === "CAUTION"
+      ? `VIX ${regime.vix} — ${regime.position_size_pct}% Size`
+      : regime.regime === "HEALTHY"
+      ? `VIX ${regime.vix} — Full Size`
+      : `VIX ${regime.vix}`
+    : "No Data";
+
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-7 gap-3">
       {cards.map((card) => (
         <div
           key={card.label}
@@ -90,6 +122,85 @@ export function KPICards({
           )}
         </div>
       ))}
+      {/* VIX Regime Card */}
+      <div
+        className={cn(
+          "rounded-xl border border-neutral-800 p-4",
+          regimeBg,
+          regime?.regime === "CRISIS" && "animate-pulse"
+        )}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <Activity className={cn("h-4 w-4", regimeColor)} />
+          <span className="text-xs text-neutral-400">Market Regime</span>
+        </div>
+        <div className={cn("text-lg font-semibold", regimeColor)}>
+          {regimeLabel}
+        </div>
+        {regime && (
+          <div className="text-[10px] text-neutral-500 mt-0.5">
+            SPY 5d: {regime.spy_5d_return >= 0 ? "+" : ""}{regime.spy_5d_return.toFixed(1)}%
+            {regime.pause_entries && " · Entries paused"}
+          </div>
+        )}
+      </div>
+      {/* Strategy Health Card */}
+      <div
+        className={cn(
+          "rounded-xl border border-neutral-800 p-4",
+          !strategyHealth || strategyHealth.status === "INSUFFICIENT"
+            ? "bg-neutral-700/10"
+            : strategyHealth.status === "OUTPERFORMING"
+            ? "bg-signal-buy/10"
+            : strategyHealth.status === "HEALTHY"
+            ? "bg-signal-buy/10"
+            : strategyHealth.status === "WARNING"
+            ? "bg-amber-500/10"
+            : "bg-signal-sell/10",
+          strategyHealth?.status === "DEGRADED" && "animate-pulse"
+        )}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <HeartPulse className={cn("h-4 w-4",
+            !strategyHealth || strategyHealth.status === "INSUFFICIENT"
+              ? "text-neutral-400"
+              : strategyHealth.status === "OUTPERFORMING"
+              ? "text-emerald-400"
+              : strategyHealth.status === "HEALTHY"
+              ? "text-signal-buy"
+              : strategyHealth.status === "WARNING"
+              ? "text-amber-400"
+              : "text-signal-sell"
+          )} />
+          <span className="text-xs text-neutral-400">Strategy Health</span>
+        </div>
+        <div className={cn("text-lg font-semibold",
+          !strategyHealth || strategyHealth.status === "INSUFFICIENT"
+            ? "text-neutral-400"
+            : strategyHealth.status === "OUTPERFORMING"
+            ? "text-emerald-400"
+            : strategyHealth.status === "HEALTHY"
+            ? "text-signal-buy"
+            : strategyHealth.status === "WARNING"
+            ? "text-amber-400"
+            : "text-signal-sell"
+        )}>
+          {!strategyHealth || strategyHealth.status === "INSUFFICIENT"
+            ? "No Data"
+            : strategyHealth.status === "OUTPERFORMING"
+            ? `Strong — WR ${strategyHealth.rolling_wr.toFixed(0)}%`
+            : strategyHealth.status === "HEALTHY"
+            ? `Strategy OK — WR ${strategyHealth.rolling_wr.toFixed(0)}%`
+            : strategyHealth.status === "WARNING"
+            ? `Watch — WR ${strategyHealth.rolling_wr.toFixed(0)}%`
+            : `DEGRADED — WR ${strategyHealth.rolling_wr.toFixed(0)}%`}
+        </div>
+        {strategyHealth && strategyHealth.status !== "INSUFFICIENT" && (
+          <div className="text-[10px] text-neutral-500 mt-0.5">
+            {strategyHealth.trades_analyzed} trades · Expected {strategyHealth.expected_wr}% · Gap {strategyHealth.gap_pp > 0 ? "+" : ""}{strategyHealth.gap_pp}pp
+          </div>
+        )}
+      </div>
     </div>
   );
 }

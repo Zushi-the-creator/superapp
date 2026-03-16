@@ -36,7 +36,7 @@ export function PortfolioTab() {
         onRefresh={refresh}
       />
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 pb-20 md:pb-6">
-        <KPICards summary={data?.summary ?? null} loading={loading && !data} />
+        <KPICards summary={data?.summary ?? null} loading={loading && !data} marketRegime={data?.market_regime} strategyHealth={data?.strategy_health} />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2">

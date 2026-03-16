@@ -126,6 +126,8 @@ class PortfolioSummary(BaseModel):
 class PortfolioResponse(BaseModel):
     summary: PortfolioSummary
     positions: List[PositionDetail]
+    market_regime: dict = {}
+    strategy_health: dict = {}
 
 
 class HealthIssue(BaseModel):

@@ -94,9 +94,32 @@ export interface PortfolioSummary {
   timestamp: string;
 }
 
+export interface MarketRegime {
+  regime: string;
+  vix: number;
+  vix_regime: string;
+  spy_5d_return: number;
+  position_size_pct: number;
+  pause_entries: boolean;
+  reason: string;
+}
+
+export interface StrategyHealth {
+  status: string;
+  message: string;
+  rolling_wr: number;
+  expected_wr: number;
+  trades_analyzed: number;
+  wins?: number;
+  losses?: number;
+  gap_pp: number;
+}
+
 export interface PortfolioResponse {
   summary: PortfolioSummary;
   positions: PositionDetail[];
+  market_regime?: MarketRegime;
+  strategy_health?: StrategyHealth;
 }
 
 export interface HealthIssue {

@@ -871,6 +871,61 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
     return signal, issues
 
 
+# ── Strategy Health Monitor ──
+
+def _strategy_health() -> dict:
+    """Compare last 20 closed trades' rolling WR against backtest expectation.
+    If live WR drops >15pp below backtest (53.5%), flag degradation.
+    Research: catches regime shifts before they wipe out gains."""
+    import sqlite3 as _sql
+    db_path = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+    try:
+        conn = _sql.connect(db_path)
+        conn.row_factory = _sql.Row
+        # Last 20 closed trades with realized P&L
+        rows = conn.execute(
+            "SELECT t.ticker, t.realized_pnl, t.date FROM transactions t "
+            "WHERE t.action='SELL' AND t.realized_pnl IS NOT NULL "
+            "ORDER BY t.date DESC LIMIT 20"
+        ).fetchall()
+        conn.close()
+
+        if len(rows) < 5:
+            return {"status": "INSUFFICIENT", "message": f"Only {len(rows)} closed trades (need 5+)",
+                    "rolling_wr": 0, "expected_wr": 53.5, "trades_analyzed": len(rows)}
+
+        wins = sum(1 for r in rows if r["realized_pnl"] > 0)
+        rolling_wr = wins / len(rows) * 100
+        expected_wr = 53.5  # Universe backtest WR
+        gap = rolling_wr - expected_wr
+
+        if gap < -20:
+            status = "DEGRADED"
+            message = f"Rolling WR {rolling_wr:.0f}% is {abs(gap):.0f}pp below expected {expected_wr:.0f}% — STRATEGY MAY BE BROKEN"
+        elif gap < -10:
+            status = "WARNING"
+            message = f"Rolling WR {rolling_wr:.0f}% is {abs(gap):.0f}pp below expected — monitor closely"
+        elif gap > 10:
+            status = "OUTPERFORMING"
+            message = f"Rolling WR {rolling_wr:.0f}% is {gap:.0f}pp above expected — strategy working well"
+        else:
+            status = "HEALTHY"
+            message = f"Rolling WR {rolling_wr:.0f}% within expected range"
+
+        return {
+            "status": status,
+            "message": message,
+            "rolling_wr": round(rolling_wr, 1),
+            "expected_wr": expected_wr,
+            "trades_analyzed": len(rows),
+            "wins": wins,
+            "losses": len(rows) - wins,
+            "gap_pp": round(gap, 1),
+        }
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e), "rolling_wr": 0, "expected_wr": 53.5, "trades_analyzed": 0}
+
+
 # ── Portfolio Endpoint ──
 
 @router.get("/portfolio", response_model=PortfolioResponse)
@@ -885,6 +940,7 @@ async def get_portfolio():
                 position_count=0, avg_win_rate=0, timestamp=datetime.now().isoformat(),
             ),
             positions=[],
+            strategy_health=_strategy_health(),
         )
 
     # Use cached prices (SQLite-seeded or Finnhub-refreshed) — NEVER block on API calls.
@@ -1137,7 +1193,7 @@ async def get_portfolio():
         timestamp=datetime.now().isoformat(),
     )
 
-    return PortfolioResponse(summary=summary, positions=details)
+    return PortfolioResponse(summary=summary, positions=details, market_regime=_check_market_regime(), strategy_health=_strategy_health())
 
 
 # ── ILS Portfolio Endpoint ──
@@ -1603,31 +1659,100 @@ async def get_opportunities():
 
 def _check_market_regime() -> dict:
     """Check if broad market supports mean reversion entries.
-    Returns regime info including whether to pause new entries."""
+    Uses SPY momentum + VIX level for regime detection.
+    Research: MR WR drops from 60% to 19% in declining markets (our data, 27K trades).
+    VIX regimes from Alvarez/Connors: <20 normal, 20-30 caution, >30 fear, >40 crisis."""
+    result = {"regime": "UNKNOWN", "pause_entries": False, "reason": "No data",
+              "vix": 0, "vix_regime": "UNKNOWN", "spy_5d_return": 0,
+              "position_size_pct": 100}
     try:
         spy_df = _cache.get("SPY", 30)
-        if spy_df is None or len(spy_df) < 10:
-            return {"regime": "UNKNOWN", "pause_entries": False, "reason": "No SPY data"}
-        closes = spy_df["Close"].dropna().tolist()
-        if len(closes) < 6:
-            return {"regime": "UNKNOWN", "pause_entries": False, "reason": "Insufficient SPY data"}
-        # 5-day rolling return
-        ret_5d = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if len(closes) >= 6 else 0
-        # SMA50 check
-        sma50 = sum(closes[-min(50, len(closes)):]) / min(50, len(closes))
-        below_sma50 = closes[-1] < sma50
-        # Pause if SPY 5d return < -1% (sustained decline)
-        pause = ret_5d < -1.0
-        regime = "DECLINING" if ret_5d < -1 else ("WEAK" if ret_5d < 0 else "HEALTHY")
-        return {
-            "regime": regime,
-            "spy_5d_return": round(ret_5d, 2),
-            "spy_below_sma50": below_sma50,
-            "pause_entries": pause,
-            "reason": f"SPY 5d: {ret_5d:+.1f}%" + (" — MEAN REVERSION SUSPENDED" if pause else ""),
-        }
+        if spy_df is not None and len(spy_df) >= 6:
+            closes = spy_df["Close"].dropna().tolist()
+            ret_5d = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if len(closes) >= 6 else 0
+            sma50 = sum(closes[-min(50, len(closes)):]) / min(50, len(closes))
+            result["spy_5d_return"] = round(ret_5d, 2)
+            result["spy_below_sma50"] = closes[-1] < sma50
+
+        # VIX regime
+        vix_df = _cache.get("VIX", 30)
+        if vix_df is None:
+            # Try fetching VIX from Stooq
+            try:
+                import pandas as _pd
+                vix_url = "https://stooq.com/q/d/l/?s=%5Evix&d1={}&d2={}&i=d".format(
+                    (datetime.now() - timedelta(days=60)).strftime('%Y%m%d'),
+                    datetime.now().strftime('%Y%m%d'))
+                vix_df = _pd.read_csv(vix_url)
+                if len(vix_df) >= 5:
+                    vix_df['Date'] = _pd.to_datetime(vix_df['Date'])
+                    vix_df = vix_df.set_index('Date').sort_index()
+                    _cache.store("VIX", vix_df)
+            except Exception:
+                pass
+
+        vix = 0
+        if vix_df is not None and len(vix_df) >= 1:
+            vix_closes = vix_df["Close"].dropna().tolist() if "Close" in vix_df.columns else []
+            if vix_closes:
+                vix = vix_closes[-1]
+
+        result["vix"] = round(vix, 2)
+
+        # VIX regime classification
+        if vix <= 0:
+            result["vix_regime"] = "UNKNOWN"
+            vix_size = 100
+        elif vix < 20:
+            result["vix_regime"] = "LOW"
+            vix_size = 100  # Full size
+        elif vix < 25:
+            result["vix_regime"] = "NORMAL"
+            vix_size = 100
+        elif vix < 30:
+            result["vix_regime"] = "ELEVATED"
+            vix_size = 70  # Reduce to 70%
+        elif vix < 40:
+            result["vix_regime"] = "FEAR"
+            vix_size = 40  # Reduce to 40%
+        else:
+            result["vix_regime"] = "CRISIS"
+            vix_size = 0  # No new entries
+
+        # SPY momentum regime
+        spy_ret = result.get("spy_5d_return", 0)
+        if spy_ret < -2:
+            spy_size = 40
+        elif spy_ret < -1:
+            spy_size = 70
+        else:
+            spy_size = 100
+
+        # Combined: use the more conservative of VIX and SPY sizing
+        size_pct = min(vix_size, spy_size)
+        result["position_size_pct"] = size_pct
+
+        # Overall regime
+        if size_pct == 0:
+            result["regime"] = "CRISIS"
+            result["pause_entries"] = True
+            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, no new entries"
+        elif size_pct <= 40:
+            result["regime"] = "FEAR"
+            result["pause_entries"] = True
+            result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — reduce to {size_pct}%"
+        elif size_pct <= 70:
+            result["regime"] = "CAUTION"
+            result["pause_entries"] = False
+            result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — reduce to {size_pct}%"
+        else:
+            result["regime"] = "HEALTHY"
+            result["pause_entries"] = False
+            result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — full size"
+
     except Exception as e:
-        return {"regime": "UNKNOWN", "pause_entries": False, "reason": str(e)}
+        result["reason"] = str(e)
+    return result
 
 
 def _try_load_scan_cache():
@@ -2032,6 +2157,66 @@ def _meets_strict_criteria(r: dict) -> bool:
             and avg_ret >= 3)
 
 
+def _check_correlation(ticker: str, existing_tickers: list, threshold: float = 0.7) -> dict:
+    """Check if a new stock is too correlated with existing holdings.
+    Uses 30-day daily return correlation. Rejects if > threshold with any holding.
+    Research: positions with >0.7 correlation act as single risk unit."""
+    if not existing_tickers:
+        return {"correlated": False, "max_corr": 0, "corr_with": ""}
+
+    # Get daily returns for candidate
+    df_new = _cache.get(ticker, 60)
+    if df_new is None or len(df_new) < 30:
+        return {"correlated": False, "max_corr": 0, "corr_with": "", "reason": "insufficient data"}
+
+    new_closes = df_new["Close"].dropna().tolist()[-30:]
+    if len(new_closes) < 20:
+        return {"correlated": False, "max_corr": 0, "corr_with": ""}
+
+    new_returns = [(new_closes[i] - new_closes[i-1]) / new_closes[i-1]
+                   for i in range(1, len(new_closes))]
+
+    max_corr = 0.0
+    corr_with = ""
+
+    for existing in existing_tickers:
+        df_ex = _cache.get(existing, 60)
+        if df_ex is None or len(df_ex) < 30:
+            continue
+        ex_closes = df_ex["Close"].dropna().tolist()[-30:]
+        if len(ex_closes) < 20:
+            continue
+        ex_returns = [(ex_closes[i] - ex_closes[i-1]) / ex_closes[i-1]
+                      for i in range(1, len(ex_closes))]
+
+        # Align lengths
+        min_len = min(len(new_returns), len(ex_returns))
+        if min_len < 15:
+            continue
+        nr = new_returns[-min_len:]
+        er = ex_returns[-min_len:]
+
+        # Pearson correlation (pure Python — no numpy dependency)
+        n = len(nr)
+        mean_nr = sum(nr) / n
+        mean_er = sum(er) / n
+        cov = sum((nr[i] - mean_nr) * (er[i] - mean_er) for i in range(n)) / n
+        std_nr = (sum((x - mean_nr) ** 2 for x in nr) / n) ** 0.5
+        std_er = (sum((x - mean_er) ** 2 for x in er) / n) ** 0.5
+
+        if std_nr > 0 and std_er > 0:
+            corr = cov / (std_nr * std_er)
+            if abs(corr) > abs(max_corr):
+                max_corr = corr
+                corr_with = existing
+
+    return {
+        "correlated": abs(max_corr) > threshold,
+        "max_corr": round(max_corr, 3),
+        "corr_with": corr_with,
+    }
+
+
 def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     """Convert a scan result dict to ScanOpportunity with composite ranking.
     Uses composite score (0-100) for ranking. Only 3 hard vetos remain."""
@@ -2092,6 +2277,12 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     if not vetoed and not analyst_con and not r.get("sentiment_label"):
         vetoed = True
         veto_reason = "Not validated (no analyst/sentiment data)"
+    # 10. Correlation check — reject if too correlated with existing holdings
+    if not vetoed and holdings_scores:
+        _corr = _check_correlation(ticker, list(holdings_scores.keys()))
+        if _corr["correlated"]:
+            vetoed = True
+            veto_reason = f"Correlated {_corr['max_corr']:.0%} with {_corr['corr_with']}"
 
     # Composite ranking score
     composite, ranking_factors = _compute_composite_score(r)
