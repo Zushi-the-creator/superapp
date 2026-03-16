@@ -4123,7 +4123,10 @@ async def cache_refresh_loop():
                         pass
                     return 0
                 for _idx_ticker in ["SPY", "VIX"]:
-                    if _cache.get(_idx_ticker, 30) is None:
+                    # Always fetch VIX/SPY on first run (old Stooq data may be stale/empty)
+                    existing = _cache.get(_idx_ticker, 30)
+                    need_fetch = existing is None or len(existing) < 5
+                    if need_fetch:
                         try:
                             n = await asyncio.wait_for(asyncio.to_thread(_fetch_index, _idx_ticker), timeout=15)
                             if n: print(f"[CacheRefresh] Fetched {_idx_ticker}: {n} bars")
