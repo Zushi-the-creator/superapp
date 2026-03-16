@@ -298,3 +298,22 @@ class PerformanceResponse(BaseModel):
     avg_loss_pct: float
     best_trade: str
     worst_trade: str
+
+
+class MomentumSignalResponse(BaseModel):
+    ticker: str
+    price: float
+    trend_score: int = 0
+    pct_from_high: float = 0
+    pct_from_low: float = 0
+    ret_5d: float = 0
+    ret_20d: float = 0
+    ret_60d: float = 0
+    volume_ratio: float = 0
+    atr_pct: float = 0
+    atr_squeeze: float = 0
+    momentum_score: float = 0
+    analyst_consensus: str = ""
+    sentiment_label: str = ""
+    vetoed: bool = False
+    veto_reason: str = ""

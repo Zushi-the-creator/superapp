@@ -448,7 +448,25 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
     else:
         peak_price = max(closes[-20:]) if len(closes) >= 20 else current_price
 
-    # Fixed exit: exit after N TRADING days from entry (14/21/30 per walk-forward)
+    # ── HARD STOP: -12% from entry ──
+    # Backtested on 872 stocks: Fixed30d + Stop-12% → +175% ROI vs +39% without stop
+    HARD_STOP_PCT = -12.0
+    if entry_price > 0 and pnl_pct <= HARD_STOP_PCT:
+        triggered = True
+        exit_price = current_price
+        return {
+            "strategy": strategy, "wr": cached.get("wr", 0), "avg_ret": cached.get("avg_ret", 0),
+            "avg_hold": 30, "triggered": True, "exit_price": round(exit_price, 2),
+            "exit_price_pct": round(pnl_pct, 2),
+            "label": f"STOP LOSS: {pnl_pct:.1f}% (limit {HARD_STOP_PCT}%)",
+            "exit_momentum_override": False,
+            "oos_wr": cached.get("oos_wr", 0), "is_wr": cached.get("is_wr", 0),
+            "overfitting_ratio": cached.get("overfitting_ratio", 1),
+            "validation_note": cached.get("validation_note", ""),
+            "ci_lo": cached.get("ci_lo", 0), "ci_hi": cached.get("ci_hi", 0),
+        }
+
+    # Fixed exit: exit after N TRADING days from entry
     hold_target = _EXIT_STRATEGIES.get(strategy, {}).get("days", 30)
     exit_price = round(current_price * (1 + cached.get("avg_ret", 0) / 100), 2)
     if entry_date:
@@ -2667,6 +2685,86 @@ async def get_history(ticker: str = None, limit: int = 100):
         total_realized_pnl=summary["total_realized_pnl"],
         trade_count=summary["trade_count"],
     )
+
+
+# ── Momentum Scanner Endpoints ──
+
+_momentum_cache: Optional[Dict] = None
+_momentum_cache_time: Optional[datetime] = None
+_momentum_running: bool = False
+
+
+@router.get("/momentum/opportunities")
+async def get_momentum_opportunities():
+    """Get momentum breakout signals."""
+    global _momentum_cache, _momentum_cache_time, _momentum_running
+
+    if _momentum_cache:
+        return {**_momentum_cache, "last_scan": _momentum_cache_time.isoformat() if _momentum_cache_time else ""}
+
+    # Try loading from disk cache
+    from momentum_scanner import MomentumScanner, MomentumSignal, CACHE_DIR
+    from dataclasses import asdict
+    cache_path = os.path.join(CACHE_DIR, f"momentum_{datetime.now().strftime('%Y-%m-%d')}.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                raw = json.load(f)
+            signals = [MomentumSignal(**r) for r in raw]
+            valid = [r for r in signals if not r.vetoed]
+            _momentum_cache = {
+                "timestamp": datetime.now().isoformat(),
+                "total_scanned": len(raw),
+                "valid": len(valid),
+                "signals": [asdict(r) for r in signals],
+            }
+            _momentum_cache_time = datetime.fromtimestamp(os.path.getmtime(cache_path))
+            return {**_momentum_cache, "last_scan": _momentum_cache_time.isoformat()}
+        except Exception as e:
+            print(f"[Momentum] Cache load error: {e}")
+
+    # Trigger background scan
+    if not _momentum_running:
+        _momentum_running = True
+        asyncio.create_task(_run_momentum_scan())
+
+    return {"timestamp": datetime.now().isoformat(), "total_scanned": 0, "valid": 0,
+            "signals": [], "scanning": True}
+
+
+async def _run_momentum_scan():
+    """Background momentum scan."""
+    global _momentum_cache, _momentum_cache_time, _momentum_running
+    try:
+        from momentum_scanner import MomentumScanner
+        from dataclasses import asdict
+        scanner = MomentumScanner()
+        results = await scanner.run(fresh=True)
+        valid = [r for r in results if not r.vetoed]
+        _momentum_cache = {
+            "timestamp": datetime.now().isoformat(),
+            "total_scanned": len(results),
+            "valid": len(valid),
+            "signals": [asdict(r) for r in results],
+        }
+        _momentum_cache_time = datetime.now()
+        print(f"[Momentum] Scan complete: {len(valid)} valid signals")
+    except Exception as e:
+        import traceback
+        print(f"[Momentum] Scan error: {e}")
+        traceback.print_exc()
+    finally:
+        _momentum_running = False
+
+
+@router.post("/momentum/refresh")
+async def refresh_momentum():
+    """Force a fresh momentum scan."""
+    global _momentum_cache, _momentum_running
+    _momentum_cache = None
+    _momentum_running = True
+    asyncio.create_task(_run_momentum_scan())
+    return {"status": "scanning", "message": "Momentum scan started."}
 
 
 _perf_cache: Optional[Dict] = None

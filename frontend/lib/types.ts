@@ -360,4 +360,32 @@ export interface PerformanceResponse {
   worst_trade: string;
 }
 
-export type TabId = "portfolio" | "opportunities" | "performance" | "history";
+export interface MomentumSignal {
+  ticker: string;
+  price: number;
+  trend_score: number;
+  pct_from_high: number;
+  pct_from_low: number;
+  ret_5d: number;
+  ret_20d: number;
+  ret_60d: number;
+  volume_ratio: number;
+  atr_pct: number;
+  atr_squeeze: number;
+  momentum_score: number;
+  analyst_consensus: string;
+  sentiment_label: string;
+  vetoed: boolean;
+  veto_reason: string;
+}
+
+export interface MomentumResponse {
+  timestamp: string;
+  total_scanned: number;
+  valid: number;
+  signals: MomentumSignal[];
+  last_scan?: string;
+  scanning?: boolean;
+}
+
+export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "momentum";
