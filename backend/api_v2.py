@@ -4146,19 +4146,27 @@ async def cache_refresh_loop():
             holding_tickers = [p["ticker"] for p in positions] if positions else []
 
             if first_run:
-                # Populate VIX + SPY for market regime detection (background, non-blocking)
+                # Populate VIX + SPY for market regime detection (in thread, non-blocking)
+                def _fetch_index(sym):
+                    try:
+                        stooq_sym = '%5E' + sym.lower() if sym == 'VIX' else sym.lower() + '.us'
+                        url = f"https://stooq.com/q/d/l/?s={stooq_sym}&d1={(datetime.now() - timedelta(days=60)).strftime('%Y%m%d')}&d2={datetime.now().strftime('%Y%m%d')}&i=d"
+                        df = pd.read_csv(url, timeout=10)
+                        if len(df) >= 5:
+                            df['Date'] = pd.to_datetime(df['Date'])
+                            df = df.set_index('Date').sort_index()
+                            _cache.store(sym, df)
+                            return len(df)
+                    except Exception:
+                        pass
+                    return 0
                 for _idx_ticker in ["SPY", "VIX"]:
                     if _cache.get(_idx_ticker, 30) is None:
                         try:
-                            _vix_url = f"https://stooq.com/q/d/l/?s={'%5E' + _idx_ticker.lower() if _idx_ticker == 'VIX' else _idx_ticker.lower() + '.us'}&d1={(datetime.now() - timedelta(days=60)).strftime('%Y%m%d')}&d2={datetime.now().strftime('%Y%m%d')}&i=d"
-                            _vdf = pd.read_csv(_vix_url)
-                            if len(_vdf) >= 5:
-                                _vdf['Date'] = pd.to_datetime(_vdf['Date'])
-                                _vdf = _vdf.set_index('Date').sort_index()
-                                _cache.store(_idx_ticker, _vdf)
-                                print(f"[CacheRefresh] Fetched {_idx_ticker}: {len(_vdf)} bars")
-                        except Exception as _e:
-                            print(f"[CacheRefresh] {_idx_ticker} fetch failed: {_e}")
+                            n = await asyncio.wait_for(asyncio.to_thread(_fetch_index, _idx_ticker), timeout=15)
+                            if n: print(f"[CacheRefresh] Fetched {_idx_ticker}: {n} bars")
+                        except (asyncio.TimeoutError, Exception) as _e:
+                            print(f"[CacheRefresh] {_idx_ticker} fetch failed/timeout: {_e}")
 
                 # FIRST RUN: Populate holdings with NO data, refresh stale ones
                 empty_holdings = [t for t in holding_tickers if _cache.get(t, 365) is None]
