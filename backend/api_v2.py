@@ -2296,7 +2296,6 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
             h_ticker for h_ticker, h_data in holdings_scores.items()
             if score > h_data["score"] * premium
             and r.get("zone_trades", 0) >= 5
-            and (h_data.get("exit_triggered", False) or h_data.get("bad_backtest", False))
         ]
 
     return ScanOpportunity(
@@ -4071,64 +4070,11 @@ async def quote_refresh_loop():
 
 
 async def extended_hours_refresh_loop():
-    """Fetch pre-market/after-hours prices for portfolio positions via Finnhub.
-    Runs every 120s during extended hours only. Clears cache during regular/closed hours."""
-    await asyncio.sleep(20)  # Wait for other startup tasks
-    print("[ExtHoursRefresh] Started — monitoring extended hours sessions")
-
+    """Fetch pre-market/after-hours prices. Disabled — was causing server crashes.
+    TODO: Re-enable with proper non-blocking HTTP client (aiohttp instead of requests)."""
+    print("[ExtHoursRefresh] Disabled — use Finnhub quotes during market hours instead")
     while True:
-        try:
-            session = _get_market_session()
-
-            if session not in ("PRE_MARKET", "AFTER_HOURS"):
-                # Clear ext cache during regular hours and closed
-                if _extended_hours_cache:
-                    _extended_hours_cache.clear()
-                    print(f"[ExtHoursRefresh] Session={session}, cleared ext cache")
-                await asyncio.sleep(120)
-                continue
-
-            positions = _position_mgr._get_open_positions_sync()
-            if not positions:
-                await asyncio.sleep(120)
-                continue
-
-            tickers = [p["ticker"] for p in positions]
-            print(f"[ExtHoursRefresh] Session={session}, fetching {len(tickers)} tickers...")
-
-            # Yahoo chart API — total timeout 60s for all tickers
-            async def _fetch_all_ext():
-                updated = 0
-                for t in tickers:
-                    try:
-                        r = await asyncio.wait_for(
-                            asyncio.to_thread(_fetch_extended_quote_sync, t),
-                            timeout=4
-                        )
-                        if r:
-                            _extended_hours_cache[t] = r
-                            updated += 1
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    await asyncio.sleep(0.5)
-                return updated
-
-            try:
-                updated = await asyncio.wait_for(_fetch_all_ext(), timeout=60)
-            except asyncio.TimeoutError:
-                updated = len(_extended_hours_cache)
-                print(f"[ExtHoursRefresh] Global timeout hit after 60s")
-
-            if updated:
-                prices = {t: f"${r['ext_price']:.2f} ({r['ext_change_pct']:+.2f}%)" for t, r in _extended_hours_cache.items()}
-                print(f"[ExtHoursRefresh] Updated {updated}/{len(tickers)}: {prices}")
-            else:
-                print(f"[ExtHoursRefresh] Updated 0/{len(tickers)} ext quotes")
-
-        except Exception as e:
-            print(f"[ExtHoursRefresh] Error: {e}")
-
-        await asyncio.sleep(120)
+        await asyncio.sleep(3600)  # Sleep forever, don't do anything
 
 
 async def cache_refresh_loop():
