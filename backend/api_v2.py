@@ -4111,20 +4111,28 @@ async def extended_hours_refresh_loop():
             tickers = [p["ticker"] for p in positions]
             print(f"[ExtHoursRefresh] Session={session}, fetching {len(tickers)} tickers...")
 
-            # Yahoo chart API — run in thread with per-ticker timeout
-            updated = 0
-            for t in tickers:
-                try:
-                    r = await asyncio.wait_for(
-                        asyncio.to_thread(_fetch_extended_quote_sync, t),
-                        timeout=5  # 5s hard timeout per ticker (was 8s in requests)
-                    )
-                    if r:
-                        _extended_hours_cache[t] = r
-                        updated += 1
-                except (asyncio.TimeoutError, Exception) as e:
-                    pass  # Skip ticker silently — don't block other tickers
-                await asyncio.sleep(1)  # 1s between tickers
+            # Yahoo chart API — total timeout 60s for all tickers
+            async def _fetch_all_ext():
+                updated = 0
+                for t in tickers:
+                    try:
+                        r = await asyncio.wait_for(
+                            asyncio.to_thread(_fetch_extended_quote_sync, t),
+                            timeout=4
+                        )
+                        if r:
+                            _extended_hours_cache[t] = r
+                            updated += 1
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    await asyncio.sleep(0.5)
+                return updated
+
+            try:
+                updated = await asyncio.wait_for(_fetch_all_ext(), timeout=60)
+            except asyncio.TimeoutError:
+                updated = len(_extended_hours_cache)
+                print(f"[ExtHoursRefresh] Global timeout hit after 60s")
 
             if updated:
                 prices = {t: f"${r['ext_price']:.2f} ({r['ext_change_pct']:+.2f}%)" for t, r in _extended_hours_cache.items()}
