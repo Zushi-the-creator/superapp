@@ -104,18 +104,16 @@ def _get_market_session() -> str:
 
 def _fetch_extended_quote_sync(ticker: str) -> Optional[Dict]:
     """Fetch pre-market or after-hours price from Yahoo Finance chart API.
-    Uses the lightweight v8/chart endpoint (less rate-limited than v10/quoteSummary).
-    Falls back to Finnhub if Yahoo fails."""
+    Uses the lightweight v8/chart endpoint. 3s timeout to avoid blocking."""
     import requests as _req
     session = _get_market_session()
 
-    # Try Yahoo Finance chart API (provides actual PM/AH data)
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = _req.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
             f"?range=1d&interval=1m&includePrePost=true",
-            headers=headers, timeout=8,
+            headers=headers, timeout=3,  # Hard 3s timeout — never block longer
         )
         if resp.status_code == 200:
             chart = resp.json().get("chart", {}).get("result", [{}])[0]
