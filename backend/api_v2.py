@@ -1681,22 +1681,9 @@ def _check_market_regime() -> dict:
             result["spy_5d_return"] = round(ret_5d, 2)
             result["spy_below_sma50"] = closes[-1] < sma50
 
-        # VIX regime
+        # VIX regime — read from cache ONLY (never block event loop with HTTP)
+        # VIX data populated by cache_refresh_loop background task
         vix_df = _cache.get("VIX", 30)
-        if vix_df is None:
-            # Try fetching VIX from Stooq
-            try:
-                import pandas as _pd
-                vix_url = "https://stooq.com/q/d/l/?s=%5Evix&d1={}&d2={}&i=d".format(
-                    (datetime.now() - timedelta(days=60)).strftime('%Y%m%d'),
-                    datetime.now().strftime('%Y%m%d'))
-                vix_df = _pd.read_csv(vix_url)
-                if len(vix_df) >= 5:
-                    vix_df['Date'] = _pd.to_datetime(vix_df['Date'])
-                    vix_df = vix_df.set_index('Date').sort_index()
-                    _cache.store("VIX", vix_df)
-            except Exception:
-                pass
 
         vix = 0
         if vix_df is not None and len(vix_df) >= 1:
@@ -4159,8 +4146,21 @@ async def cache_refresh_loop():
             holding_tickers = [p["ticker"] for p in positions] if positions else []
 
             if first_run:
+                # Populate VIX + SPY for market regime detection (background, non-blocking)
+                for _idx_ticker in ["SPY", "VIX"]:
+                    if _cache.get(_idx_ticker, 30) is None:
+                        try:
+                            _vix_url = f"https://stooq.com/q/d/l/?s={'%5E' + _idx_ticker.lower() if _idx_ticker == 'VIX' else _idx_ticker.lower() + '.us'}&d1={(datetime.now() - timedelta(days=60)).strftime('%Y%m%d')}&d2={datetime.now().strftime('%Y%m%d')}&i=d"
+                            _vdf = pd.read_csv(_vix_url)
+                            if len(_vdf) >= 5:
+                                _vdf['Date'] = pd.to_datetime(_vdf['Date'])
+                                _vdf = _vdf.set_index('Date').sort_index()
+                                _cache.store(_idx_ticker, _vdf)
+                                print(f"[CacheRefresh] Fetched {_idx_ticker}: {len(_vdf)} bars")
+                        except Exception as _e:
+                            print(f"[CacheRefresh] {_idx_ticker} fetch failed: {_e}")
+
                 # FIRST RUN: Populate holdings with NO data, refresh stale ones
-                # Cold cache (empty stock_cache.db) needs full 800-day history, not just 5 days
                 empty_holdings = [t for t in holding_tickers if _cache.get(t, 365) is None]
                 stale_holdings = [t for t in holding_tickers if t not in empty_holdings and not _cache.is_fresh(t)]
 
