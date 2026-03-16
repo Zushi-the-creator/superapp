@@ -3,6 +3,7 @@
 import {
   BarChart3,
   History,
+  Rocket,
   TrendingUp,
   Zap,
 } from "lucide-react";
@@ -13,6 +14,7 @@ const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "portfolio", label: "Portfolio", icon: BarChart3 },
   { id: "opportunities", label: "Upgrades", icon: Zap },
   { id: "performance", label: "Performance", icon: TrendingUp },
+  { id: "momentum", label: "Momentum", icon: Rocket },
   { id: "history", label: "History", icon: History },
 ];
 

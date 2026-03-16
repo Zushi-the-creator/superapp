@@ -8,6 +8,7 @@ import type {
   StockAnalysis,
   ChartData,
   PerformanceResponse,
+  MomentumResponse,
 } from "./types";
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
@@ -82,6 +83,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(config),
     }),
+  // Momentum
+  getMomentum: () => fetchJson<MomentumResponse>("/api/v2/momentum/opportunities"),
+  refreshMomentum: () =>
+    fetchJson<MomentumResponse>("/api/v2/momentum/refresh", { method: "POST" }),
+
   testAlertEmail: () =>
     fetchJson<{ success: boolean; message: string }>("/api/v2/alerts/test", {
       method: "POST",
