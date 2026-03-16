@@ -76,12 +76,19 @@ def _get_market_session() -> str:
     CLOSED:       Weekends + outside 4am-8pm
     """
     try:
-        import pytz
-        et = datetime.now(pytz.timezone("US/Eastern"))
-    except ImportError:
-        # Fallback: offset-based (close enough for ET)
-        from datetime import timezone
-        et = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
+        import zoneinfo
+        et = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+    except (ImportError, Exception):
+        try:
+            import pytz
+            et = datetime.now(pytz.timezone("US/Eastern"))
+        except (ImportError, Exception):
+            from datetime import timezone
+            # DST-aware: March-Nov is UTC-4, else UTC-5
+            utc_now = datetime.now(timezone.utc)
+            month = utc_now.month
+            offset = 4 if 3 <= month <= 11 else 5
+            et = utc_now.replace(tzinfo=None) - timedelta(hours=offset)
     day = et.weekday()  # 0=Mon, 6=Sun
     if day >= 5:
         return "CLOSED"
