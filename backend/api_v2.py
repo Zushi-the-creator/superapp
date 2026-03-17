@@ -3933,7 +3933,7 @@ _dedup = _load_dedup()
 async def background_monitor():
     """Runs every 15 minutes: health check + email alerts only on CHANGES (persisted to disk)."""
     global _dedup
-    await asyncio.sleep(120 if _is_prod else 60)  # Production: wait longer for worker stability
+    await asyncio.sleep(300)  # Wait 5 min before first health check — let server stabilize first
     while True:
         try:
             # Reload dedup state (resets daily)
@@ -3941,11 +3941,7 @@ async def background_monitor():
 
             print(f"\n[Monitor] Running health check at {datetime.now().strftime('%H:%M')}")
             try:
-                # Run in thread to prevent blocking event loop during serial API calls
-                health = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: asyncio.run(_run_health_check())),
-                    timeout=120
-                )
+                health = await asyncio.wait_for(_run_health_check(), timeout=120)
             except (asyncio.TimeoutError, Exception) as _hc_err:
                 print(f"[Monitor] Health check failed/timeout: {_hc_err}")
                 health = {}
