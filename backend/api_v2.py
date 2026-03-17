@@ -584,7 +584,7 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     5yr (1260d) lookback for robust backtests.
     Uses pre-computed RSI/SMA arrays for 63x faster backtesting.
     """
-    df = _cache.get(ticker, 730)
+    df = _cache.get(ticker, 1260)
     if df is None or len(df) < 60:
         # Fallback: try fetching from Stooq directly (for cold cache on Fly)
         try:
@@ -1956,7 +1956,7 @@ async def get_best_replacement(sell_ticker: str):
 def _backtest_7day(ticker: str) -> dict:
     """Backtest using ATLAS V2.5: RSI<10 entry, 30-day fixed hold, price > SMA50.
     Fallback for holdings scoring when hybrid exit data unavailable."""
-    df = _cache.get(ticker, 730)
+    df = _cache.get(ticker, 1260)
     if df is None or len(df) < 60:
         return {}
 

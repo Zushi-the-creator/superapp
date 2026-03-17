@@ -232,12 +232,8 @@ class DeepScanner:
         import time
         t0 = time.time()
 
-        # Limit to 1000 tickers max to avoid OOM on Fly.io (1GB RAM)
-        # Discovered oversold stocks are at the front (priority), universe fills the rest
-        tickers = tickers[:1000]
-
         # Stage 1: Bulk read from SQLite cache (much faster than individual reads)
-        data = self.cache.get_bulk(tickers, 730)
+        data = self.cache.get_bulk(tickers, 1260)
         self.stats["cache_hits"] = len(data)
         missing = [t for t in tickers if t not in data]
 
@@ -274,7 +270,7 @@ class DeepScanner:
                 self.stats["fetch_failed"] = result['failed']
 
                 # Read the newly cached data
-                new_data = self.cache.get_bulk(fetch_list, 730)
+                new_data = self.cache.get_bulk(fetch_list, 1260)
                 data.update(new_data)
             else:
                 self.stats["fetch_failed"] = len(missing)
