@@ -466,62 +466,59 @@ class DeepScanner:
 
     def phase2_backtest(self, stock_data: Dict[str, pd.DataFrame],
                         discovered_tickers: List[str]) -> List[ScanResult]:
-        """Phase 2: Fast RSI pre-filter then deep backtest on candidates only."""
+        """Phase 2: Stream stocks one at a time — pre-filter then backtest.
+        Memory-optimized: only keeps candidates that pass, deletes DataFrames immediately."""
         print(f"\n{'='*60}")
         print(f"PHASE 2: RSI(2) Filter + Deep Backtest ({len(stock_data)} stocks)")
         print(f"{'='*60}")
 
-        # PRE-FILTER: RSI(2)<10 + above SMA50 + price>=$10 + ATR>=3%
-        candidates = {}
+        results = []
         skipped = 0
-        for ticker, df in stock_data.items():
+        tickers_list = list(stock_data.keys())
+
+        for ticker in tickers_list:
+            df = stock_data[ticker]
             df_clean = df.dropna(subset=['Close'])
             closes = df_clean['Close'].tolist()
-            if len(closes) < 60:
+
+            # Quick pre-filter (no heavy computation)
+            if len(closes) < 60 or closes[-1] < 10:
                 skipped += 1
-                continue
-            # V2.6: price >= $10
-            if closes[-1] < 10:
-                skipped += 1
+                del stock_data[ticker]  # Free memory immediately
                 continue
             rsi2 = self.entry_engine.calc_rsi(closes, 2)
             if rsi2 >= 10:
                 skipped += 1
+                del stock_data[ticker]
                 continue
             sma50 = self.entry_engine.calc_sma(closes, 50)
             if closes[-1] <= sma50:
                 skipped += 1
+                del stock_data[ticker]
                 continue
-            # V2.6: ATR(14)% >= 3%
             highs = df_clean['High'].tolist() if 'High' in df_clean.columns else closes
             lows = df_clean['Low'].tolist() if 'Low' in df_clean.columns else closes
             atr_vals = []
             for j in range(max(1, len(closes) - 14), len(closes)):
-                tr = max(highs[j] - lows[j],
-                         abs(highs[j] - closes[j - 1]),
-                         abs(lows[j] - closes[j - 1]))
+                tr = max(highs[j] - lows[j], abs(highs[j] - closes[j-1]), abs(lows[j] - closes[j-1]))
                 atr_vals.append(tr)
             atr_pct = (sum(atr_vals) / len(atr_vals) / closes[-1] * 100) if atr_vals and closes[-1] > 0 else 0
             if atr_pct < 3.0:
                 skipped += 1
+                del stock_data[ticker]
                 continue
-            candidates[ticker] = df
 
-        print(f"  Pre-filter: {len(candidates)} candidates (skipped {skipped} — RSI<10/above SMA50/price>=$10/ATR>=3%)")
-
-        # Deep backtest only on pre-filtered candidates
-        results = []
-        for ticker, df in candidates.items():
+            # Passed pre-filter → deep backtest
             source = "finviz_discovery" if ticker in discovered_tickers else "universe"
             result = self._backtest_stock(ticker, df, source)
             if result:
                 results.append(result)
+            del stock_data[ticker]  # Free memory after backtest
 
         results.sort(key=lambda r: r.ml_score, reverse=True)
         self.stats["candidates"] = len(results)
 
-        print(f"  Phase 2 complete: {len(results)} stocks passed V2.6 filters")
-        print(f"  (RSI(2)<10 + above SMA50 + price>=$10 + ATR>=3% + not BEAR + 3+ trades)")
+        print(f"  Phase 2: {len(results)} passed, {skipped} skipped")
         return results
 
     # ─── Phase 3: Validate Top N ─────────────────────────────────────────
