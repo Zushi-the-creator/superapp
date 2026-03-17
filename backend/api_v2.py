@@ -4427,7 +4427,8 @@ async def cache_refresh_loop():
                 from deep_scanner import STOCK_UNIVERSE
                 cached_set = set(_cache.get_cached_tickers())
                 uncached = [t for t in STOCK_UNIVERSE if t not in cached_set]
-                if uncached:
+                if uncached and len(uncached) > 30:
+                    # Only populate if many stocks missing (fresh install). Skip if <30 — those are unfetchable tickers
                     print(f"[CacheRefresh] Universe population: {len(uncached)} stocks not in cache "
                           f"(out of {len(STOCK_UNIVERSE)} total). Populating in batches of 100...")
                     batch_size = 100
@@ -4456,7 +4457,7 @@ async def cache_refresh_loop():
             from deep_scanner import STOCK_UNIVERSE
             cached_set = set(_cache.get_cached_tickers())
             uncached = [t for t in STOCK_UNIVERSE if t not in cached_set]
-            if uncached:
+            if uncached and len(uncached) > 30:
                 print(f"[CacheRefresh] {len(uncached)} new universe stocks to populate...")
                 batch_size = 100
                 for i in range(0, len(uncached), batch_size):

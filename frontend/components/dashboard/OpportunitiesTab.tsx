@@ -7,7 +7,7 @@ import { RegimeBadge, SignalBadge, TierBadge } from "@/components/shared/Badges"
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { RefreshCw, ArrowUp, Zap, ShieldCheck, DollarSign, Star, ChevronDown } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { ScanOpportunity, HoldingScore } from "@/lib/types";
 
 const TIER_COLORS: Record<string, { border: string; bg: string; text: string }> = {
@@ -35,8 +35,8 @@ export function OpportunitiesTab() {
     } catch {}
   };
 
-  // Fetch combined when scanner data updates
-  useState(() => { fetchCombined(); });
+  // Fetch combined on mount
+  useEffect(() => { fetchCombined(); }, []);
 
   const handleForceRefresh = async () => {
     setRefreshing(true);
