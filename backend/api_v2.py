@@ -1809,21 +1809,26 @@ async def _background_scan():
     global _scan_running, _scan_cache, _scan_cache_time
     try:
         print("[Scan] Starting scan in subprocess...")
-        import subprocess
         scan_proc = await asyncio.create_subprocess_exec(
             sys.executable, "-c",
             "import asyncio; from deep_scanner import DeepScanner; asyncio.run(DeepScanner().run(fresh=True))",
             cwd=os.path.dirname(__file__),
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=asyncio.subprocess.PIPE,
         )
-        # Wait for subprocess with timeout (10 min max)
         try:
-            stdout, _ = await asyncio.wait_for(scan_proc.communicate(), timeout=600)
+            stdout, stderr = await asyncio.wait_for(scan_proc.communicate(), timeout=600)
+            # Print last 15 lines of output
             if stdout:
-                for line in stdout.decode().split('\n')[-10:]:
+                for line in stdout.decode().split('\n')[-15:]:
                     if line.strip():
-                        print(f"[Scan] {line.strip()}")
+                        print(f"[Scan:out] {line.strip()}")
+            if stderr:
+                for line in stderr.decode().split('\n')[-10:]:
+                    if line.strip():
+                        print(f"[Scan:err] {line.strip()}")
+            if scan_proc.returncode != 0:
+                print(f"[Scan] Subprocess exited with code {scan_proc.returncode}")
         except asyncio.TimeoutError:
             scan_proc.kill()
             print("[Scan] Subprocess timed out after 10 min")
@@ -2795,8 +2800,10 @@ async def _run_momentum_scan():
                 "valid": len(valid),
                 "signals": [asdict(r) for r in signals],
             }
-        _momentum_cache_time = datetime.now()
-        print(f"[Momentum] Scan complete: {len(valid)} valid signals")
+            _momentum_cache_time = datetime.now()
+            print(f"[Momentum] Scan complete: {len(valid)} valid signals")
+        else:
+            print(f"[Momentum] No cache file found after subprocess")
     except Exception as e:
         import traceback
         print(f"[Momentum] Scan error: {e}")
