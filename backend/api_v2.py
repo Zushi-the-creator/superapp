@@ -1669,8 +1669,10 @@ async def get_opportunities():
             print(f"[Scan] Live overlay error for {opp.get('ticker', '?')}: {e}")
         return result
 
-    # No cache yet — DON'T auto-trigger (blocks server). User must click "Refresh" button.
-    # The scan is CPU-heavy and blocks the event loop on Fly.io's 1GB single-core.
+    # No cache — trigger scan in subprocess (non-blocking)
+    if not _scan_running:
+        _scan_running = True
+        asyncio.create_task(_background_scan())
 
     return {
         "timestamp": datetime.now().isoformat(),
@@ -1801,15 +1803,40 @@ def _try_load_scan_cache():
 
 
 async def _background_scan():
-    """Run scan in background so endpoints don't block."""
-    global _scan_running
+    """Run scan in a SUBPROCESS so it can't block the event loop.
+    The scan writes results to disk (scan_YYYY-MM-DD.json).
+    We poll for the file and load it when ready."""
+    global _scan_running, _scan_cache, _scan_cache_time
     try:
-        print("[Scan] Background scan started...")
-        await _run_scan()
-        print("[Scan] Background scan completed successfully")
+        print("[Scan] Starting scan in subprocess...")
+        import subprocess
+        scan_proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c",
+            "import asyncio; from deep_scanner import DeepScanner; asyncio.run(DeepScanner().run(fresh=True))",
+            cwd=os.path.dirname(__file__),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        # Wait for subprocess with timeout (10 min max)
+        try:
+            stdout, _ = await asyncio.wait_for(scan_proc.communicate(), timeout=600)
+            if stdout:
+                for line in stdout.decode().split('\n')[-10:]:
+                    if line.strip():
+                        print(f"[Scan] {line.strip()}")
+        except asyncio.TimeoutError:
+            scan_proc.kill()
+            print("[Scan] Subprocess timed out after 10 min")
+
+        # Load results from disk
+        _try_load_scan_cache()
+        if _scan_cache:
+            print(f"[Scan] Loaded {len(_scan_cache.get('opportunities',[]))} opportunities from disk")
+        else:
+            print("[Scan] No results file found after subprocess")
     except Exception as e:
         import traceback
-        print(f"[Scan] Background scan CRASHED: {e}")
+        print(f"[Scan] Subprocess error: {e}")
         traceback.print_exc()
     finally:
         _scan_running = False
@@ -2721,27 +2748,53 @@ async def get_momentum_opportunities():
         except Exception as e:
             print(f"[Momentum] Cache load error: {e}")
 
-    # DON'T auto-trigger — user must click refresh. Scan blocks event loop.
+    # No cache — trigger momentum scan in subprocess (non-blocking)
+    if not _momentum_running:
+        _momentum_running = True
+        asyncio.create_task(_run_momentum_scan())
 
     return {"timestamp": datetime.now().isoformat(), "total_scanned": 0, "valid": 0,
             "signals": [], "scanning": True}
 
 
 async def _run_momentum_scan():
-    """Background momentum scan."""
+    """Run momentum scan in subprocess — non-blocking."""
     global _momentum_cache, _momentum_cache_time, _momentum_running
     try:
-        from momentum_scanner import MomentumScanner
+        print("[Momentum] Starting scan in subprocess...")
+        import subprocess
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c",
+            "import asyncio; from momentum_scanner import MomentumScanner; asyncio.run(MomentumScanner().run(fresh=True))",
+            cwd=os.path.dirname(__file__),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+            if stdout:
+                for line in stdout.decode().split('\n')[-5:]:
+                    if line.strip():
+                        print(f"[Momentum] {line.strip()}")
+        except asyncio.TimeoutError:
+            proc.kill()
+            print("[Momentum] Subprocess timed out")
+
+        # Load from disk
+        from momentum_scanner import MomentumSignal, CACHE_DIR
         from dataclasses import asdict
-        scanner = MomentumScanner()
-        results = await scanner.run(fresh=True)
-        valid = [r for r in results if not r.vetoed]
-        _momentum_cache = {
-            "timestamp": datetime.now().isoformat(),
-            "total_scanned": len(results),
-            "valid": len(valid),
-            "signals": [asdict(r) for r in results],
-        }
+        cache_path = os.path.join(CACHE_DIR, f"momentum_{datetime.now().strftime('%Y-%m-%d')}.json")
+        if os.path.exists(cache_path):
+            with open(cache_path) as f:
+                raw = json.load(f)
+            signals = [MomentumSignal(**r) for r in raw]
+            valid = [r for r in signals if not r.vetoed]
+            _momentum_cache = {
+                "timestamp": datetime.now().isoformat(),
+                "total_scanned": len(raw),
+                "valid": len(valid),
+                "signals": [asdict(r) for r in signals],
+            }
         _momentum_cache_time = datetime.now()
         print(f"[Momentum] Scan complete: {len(valid)} valid signals")
     except Exception as e:
