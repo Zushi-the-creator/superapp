@@ -393,28 +393,26 @@ export interface CombinedSignal {
   price: number;
   strategy: "MEAN_REVERSION" | "MOMENTUM" | "BOTH";
   strategy_label: string;
-  combined_score: number;
-  raw_score: number;
-  // MR fields
-  rsi2: number;
-  win_rate: number;
-  bayesian_wr: number;
-  avg_return: number;
+  score: number;
+  expected_return: number;
+  confidence: number;   // Bayesian WR
   trades: number;
-  zone_return: number;
-  // Momentum fields
+  // Signal details
+  rsi2: number;
+  sma50_buffer: number;
+  atr_pct: number;
+  volume_ratio: number;
   ret_20d: number;
   ret_60d: number;
   pct_from_high: number;
-  momentum_score: number;
   atr_squeeze: number;
-  // Shared
-  atr_pct: number;
-  volume_ratio: number;
+  trend_score: number;
+  // Validation
   analyst_consensus: string;
   sentiment_label: string;
-  tier: string;
-  quality_tier: string;
+  vetoed: boolean;
+  veto_reason: string;
+  data_date: string;    // When price data is from
 }
 
 export interface CombinedResponse {
@@ -423,6 +421,7 @@ export interface CombinedResponse {
   mean_reversion: number;
   momentum: number;
   both: number;
+  data_date?: string;
   signals: CombinedSignal[];
   market_regime?: MarketRegime;
 }

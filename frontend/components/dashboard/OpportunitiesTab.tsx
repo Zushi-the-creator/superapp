@@ -159,6 +159,7 @@ export function OpportunitiesTab() {
               </h3>
               <span className="text-xs text-neutral-500">
                 {combinedStats.mr} dip buys · {combinedStats.mom} breakouts · {combinedStats.both} both
+                {combined[0]?.data_date && <> · Data: {combined[0].data_date}</>}
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -184,14 +185,14 @@ export function OpportunitiesTab() {
                     <div>
                       <span className="text-neutral-500">Score</span>
                       <div className={cn("font-bold",
-                        sig.combined_score >= 60 ? "text-emerald-400" :
-                        sig.combined_score >= 40 ? "text-blue-400" : "text-neutral-300"
-                      )}>{sig.combined_score.toFixed(0)}</div>
+                        sig.score >= 60 ? "text-emerald-400" :
+                        sig.score >= 40 ? "text-blue-400" : "text-neutral-300"
+                      )}>{sig.score.toFixed(0)}</div>
                     </div>
                     {sig.strategy !== "MOMENTUM" && (
                       <div>
                         <span className="text-neutral-500">WR</span>
-                        <div className="text-neutral-200">{(sig.bayesian_wr || sig.win_rate).toFixed(0)}% <span className="text-neutral-600">({sig.trades}t)</span></div>
+                        <div className="text-neutral-200">{sig.confidence.toFixed(0)}% <span className="text-neutral-600">({sig.trades}t)</span></div>
                       </div>
                     )}
                     {sig.strategy !== "MEAN_REVERSION" && (
@@ -204,10 +205,10 @@ export function OpportunitiesTab() {
                       <span className="text-neutral-500">Vol</span>
                       <div className={cn(sig.volume_ratio >= 2 ? "text-signal-buy" : "text-neutral-300")}>{sig.volume_ratio.toFixed(1)}x</div>
                     </div>
-                    {sig.avg_return > 0 && (
+                    {sig.expected_return > 0 && (
                       <div>
                         <span className="text-neutral-500">Avg Ret</span>
-                        <div className={cn(pnlColor(sig.avg_return))}>{sig.avg_return > 0 ? "+" : ""}{sig.avg_return.toFixed(1)}%</div>
+                        <div className={cn(pnlColor(sig.expected_return))}>{sig.expected_return > 0 ? "+" : ""}{sig.expected_return.toFixed(1)}%</div>
                       </div>
                     )}
                     {sig.atr_squeeze > 0 && sig.atr_squeeze < 1 && (
