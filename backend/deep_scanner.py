@@ -242,8 +242,12 @@ class DeepScanner:
         # Stage 2: Fetch missing via ALL APIs
         coverage = len(data) / max(len(tickers), 1) * 100
         if missing:
-            if len(missing) <= 50:
-                # Small gap: fetch all missing (fast)
+            if coverage > 95:
+                # Cache is warm (>95%) — skip missing, they're probably unfetchable
+                fetch_list = []
+                print(f"  Skipping {len(missing)} missing tickers (cache {coverage:.0f}% — warm enough)")
+            elif len(missing) <= 50 and coverage < 90:
+                # Small gap + not warm enough: fetch missing
                 print(f"  Fetching {len(missing)} missing tickers via all APIs...")
                 fetch_list = missing
             elif coverage < 30:
