@@ -179,7 +179,14 @@ export function OpportunitiesTab() {
                         "bg-emerald-500/20 text-emerald-400"
                       )}>{sig.strategy_label}</span>
                     </div>
-                    <span className="text-neutral-300 font-medium">{formatCurrency(sig.price)}</span>
+                    <div className="text-right">
+                      <span className="text-neutral-300 font-medium">{formatCurrency(sig.live_price ?? sig.price)}</span>
+                      {sig.price_change != null && sig.price_change !== 0 && (
+                        <div className={cn("text-[10px]", pnlColor(sig.price_change))}>
+                          {sig.price_change > 0 ? "+" : ""}{sig.price_change.toFixed(1)}% since scan
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-xs">
                     <div>

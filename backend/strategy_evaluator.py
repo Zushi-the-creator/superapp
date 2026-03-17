@@ -249,7 +249,7 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None) -> List[Entr
         # VETO: min trades for MR
         vetoed = False
         veto_reason = ""
-        if strategy == "MEAN_REVERSION" and mr_trades < 10:
+        if strategy == "MEAN_REVERSION" and mr_trades < 20:
             vetoed = True
             veto_reason = f"Too few trades ({mr_trades})"
         if strategy == "MEAN_REVERSION" and conf < 55:

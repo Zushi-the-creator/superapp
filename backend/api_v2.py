@@ -2834,6 +2834,29 @@ async def get_combined_opportunities():
     cached = load_cache()
     if cached:
         valid = [s for s in cached if not s.get("vetoed")]
+
+        # Overlay live prices from Finnhub _price_cache (already refreshed every 60s)
+        # Fetch quotes for top 20 entries that don't have live prices yet
+        tickers_need = [s["ticker"] for s in valid[:20] if s["ticker"] not in _price_cache]
+        if tickers_need:
+            try:
+                async with aiohttp.ClientSession() as _sess:
+                    for _t in tickers_need[:15]:
+                        if not _check_finnhub_rate(): break
+                        await _get_finnhub_quote(_sess, _t)
+                        await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+        for s in valid:
+            live = _price_cache.get(s["ticker"])
+            if live and live.get("price", 0) > 0:
+                s["live_price"] = round(live["price"], 2)
+                s["price_change"] = round((live["price"] - s["price"]) / s["price"] * 100, 2) if s["price"] > 0 else 0
+            else:
+                s["live_price"] = s["price"]
+                s["price_change"] = 0
+
         mr = sum(1 for s in valid if s.get("strategy") == "MEAN_REVERSION")
         mom = sum(1 for s in valid if s.get("strategy") == "MOMENTUM")
         both = sum(1 for s in valid if s.get("strategy") == "BOTH")
