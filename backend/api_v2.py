@@ -3941,10 +3941,14 @@ async def background_monitor():
 
             print(f"\n[Monitor] Running health check at {datetime.now().strftime('%H:%M')}")
             try:
-                health = await asyncio.wait_for(_run_health_check(), timeout=90 if _is_prod else 300)
-            except asyncio.TimeoutError:
-                print("[Monitor] Health check timed out, continuing to exit trigger check")
-                health = {}  # Don't skip exit checks just because health timed out
+                # Run in thread to prevent blocking event loop during serial API calls
+                health = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: asyncio.run(_run_health_check())),
+                    timeout=120
+                )
+            except (asyncio.TimeoutError, Exception) as _hc_err:
+                print(f"[Monitor] Health check failed/timeout: {_hc_err}")
+                health = {}
 
             # Broadcast critical alerts via WebSocket
             if health.get("has_critical"):
