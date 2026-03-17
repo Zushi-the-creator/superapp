@@ -1669,10 +1669,8 @@ async def get_opportunities():
             print(f"[Scan] Live overlay error for {opp.get('ticker', '?')}: {e}")
         return result
 
-    # No cache yet — trigger background scan, return empty placeholder
-    if not _scan_running:
-        _scan_running = True
-        asyncio.create_task(_background_scan())
+    # No cache yet — DON'T auto-trigger (blocks server). User must click "Refresh" button.
+    # The scan is CPU-heavy and blocks the event loop on Fly.io's 1GB single-core.
 
     return {
         "timestamp": datetime.now().isoformat(),
@@ -2723,10 +2721,7 @@ async def get_momentum_opportunities():
         except Exception as e:
             print(f"[Momentum] Cache load error: {e}")
 
-    # Trigger background scan
-    if not _momentum_running:
-        _momentum_running = True
-        asyncio.create_task(_run_momentum_scan())
+    # DON'T auto-trigger — user must click refresh. Scan blocks event loop.
 
     return {"timestamp": datetime.now().isoformat(), "total_scanned": 0, "valid": 0,
             "signals": [], "scanning": True}
