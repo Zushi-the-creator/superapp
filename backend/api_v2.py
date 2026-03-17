@@ -2767,6 +2767,174 @@ async def refresh_momentum():
     return {"status": "scanning", "message": "Momentum scan started."}
 
 
+@router.get("/scan/combined")
+async def get_combined_opportunities():
+    """Combined mean reversion + momentum signals ranked by unified score.
+
+    Scoring logic:
+    - Mean Reversion: score based on zone_return × zone_WR (catches dip bounces)
+    - Momentum: score based on 20d_ret × volume_ratio (catches breakouts)
+    - Both normalized to 0-100 scale, tagged with strategy type
+    - Deduped: if a stock appears in both, take the higher score
+    """
+    # Get both caches
+    mr_opps = []
+    mom_signals = []
+
+    # Mean reversion data
+    if _scan_cache:
+        mr_opps = _scan_cache.get("opportunities", [])
+    else:
+        _try_load_scan_cache()
+        if _scan_cache:
+            mr_opps = _scan_cache.get("opportunities", [])
+
+    # Momentum data
+    if _momentum_cache:
+        mom_signals = _momentum_cache.get("signals", [])
+    else:
+        # Try disk cache
+        from momentum_scanner import CACHE_DIR as _M_CACHE_DIR
+        _m_path = os.path.join(_M_CACHE_DIR, f"momentum_{datetime.now().strftime('%Y-%m-%d')}.json")
+        if os.path.exists(_m_path):
+            try:
+                with open(_m_path) as _f:
+                    mom_signals = json.load(_f)
+            except Exception:
+                pass
+
+    # Holdings (to exclude from new entries)
+    positions = _position_mgr._get_open_positions_sync()
+    held_tickers = set(p["ticker"] for p in positions) if positions else set()
+
+    # Normalize and merge
+    combined = []
+    seen_tickers = set()
+
+    # Process mean reversion opportunities
+    # Find max score for normalization
+    mr_scores = [o.get("composite_score", o.get("score", 0)) for o in mr_opps if not o.get("vetoed") and o.get("ticker") not in held_tickers]
+    mr_max = max(mr_scores) if mr_scores else 1
+
+    for o in mr_opps:
+        ticker = o.get("ticker", "")
+        if o.get("vetoed") or ticker in held_tickers:
+            continue
+        raw_score = o.get("composite_score", o.get("score", 0))
+        normalized = min(100, (raw_score / max(mr_max, 1)) * 80)  # Scale to 0-80, leave room for momentum boost
+
+        combined.append({
+            "ticker": ticker,
+            "price": o.get("price", 0),
+            "strategy": "MEAN_REVERSION",
+            "strategy_label": "RSI Dip",
+            "combined_score": round(normalized, 1),
+            "raw_score": round(raw_score, 1),
+            # MR-specific
+            "rsi2": o.get("rsi2", 0),
+            "win_rate": o.get("win_rate", 0),
+            "bayesian_wr": o.get("bayesian_wr", 0),
+            "avg_return": o.get("avg_return", 0),
+            "trades": o.get("trades", 0),
+            "zone_return": o.get("zone_return", 0),
+            # Shared
+            "atr_pct": o.get("atr_pct", 0),
+            "volume_ratio": o.get("volume_ratio", 0),
+            "analyst_consensus": o.get("analyst_consensus", ""),
+            "sentiment_label": o.get("sentiment_label", ""),
+            "tier": o.get("tier", ""),
+            "quality_tier": o.get("quality_tier", ""),
+            # Momentum fields (empty for MR)
+            "ret_20d": 0, "ret_60d": 0, "pct_from_high": 0,
+            "momentum_score": 0, "atr_squeeze": 0,
+        })
+        seen_tickers.add(ticker)
+
+    # Process momentum signals
+    mom_scores = [s.get("momentum_score", 0) for s in mom_signals if not s.get("vetoed") and s.get("ticker", "") not in held_tickers]
+    mom_max = max(mom_scores) if mom_scores else 1
+
+    for s in mom_signals:
+        ticker = s.get("ticker", "")
+        if s.get("vetoed") or ticker in held_tickers:
+            continue
+        raw_score = s.get("momentum_score", 0)
+        normalized = min(100, (raw_score / max(mom_max, 1)) * 80)
+
+        if ticker in seen_tickers:
+            # Stock already in MR — update if momentum score is higher
+            for c in combined:
+                if c["ticker"] == ticker and normalized > c["combined_score"]:
+                    c["strategy"] = "BOTH"
+                    c["strategy_label"] = "RSI Dip + Breakout"
+                    c["combined_score"] = round(max(c["combined_score"], normalized) * 1.2, 1)  # 20% bonus for dual signal
+                    c["ret_20d"] = s.get("ret_20d", 0)
+                    c["ret_60d"] = s.get("ret_60d", 0)
+                    c["pct_from_high"] = s.get("pct_from_high", 0)
+                    c["momentum_score"] = raw_score
+                    c["atr_squeeze"] = s.get("atr_squeeze", 0)
+                    break
+            continue
+
+        combined.append({
+            "ticker": ticker,
+            "price": s.get("price", 0),
+            "strategy": "MOMENTUM",
+            "strategy_label": "Breakout",
+            "combined_score": round(normalized, 1),
+            "raw_score": round(raw_score, 1),
+            # MR fields (empty for momentum)
+            "rsi2": 0, "win_rate": 0, "bayesian_wr": 0,
+            "avg_return": 0, "trades": 0, "zone_return": 0,
+            # Shared
+            "atr_pct": s.get("atr_pct", 0),
+            "volume_ratio": s.get("volume_ratio", 0),
+            "analyst_consensus": s.get("analyst_consensus", ""),
+            "sentiment_label": s.get("sentiment_label", ""),
+            "tier": "", "quality_tier": "",
+            # Momentum-specific
+            "ret_20d": s.get("ret_20d", 0),
+            "ret_60d": s.get("ret_60d", 0),
+            "pct_from_high": s.get("pct_from_high", 0),
+            "momentum_score": raw_score,
+            "atr_squeeze": s.get("atr_squeeze", 0),
+        })
+        seen_tickers.add(ticker)
+
+    # Sort by combined score
+    combined.sort(key=lambda x: x["combined_score"], reverse=True)
+
+    # Stats
+    mr_count = sum(1 for c in combined if c["strategy"] == "MEAN_REVERSION")
+    mom_count = sum(1 for c in combined if c["strategy"] == "MOMENTUM")
+    both_count = sum(1 for c in combined if c["strategy"] == "BOTH")
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "total": len(combined),
+        "mean_reversion": mr_count,
+        "momentum": mom_count,
+        "both": both_count,
+        "signals": combined,
+        "market_regime": _check_market_regime(),
+    }
+
+
+@router.post("/scan/refresh-all")
+async def refresh_all_scans():
+    """Trigger both mean reversion AND momentum scans."""
+    global _scan_cache, _scan_running, _momentum_cache, _momentum_running
+    _scan_cache = None
+    _momentum_cache = None
+    if not _scan_running:
+        _scan_running = True
+        asyncio.create_task(_background_scan())
+    if not _momentum_running:
+        _momentum_running = True
+        asyncio.create_task(_run_momentum_scan())
+    return {"status": "scanning", "message": "Both MR and momentum scans started."}
+
+
 _perf_cache: Optional[Dict] = None
 _perf_cache_time: Optional[datetime] = None
 

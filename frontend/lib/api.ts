@@ -9,6 +9,7 @@ import type {
   ChartData,
   PerformanceResponse,
   MomentumResponse,
+  CombinedResponse,
 } from "./types";
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
@@ -87,6 +88,11 @@ export const api = {
   getMomentum: () => fetchJson<MomentumResponse>("/api/v2/momentum/opportunities"),
   refreshMomentum: () =>
     fetchJson<MomentumResponse>("/api/v2/momentum/refresh", { method: "POST" }),
+
+  // Combined (MR + Momentum unified)
+  getCombined: () => fetchJson<CombinedResponse>("/api/v2/scan/combined"),
+  refreshAll: () =>
+    fetchJson<{ status: string; message: string }>("/api/v2/scan/refresh-all", { method: "POST" }),
 
   testAlertEmail: () =>
     fetchJson<{ success: boolean; message: string }>("/api/v2/alerts/test", {

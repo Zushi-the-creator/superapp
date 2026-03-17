@@ -23,12 +23,28 @@ export function OpportunitiesTab() {
   const { data, loading, lastUpdated, refresh } = scanner;
   const [refreshing, setRefreshing] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [combined, setCombined] = useState<import("@/lib/types").CombinedSignal[]>([]);
+  const [combinedStats, setCombinedStats] = useState({ mr: 0, mom: 0, both: 0 });
+
+  // Fetch combined on mount and refresh
+  const fetchCombined = async () => {
+    try {
+      const res = await api.getCombined();
+      setCombined(res.signals ?? []);
+      setCombinedStats({ mr: res.mean_reversion ?? 0, mom: res.momentum ?? 0, both: res.both ?? 0 });
+    } catch {}
+  };
+
+  // Fetch combined when scanner data updates
+  useState(() => { fetchCombined(); });
 
   const handleForceRefresh = async () => {
     setRefreshing(true);
     try {
-      await api.refreshScan();
+      await api.refreshAll();
       await refresh();
+      // Refetch combined after a delay to allow scans to complete
+      setTimeout(fetchCombined, 5000);
     } finally {
       setRefreshing(false);
     }
@@ -131,6 +147,88 @@ export function OpportunitiesTab() {
               ))}
             </div>
           </div>
+        )}
+
+        {/* Combined Signals — MR + Momentum unified ranking */}
+        {combined.length > 0 && (
+          <>
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-amber-400" />
+              <h3 className="text-sm font-semibold text-amber-400">
+                Top Entries — Combined ({combined.length})
+              </h3>
+              <span className="text-xs text-neutral-500">
+                {combinedStats.mr} dip buys · {combinedStats.mom} breakouts · {combinedStats.both} both
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {combined.slice(0, 12).map((sig) => (
+                <div key={sig.ticker} className={cn(
+                  "rounded-lg border p-3 space-y-2",
+                  sig.strategy === "BOTH" ? "border-amber-500/40 bg-amber-500/5" :
+                  sig.strategy === "MOMENTUM" ? "border-blue-500/30 bg-blue-500/5" :
+                  "border-emerald-500/30 bg-emerald-500/5"
+                )}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-neutral-100">{sig.ticker}</span>
+                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium",
+                        sig.strategy === "BOTH" ? "bg-amber-500/20 text-amber-400" :
+                        sig.strategy === "MOMENTUM" ? "bg-blue-500/20 text-blue-400" :
+                        "bg-emerald-500/20 text-emerald-400"
+                      )}>{sig.strategy_label}</span>
+                    </div>
+                    <span className="text-neutral-300 font-medium">{formatCurrency(sig.price)}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <span className="text-neutral-500">Score</span>
+                      <div className={cn("font-bold",
+                        sig.combined_score >= 60 ? "text-emerald-400" :
+                        sig.combined_score >= 40 ? "text-blue-400" : "text-neutral-300"
+                      )}>{sig.combined_score.toFixed(0)}</div>
+                    </div>
+                    {sig.strategy !== "MOMENTUM" && (
+                      <div>
+                        <span className="text-neutral-500">WR</span>
+                        <div className="text-neutral-200">{(sig.bayesian_wr || sig.win_rate).toFixed(0)}% <span className="text-neutral-600">({sig.trades}t)</span></div>
+                      </div>
+                    )}
+                    {sig.strategy !== "MEAN_REVERSION" && (
+                      <div>
+                        <span className="text-neutral-500">20d Ret</span>
+                        <div className={cn(pnlColor(sig.ret_20d))}>{sig.ret_20d > 0 ? "+" : ""}{sig.ret_20d.toFixed(1)}%</div>
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-neutral-500">Vol</span>
+                      <div className={cn(sig.volume_ratio >= 2 ? "text-signal-buy" : "text-neutral-300")}>{sig.volume_ratio.toFixed(1)}x</div>
+                    </div>
+                    {sig.avg_return > 0 && (
+                      <div>
+                        <span className="text-neutral-500">Avg Ret</span>
+                        <div className={cn(pnlColor(sig.avg_return))}>{sig.avg_return > 0 ? "+" : ""}{sig.avg_return.toFixed(1)}%</div>
+                      </div>
+                    )}
+                    {sig.atr_squeeze > 0 && sig.atr_squeeze < 1 && (
+                      <div>
+                        <span className="text-neutral-500">Squeeze</span>
+                        <div className={cn(sig.atr_squeeze < 0.7 ? "text-signal-buy" : "text-neutral-300")}>{sig.atr_squeeze.toFixed(2)}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px]">
+                    {sig.analyst_consensus && <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">{sig.analyst_consensus}</span>}
+                    {sig.sentiment_label && <span className={cn("px-1.5 py-0.5 rounded",
+                      sig.sentiment_label === "POSITIVE" ? "bg-emerald-500/10 text-emerald-400" :
+                      sig.sentiment_label === "NEGATIVE" ? "bg-red-500/10 text-red-400" :
+                      "bg-neutral-800 text-neutral-400"
+                    )}>{sig.sentiment_label}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
         )}
 
         {/* Best Candidates (meets strict) */}

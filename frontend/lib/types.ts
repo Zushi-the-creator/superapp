@@ -388,4 +388,43 @@ export interface MomentumResponse {
   scanning?: boolean;
 }
 
+export interface CombinedSignal {
+  ticker: string;
+  price: number;
+  strategy: "MEAN_REVERSION" | "MOMENTUM" | "BOTH";
+  strategy_label: string;
+  combined_score: number;
+  raw_score: number;
+  // MR fields
+  rsi2: number;
+  win_rate: number;
+  bayesian_wr: number;
+  avg_return: number;
+  trades: number;
+  zone_return: number;
+  // Momentum fields
+  ret_20d: number;
+  ret_60d: number;
+  pct_from_high: number;
+  momentum_score: number;
+  atr_squeeze: number;
+  // Shared
+  atr_pct: number;
+  volume_ratio: number;
+  analyst_consensus: string;
+  sentiment_label: string;
+  tier: string;
+  quality_tier: string;
+}
+
+export interface CombinedResponse {
+  timestamp: string;
+  total: number;
+  mean_reversion: number;
+  momentum: number;
+  both: number;
+  signals: CombinedSignal[];
+  market_regime?: MarketRegime;
+}
+
 export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "momentum";
