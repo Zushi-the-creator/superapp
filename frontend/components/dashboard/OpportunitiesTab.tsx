@@ -159,6 +159,7 @@ export function OpportunitiesTab() {
               </h3>
               <span className="text-xs text-neutral-500">
                 {combinedStats.mr} dip buys · {combinedStats.mom} breakouts · {combinedStats.both} both
+                {combined[0]?.data_date && <> · Evaluated: {combined[0].data_date}</>}
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -178,7 +179,12 @@ export function OpportunitiesTab() {
                         "bg-emerald-500/20 text-emerald-400"
                       )}>{sig.strategy_label}</span>
                     </div>
-                    <span className="text-neutral-300 font-medium">{formatCurrency(sig.price)}</span>
+                    <div className="text-right">
+                      <span className="text-neutral-300 font-medium">{formatCurrency(sig.price)}</span>
+                      <span className={cn("text-[9px] ml-1", sig.price_is_live ? "text-signal-buy" : "text-signal-sell")}>
+                        {sig.price_is_live ? "LIVE" : "DELAYED"}
+                      </span>
+                    </div>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-xs">
                     <div>

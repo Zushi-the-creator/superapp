@@ -412,9 +412,9 @@ export interface CombinedSignal {
   sentiment_label: string;
   vetoed: boolean;
   veto_reason: string;
-  data_date: string;    // When cached price data is from
-  live_price?: number;  // Real-time Finnhub price
-  price_change?: number; // % change from cached → live
+  data_date: string;       // When backtest evaluation ran
+  scan_price?: number;     // Price when evaluation ran
+  price_is_live?: boolean; // true = Finnhub live, false = cached
 }
 
 export interface CombinedResponse {

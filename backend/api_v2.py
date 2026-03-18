@@ -2848,21 +2848,27 @@ async def get_combined_opportunities():
             except Exception:
                 pass
 
-        # RULE: Never show stale prices. Replace cached price with live Finnhub price.
+        # Price: always live from Finnhub. data_date: when backtest scores were computed.
+        live_count = 0
         for s in valid:
+            s["scan_price"] = s["price"]  # Original evaluation price
             live = _price_cache.get(s["ticker"])
             if live and live.get("price", 0) > 0:
-                s["price"] = round(live["price"], 2)  # OVERWRITE with live price
-            # Remove stale fields — frontend should never see cached prices
-            s.pop("live_price", None)
-            s.pop("price_change", None)
+                s["price"] = round(live["price"], 2)
+                s["price_is_live"] = True
+                live_count += 1
+            else:
+                s["price_is_live"] = False
 
         mr = sum(1 for s in valid if s.get("strategy") == "MEAN_REVERSION")
         mom = sum(1 for s in valid if s.get("strategy") == "MOMENTUM")
         both = sum(1 for s in valid if s.get("strategy") == "BOTH")
+        data_date = cached[0].get("data_date", "") if cached else ""
         return {
             "timestamp": datetime.now().isoformat(),
             "total": len(valid), "mean_reversion": mr, "momentum": mom, "both": both,
+            "data_date": data_date,
+            "live_prices": live_count,
             "signals": valid,
             "market_regime": _check_market_regime(),
         }
