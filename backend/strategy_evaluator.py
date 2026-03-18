@@ -86,7 +86,8 @@ def _bayesian_wr(wins, total):
 
 
 def evaluate_all(min_price: float = 10.0, held_tickers: set = None) -> List[EntrySignal]:
-    """Evaluate all stocks in cache for MR + Momentum signals. No API calls."""
+    """Evaluate all stocks in cache for MR + Momentum signals. No API calls.
+    RULE: Never show entries on stale data. If cache is >1 trading day old, flag it."""
     t0 = time.time()
     held = held_tickers or set()
 
