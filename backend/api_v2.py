@@ -4398,7 +4398,61 @@ async def cache_refresh_loop():
                     print(f"[CacheRefresh] Holdings already fresh")
                 first_run = False
 
-                # Start populating full universe in background (don't block early)
+                # DAILY PRICE UPDATE: Refresh ALL cached stocks with latest 5d from Yahoo
+                # This is the ONLY way prices stay current (Stooq blocked on Fly.io)
+                print(f"[CacheRefresh] Updating daily prices for all stocks via Yahoo...")
+                def _update_all_prices():
+                    """Fetch last 5 days of prices for all cached stocks via Yahoo."""
+                    import requests as _req
+                    import sqlite3 as _sql
+                    _conn = _sql.connect(os.path.join(os.path.dirname(__file__), "data", "stock_cache.db"))
+                    _c = _conn.cursor()
+                    _c.execute("SELECT DISTINCT ticker FROM daily_prices")
+                    _all = [r[0] for r in _c.fetchall()]
+                    _updated = 0; _failed = 0
+                    for _ticker in _all:
+                        try:
+                            _r = _req.get(
+                                f"https://query1.finance.yahoo.com/v8/finance/chart/{_ticker}?range=5d&interval=1d",
+                                headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                            if _r.status_code != 200: _failed += 1; continue
+                            _chart = _r.json().get("chart", {}).get("result", [{}])[0]
+                            _ts = _chart.get("timestamp", [])
+                            _q = _chart.get("indicators", {}).get("quote", [{}])[0]
+                            if not _ts or not _q.get("close"): _failed += 1; continue
+                            from datetime import datetime as _dt
+                            for _j in range(len(_ts)):
+                                _d = _dt.utcfromtimestamp(_ts[_j]).strftime('%Y-%m-%d')
+                                _cl = _q["close"][_j]
+                                if _cl is None: continue
+                                _op = _q["open"][_j] if _q.get("open") else _cl
+                                _hi = _q["high"][_j] if _q.get("high") else _cl
+                                _lo = _q["low"][_j] if _q.get("low") else _cl
+                                _vo = _q["volume"][_j] if _q.get("volume") else 0
+                                _c.execute("INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?,?,?,?)",
+                                          (_ticker, _d, _op, _hi, _lo, _cl, _vo))
+                            _conn.commit()
+                            _updated += 1
+                            import time as _time; _time.sleep(0.1)
+                        except Exception:
+                            _failed += 1
+                    _conn.close()
+                    return _updated, _failed
+
+                try:
+                    _upd, _fail = await asyncio.wait_for(asyncio.to_thread(_update_all_prices), timeout=1200)
+                    print(f"[CacheRefresh] Daily prices updated: {_upd} stocks, {_fail} failed")
+
+                    # Re-run evaluator with fresh prices
+                    from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
+                    _held = set(p["ticker"] for p in positions) if positions else set()
+                    _signals = await asyncio.to_thread(_eval_all, 10.0, _held)
+                    _save_eval(_signals)
+                    _valid = sum(1 for s in _signals if not s.vetoed)
+                    print(f"[CacheRefresh] Evaluator re-run: {_valid} valid entries with fresh prices")
+                except (asyncio.TimeoutError, Exception) as _e:
+                    print(f"[CacheRefresh] Daily update error: {_e}")
+
                 await asyncio.sleep(60)
 
                 # POPULATE FULL UNIVERSE: Check how many are missing from cache
