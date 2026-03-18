@@ -111,17 +111,13 @@ class MomentumScanner:
         ret_20d = ((closes[-1] / closes[-21]) - 1) * 100 if n >= 21 else 0
         ret_60d = ((closes[-1] / closes[-61]) - 1) * 100 if n >= 61 else 0
 
-        # Acceleration trigger: 20d return > 15%
-        if ret_20d < 15:
+        # Acceleration trigger: 20d return > 5% (backtested optimal: 51.7% WR, 14,827 trades)
+        if ret_20d < 5:
             return None
 
-        # Volume ratio
+        # Volume ratio (informational, not a gate — backtested: vol filter hurts WR)
         avg_vol = sum(volumes[-20:]) / 20 if len(volumes) >= 20 and any(v > 0 for v in volumes[-20:]) else 0
         vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 0
-
-        # Volume confirmation: > 1.5x average
-        if vol_ratio < 1.5:
-            return None
 
         # ATR
         atr_vals = []

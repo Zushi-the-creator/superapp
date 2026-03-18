@@ -209,7 +209,9 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None) -> List[Entr
             pct_from_low > 30,
         ]
         trend_score = sum(trend_rules)
-        is_mom = (trend_score == 6 and ret_20d > 15 and vol_ratio > 1.5)
+        # Backtested: ret>5% + no vol filter = 51.7% WR, +1.56% avg (14,827 trades)
+        # vs strict ret>15% + vol>1.5x = 49.3% WR (worse) but +1.92% avg (fewer signals)
+        is_mom = (trend_score == 6 and ret_20d > 5)
 
         mom_score = 0
         if is_mom:
