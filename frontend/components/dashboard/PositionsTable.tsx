@@ -252,6 +252,11 @@ const PositionRow = memo(function PositionRow({
         </td>
         <td className="text-center px-3 py-3 whitespace-nowrap">
           <SignalBadge signal={pos.signal || "HOLD"} />
+          {pos.issues?.some(i => i.includes("ROTATE")) && (
+            <div className="text-[9px] text-amber-400 font-bold animate-pulse mt-0.5">
+              {pos.issues.find(i => i.includes("ROTATE"))?.replace("ROTATE? ", "→ ")}
+            </div>
+          )}
         </td>
         <td className="px-2">
           {isExpanded ? (
