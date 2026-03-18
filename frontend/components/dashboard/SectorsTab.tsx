@@ -10,10 +10,14 @@ interface SectorData {
   price: number;
   ret_5d: number;
   ret_20d: number;
+  ret_60d: number;
   ret_ytd: number;
   mr_wr: number;
   mr_trades: number;
   mr_avg_ret: number;
+  rsi14: number;
+  above_sma50: boolean;
+  trend: string;
 }
 
 interface PortfolioExposure {
@@ -111,6 +115,8 @@ export function SectorsTab() {
                 <th className="text-right px-2">5d</th>
                 <th className="text-right px-2">20d</th>
                 <th className="text-right px-2">YTD</th>
+                <th className="text-right px-2">60d</th>
+                <th className="text-center px-2">Trend</th>
                 <th className="text-right px-2">MR WR</th>
                 <th className="text-right px-2">MR Ret</th>
                 <th className="text-center px-2">Signal</th>
@@ -129,6 +135,14 @@ export function SectorsTab() {
                     <td className={cn("text-right px-2 font-medium", pnlColor(s.ret_5d))}>{s.ret_5d > 0 ? "+" : ""}{s.ret_5d.toFixed(1)}%</td>
                     <td className={cn("text-right px-2 font-medium", pnlColor(s.ret_20d))}>{s.ret_20d > 0 ? "+" : ""}{s.ret_20d.toFixed(1)}%</td>
                     <td className={cn("text-right px-2 font-bold", pnlColor(s.ret_ytd))}>{s.ret_ytd > 0 ? "+" : ""}{s.ret_ytd.toFixed(1)}%</td>
+                    <td className={cn("text-right px-2 font-medium", pnlColor(s.ret_60d ?? 0))}>{(s.ret_60d ?? 0) > 0 ? "+" : ""}{(s.ret_60d ?? 0).toFixed(1)}%</td>
+                    <td className="text-center px-2">
+                      <span className={cn("text-[10px] font-bold px-1.5 py-0.5 rounded",
+                        s.trend === "BULL" ? "bg-signal-buy/20 text-signal-buy" :
+                        s.trend === "BEAR" ? "bg-signal-sell/20 text-signal-sell" :
+                        "bg-neutral-800 text-neutral-400"
+                      )}>{s.trend}</span>
+                    </td>
                     <td className={cn("text-right px-2", s.mr_wr >= 60 ? "text-signal-buy" : s.mr_wr >= 50 ? "text-amber-400" : "text-signal-sell")}>
                       {s.mr_wr.toFixed(0)}%
                       <span className="text-neutral-600 ml-1">({s.mr_trades}t)</span>

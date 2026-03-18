@@ -2753,10 +2753,37 @@ async def get_sectors():
 
     sectors = []
 
+    # Fetch missing sector ETFs from Yahoo (one-time, then cached in SQLite)
+    missing_etfs = [etf for etf in SECTORS if _cache.get(etf, 365) is None or len(_cache.get(etf, 365) or []) < 50]
+    if missing_etfs:
+        def _fetch_etfs():
+            import requests as _req
+            for etf in missing_etfs:
+                try:
+                    r = _req.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{etf}?range=5y&interval=1d",
+                                headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+                    if r.status_code != 200: continue
+                    chart = r.json().get("chart",{}).get("result",[{}])[0]
+                    ts = chart.get("timestamp",[]); q = chart.get("indicators",{}).get("quote",[{}])[0]
+                    if not ts or not q.get("close"): continue
+                    from datetime import datetime as _dt
+                    dates = [_dt.utcfromtimestamp(t).strftime('%Y-%m-%d') for t in ts]
+                    df = pd.DataFrame({"Date": dates, "Open": q.get("open",[]), "High": q.get("high",[]),
+                                       "Low": q.get("low",[]), "Close": q.get("close",[]), "Volume": q.get("volume",[])})
+                    df["Date"] = pd.to_datetime(df["Date"])
+                    df = df.set_index("Date").sort_index().dropna(subset=["Close"])
+                    if len(df) >= 50:
+                        _cache.store(etf, df)
+                except Exception: pass
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_fetch_etfs), timeout=30)
+        except Exception: pass
+
     for etf, name in SECTORS.items():
         df = _cache.get(etf, 365)
         if df is None or len(df) < 50:
-            sectors.append({"etf": etf, "name": name, "price": 0, "ret_5d": 0, "ret_20d": 0, "ret_ytd": 0, "mr_wr": 0, "mr_trades": 0, "mr_avg_ret": 0})
+            sectors.append({"etf": etf, "name": name, "price": 0, "ret_5d": 0, "ret_20d": 0, "ret_60d": 0, "ret_ytd": 0,
+                           "mr_wr": 0, "mr_trades": 0, "mr_avg_ret": 0, "trend": "UNKNOWN", "rsi14": 50, "above_sma50": False})
             continue
 
         closes = df["Close"].dropna().tolist()
@@ -2791,6 +2818,24 @@ async def get_sectors():
         mr_wr = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
         mr_avg = sum(trades) / len(trades) if trades else 0
 
+        # Momentum: 60d return
+        ret_60d = ((closes[-1] / closes[-61]) - 1) * 100 if len(closes) >= 61 else 0
+
+        # RSI(14) for sector trend
+        rsi14_vals = _entry.calc_rsi(closes, 14) if len(closes) >= 15 else 50
+
+        # Above SMA50?
+        sma50_val = sma_arr[-1] if len(sma_arr) > 0 else 0
+        above_sma50 = closes[-1] > sma50_val if sma50_val > 0 else False
+
+        # Trend: BULL if above SMA50 + 20d > 0, BEAR if below + 20d < 0
+        if above_sma50 and ret_20d > 0:
+            trend = "BULL"
+        elif not above_sma50 and ret_20d < 0:
+            trend = "BEAR"
+        else:
+            trend = "SIDEWAYS"
+
         # Live price from Finnhub
         live = _price_cache.get(etf)
         if live and live.get("price", 0) > 0:
@@ -2798,8 +2843,10 @@ async def get_sectors():
 
         sectors.append({
             "etf": etf, "name": name, "price": round(price, 2),
-            "ret_5d": round(ret_5d, 2), "ret_20d": round(ret_20d, 2), "ret_ytd": round(ret_ytd, 2),
+            "ret_5d": round(ret_5d, 2), "ret_20d": round(ret_20d, 2), "ret_60d": round(ret_60d, 2), "ret_ytd": round(ret_ytd, 2),
             "mr_wr": round(mr_wr, 1), "mr_trades": len(trades), "mr_avg_ret": round(mr_avg, 2),
+            "rsi14": round(rsi14_vals, 1) if isinstance(rsi14_vals, float) else 50,
+            "above_sma50": above_sma50, "trend": trend,
         })
 
     # Portfolio sector exposure
