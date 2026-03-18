@@ -7,6 +7,7 @@ import { OpportunitiesTab } from "@/components/dashboard/OpportunitiesTab";
 import { PerformanceTab } from "@/components/dashboard/PerformanceTab";
 import { HistoryTab } from "@/components/dashboard/HistoryTab";
 import { MomentumTab } from "@/components/dashboard/MomentumTab";
+import { SectorsTab } from "@/components/dashboard/SectorsTab";
 import type { TabId } from "@/lib/types";
 
 export default function DashboardPage() {
@@ -23,6 +24,7 @@ export default function DashboardPage() {
         {activeTab === "opportunities" && <OpportunitiesTab />}
         {activeTab === "performance" && <PerformanceTab />}
         {activeTab === "momentum" && <MomentumTab />}
+        {activeTab === "sectors" && <SectorsTab />}
         {activeTab === "history" && <HistoryTab />}
       </main>
     </div>

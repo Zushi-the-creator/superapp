@@ -13,6 +13,7 @@ import type { TabId } from "@/lib/types";
 const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "portfolio", label: "Portfolio", icon: BarChart3 },
   { id: "opportunities", label: "Entries", icon: Zap },
+  { id: "sectors", label: "Sectors", icon: Rocket },
   { id: "performance", label: "Performance", icon: TrendingUp },
   { id: "history", label: "History", icon: History },
 ];

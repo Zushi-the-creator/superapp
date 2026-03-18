@@ -428,4 +428,4 @@ export interface CombinedResponse {
   market_regime?: MarketRegime;
 }
 
-export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "momentum";
+export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "momentum" | "sectors";

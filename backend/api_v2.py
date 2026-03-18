@@ -2718,6 +2718,124 @@ async def get_history(ticker: str = None, limit: int = 100):
     )
 
 
+# ── Sector Analysis Endpoint ──
+
+@router.get("/sectors")
+async def get_sectors():
+    """Sector analysis: performance, MR opportunity, portfolio exposure, correlations."""
+    SECTORS = {
+        "XLK": "Technology", "XLF": "Financials", "XLE": "Energy",
+        "XLV": "Healthcare", "XLI": "Industrials", "XLY": "Consumer Disc",
+        "XLP": "Consumer Staples", "XLB": "Materials", "XLU": "Utilities",
+        "XLRE": "Real Estate", "XLC": "Communication",
+    }
+
+    # Approximate sector mapping for common stocks
+    STOCK_SECTORS = {
+        # Our holdings
+        "FIGS": "Healthcare", "EFXT": "Energy", "MTRN": "Industrials",
+        "WDC": "Technology", "PDS": "Energy", "LRCX": "Technology",
+        "MKSI": "Technology", "LIND": "Industrials", "MAMA": "Communication",
+        "HXL": "Industrials", "DBD": "Technology",
+        # Common stocks by sector
+        "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology", "AVGO": "Technology",
+        "GOOGL": "Communication", "META": "Communication", "NFLX": "Communication",
+        "AMZN": "Consumer Disc", "TSLA": "Consumer Disc",
+        "JPM": "Financials", "BAC": "Financials", "GS": "Financials",
+        "XOM": "Energy", "CVX": "Energy", "OXY": "Energy",
+        "UNH": "Healthcare", "JNJ": "Healthcare", "LLY": "Healthcare",
+        "CAT": "Industrials", "GE": "Industrials", "HON": "Industrials",
+        "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples",
+        "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities",
+        "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
+        "PLD": "Real Estate", "AMT": "Real Estate", "EQIX": "Real Estate",
+    }
+
+    sectors = []
+
+    for etf, name in SECTORS.items():
+        df = _cache.get(etf, 365)
+        if df is None or len(df) < 50:
+            sectors.append({"etf": etf, "name": name, "price": 0, "ret_5d": 0, "ret_20d": 0, "ret_ytd": 0, "mr_wr": 0, "mr_trades": 0, "mr_avg_ret": 0})
+            continue
+
+        closes = df["Close"].dropna().tolist()
+        opens = df["Open"].tolist() if "Open" in df.columns else closes
+        if not closes:
+            continue
+
+        price = closes[-1]
+        ret_5d = ((closes[-1] / closes[-6]) - 1) * 100 if len(closes) >= 6 else 0
+        ret_20d = ((closes[-1] / closes[-21]) - 1) * 100 if len(closes) >= 21 else 0
+
+        # YTD
+        dates = df.index.strftime('%Y-%m-%d').tolist() if hasattr(df.index, 'strftime') else []
+        ytd_idx = next((i for i, d in enumerate(dates) if d >= '2026-01-02'), 0)
+        ret_ytd = ((closes[-1] / closes[ytd_idx]) - 1) * 100 if ytd_idx > 0 and ytd_idx < len(closes) else 0
+
+        # MR backtest on the ETF itself
+        rsi_arr = _rsi2_array(closes)
+        sma_arr = _sma_array(closes, 50)
+        trades = []
+        le = -1
+        for i in range(50, len(closes) - 32):
+            if i <= le:
+                continue
+            if rsi_arr[i] < 10 and closes[i] > sma_arr[i]:
+                ep = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
+                if i + 1 + 30 < len(closes):
+                    ret = ((closes[i + 1 + 30] - ep) / ep) * 100 - 0.30
+                    trades.append(ret)
+                    le = i + 31
+
+        mr_wr = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
+        mr_avg = sum(trades) / len(trades) if trades else 0
+
+        # Live price from Finnhub
+        live = _price_cache.get(etf)
+        if live and live.get("price", 0) > 0:
+            price = live["price"]
+
+        sectors.append({
+            "etf": etf, "name": name, "price": round(price, 2),
+            "ret_5d": round(ret_5d, 2), "ret_20d": round(ret_20d, 2), "ret_ytd": round(ret_ytd, 2),
+            "mr_wr": round(mr_wr, 1), "mr_trades": len(trades), "mr_avg_ret": round(mr_avg, 2),
+        })
+
+    # Portfolio sector exposure
+    positions = _position_mgr._get_open_positions_sync()
+    exposure = {}
+    for pos in positions:
+        ticker = pos["ticker"]
+        sector = STOCK_SECTORS.get(ticker, "Unknown")
+        if sector not in exposure:
+            exposure[sector] = {"tickers": [], "cost": 0, "value": 0}
+        live = _price_cache.get(ticker, {})
+        price = live.get("price", pos["entry_price"]) if live else pos["entry_price"]
+        exposure[sector]["tickers"].append(ticker)
+        exposure[sector]["cost"] += pos["entry_price"] * pos["shares"]
+        exposure[sector]["value"] += price * pos["shares"]
+
+    total_value = sum(e["value"] for e in exposure.values())
+    portfolio_exposure = [
+        {"sector": sec, "tickers": data["tickers"], "cost": round(data["cost"], 2),
+         "value": round(data["value"], 2), "weight": round(data["value"] / total_value * 100, 1) if total_value else 0}
+        for sec, data in sorted(exposure.items(), key=lambda x: -x[1]["value"])
+    ]
+
+    # Sort sectors by YTD (leaders first)
+    sectors.sort(key=lambda x: x["ret_ytd"], reverse=True)
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "sectors": sectors,
+        "portfolio_exposure": portfolio_exposure,
+        "total_sectors_used": len(exposure),
+        "total_sectors": len(SECTORS),
+        "market_regime": _check_market_regime(),
+    }
+
+
 # ── Momentum Scanner Endpoints ──
 
 _momentum_cache: Optional[Dict] = None
