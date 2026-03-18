@@ -25,6 +25,7 @@ export function OpportunitiesTab() {
   const [showAll, setShowAll] = useState(false);
   const [combined, setCombined] = useState<import("@/lib/types").CombinedSignal[]>([]);
   const [combinedStats, setCombinedStats] = useState({ mr: 0, mom: 0, both: 0 });
+  const [systemStatus, setSystemStatus] = useState({ stage: "idle", message: "", progress: 0 });
 
   // Fetch combined on mount and refresh
   const fetchCombined = async () => {
@@ -32,11 +33,20 @@ export function OpportunitiesTab() {
       const res = await api.getCombined();
       setCombined(res.signals ?? []);
       setCombinedStats({ mr: res.mean_reversion ?? 0, mom: res.momentum ?? 0, both: res.both ?? 0 });
+      if (res.system_status) setSystemStatus(res.system_status);
     } catch {}
   };
 
-  // Fetch combined on mount
-  useEffect(() => { fetchCombined(); }, []);
+  // Fetch combined on mount + poll every 30s while system is updating
+  useEffect(() => {
+    fetchCombined();
+    const interval = setInterval(() => {
+      if (systemStatus.stage !== "idle" && systemStatus.stage !== "ready") {
+        fetchCombined();
+      }
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleForceRefresh = async () => {
     setRefreshing(true);
@@ -145,6 +155,26 @@ export function OpportunitiesTab() {
                   )}
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* System status banner */}
+        {systemStatus.stage !== "idle" && systemStatus.stage !== "ready" && (
+          <div className={cn(
+            "rounded-lg border px-4 py-3 flex items-center gap-3",
+            systemStatus.stage === "error" ? "border-red-500/30 bg-red-500/5" : "border-blue-500/30 bg-blue-500/5"
+          )}>
+            {systemStatus.stage !== "error" && (
+              <RefreshCw className="h-4 w-4 text-blue-400 animate-spin" />
+            )}
+            <div>
+              <div className="text-sm font-medium text-neutral-200">{systemStatus.message}</div>
+              {systemStatus.progress > 0 && systemStatus.progress < 100 && (
+                <div className="w-48 h-1.5 bg-neutral-800 rounded-full mt-1">
+                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${systemStatus.progress}%` }} />
+                </div>
+              )}
             </div>
           </div>
         )}

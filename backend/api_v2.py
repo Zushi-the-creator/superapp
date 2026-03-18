@@ -2723,6 +2723,9 @@ _momentum_cache: Optional[Dict] = None
 _momentum_cache_time: Optional[datetime] = None
 _momentum_running: bool = False
 
+# Global scan/refresh status — frontend polls this to show progress
+_system_status: Dict = {"stage": "idle", "message": "", "progress": 0}
+
 
 @router.get("/momentum/opportunities")
 async def get_momentum_opportunities():
@@ -2822,6 +2825,12 @@ async def refresh_momentum():
     return {"status": "scanning", "message": "Momentum scan started."}
 
 
+@router.get("/system/status")
+async def get_system_status():
+    """Current system status — what's running, what stage."""
+    return {**_system_status, "timestamp": datetime.now().isoformat()}
+
+
 @router.get("/scan/combined")
 async def get_combined_opportunities():
     """Fast unified entry signals — MR + Momentum evaluated against cached prices.
@@ -2832,6 +2841,15 @@ async def get_combined_opportunities():
 
     # Try disk cache first (instant)
     cached = load_cache()
+    if not cached:
+        # No cache at all — return status so frontend shows what's happening
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "total": 0, "mean_reversion": 0, "momentum": 0, "both": 0,
+            "signals": [],
+            "system_status": _system_status,
+            "market_regime": _check_market_regime(),
+        }
     if cached:
         valid = [s for s in cached if not s.get("vetoed")]
 
@@ -2870,6 +2888,7 @@ async def get_combined_opportunities():
             "data_date": data_date,
             "live_prices": live_count,
             "signals": valid,
+            "system_status": _system_status,
             "market_regime": _check_market_regime(),
         }
 
@@ -4399,7 +4418,7 @@ async def cache_refresh_loop():
                 first_run = False
 
                 # DAILY PRICE UPDATE: Refresh ALL cached stocks with latest 5d from Yahoo
-                # This is the ONLY way prices stay current (Stooq blocked on Fly.io)
+                _system_status.update({"stage": "updating_prices", "message": "Fetching latest prices from Yahoo...", "progress": 0})
                 print(f"[CacheRefresh] Updating daily prices for all stocks via Yahoo...")
                 def _update_all_prices():
                     """Fetch last 5 days of prices for all cached stocks via Yahoo."""
@@ -4444,14 +4463,17 @@ async def cache_refresh_loop():
                     print(f"[CacheRefresh] Daily prices updated: {_upd} stocks, {_fail} failed")
 
                     # Re-run evaluator with fresh prices
+                    _system_status.update({"stage": "evaluating", "message": f"Evaluating strategies on {_upd} stocks...", "progress": 80})
                     from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
                     _held = set(p["ticker"] for p in positions) if positions else set()
                     _signals = await asyncio.to_thread(_eval_all, 10.0, _held)
                     _save_eval(_signals)
                     _valid = sum(1 for s in _signals if not s.vetoed)
                     print(f"[CacheRefresh] Evaluator re-run: {_valid} valid entries with fresh prices")
+                    _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
                 except (asyncio.TimeoutError, Exception) as _e:
                     print(f"[CacheRefresh] Daily update error: {_e}")
+                    _system_status.update({"stage": "error", "message": str(_e), "progress": 0})
 
                 await asyncio.sleep(60)
 
