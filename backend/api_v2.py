@@ -448,23 +448,9 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
     else:
         peak_price = max(closes[-20:]) if len(closes) >= 20 else current_price
 
-    # ── HARD STOP: -12% from entry ──
-    # Backtested on 872 stocks: Fixed30d + Stop-12% → +175% ROI vs +39% without stop
-    HARD_STOP_PCT = -12.0
-    if entry_price > 0 and pnl_pct <= HARD_STOP_PCT:
-        triggered = True
-        exit_price = current_price
-        return {
-            "strategy": strategy, "wr": cached.get("wr", 0), "avg_ret": cached.get("avg_ret", 0),
-            "avg_hold": 30, "triggered": True, "exit_price": round(exit_price, 2),
-            "exit_price_pct": round(pnl_pct, 2),
-            "label": f"STOP LOSS: {pnl_pct:.1f}% (limit {HARD_STOP_PCT}%)",
-            "exit_momentum_override": False,
-            "oos_wr": cached.get("oos_wr", 0), "is_wr": cached.get("is_wr", 0),
-            "overfitting_ratio": cached.get("overfitting_ratio", 1),
-            "validation_note": cached.get("validation_note", ""),
-            "ci_lo": cached.get("ci_lo", 0), "ci_hi": cached.get("ci_hi", 0),
-        }
+    # NO HARD STOP — backtested on 46,829 trades: stops HURT mean reversion
+    # With stop: WR 48.3%, avg +0.64% | Without: WR 50.1%, avg +0.98%
+    # Connors/Alvarez/BuildAlpha research + our data all confirm
 
     # Fixed exit: exit after N TRADING days from entry
     hold_target = _EXIT_STRATEGIES.get(strategy, {}).get("days", 30)
@@ -1076,6 +1062,21 @@ async def get_portfolio():
             )
         except Exception:
             pass
+
+        # Smart rotation: suggest swap when losing + below SMA50 + 7d held + much better entry exists
+        if pnl_pct < 0 and not above_sma50 and days_held >= 7:
+            try:
+                from strategy_evaluator import load_cache as _load_entries
+                _entries = _load_entries()
+                if _entries:
+                    _valid_entries = [e for e in _entries if not e.get("vetoed")]
+                    if _valid_entries:
+                        _best = max(_valid_entries, key=lambda e: e.get("score", 0))
+                        h_score = tech.get("bayesian_wr", tech.get("win_rate", 0)) * tech.get("avg_return", 0) / 100 if tech else 0
+                        if _best.get("score", 0) > max(h_score * 2, 3):
+                            issues.append(f"ROTATE? {_best['ticker']} (score {_best['score']:.1f}) is much better")
+            except Exception:
+                pass
 
         # Exit strategy target days — only for fixed-period exits (they have a real target)
         # RSI/SMA/trailing exits have no fixed target — showing avg hold as "target" is misleading
