@@ -1687,14 +1687,14 @@ def _check_market_regime() -> dict:
         size_pct = min(vix_size, spy_size)
         result["position_size_pct"] = size_pct
 
-        # Overall regime
+        # Overall regime — informational only, never blocks entries
         if size_pct == 0:
             result["regime"] = "CRISIS"
-            result["pause_entries"] = True
-            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, no new entries"
+            result["pause_entries"] = False
+            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, reduce size to {size_pct}%"
         elif size_pct <= 40:
             result["regime"] = "FEAR"
-            result["pause_entries"] = True
+            result["pause_entries"] = False
             result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — reduce to {size_pct}%"
         elif size_pct <= 70:
             result["regime"] = "CAUTION"
