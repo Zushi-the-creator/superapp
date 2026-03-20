@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { BarChart3, TrendingUp, TrendingDown, Shield, Zap } from "lucide-react";
 import { cn, formatCurrency } from "@/lib/utils";
+import { API_URL } from "@/lib/constants";
 
 interface SectorData {
   etf: string;
@@ -43,7 +44,7 @@ export function SectorsTab() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/v2/sectors")
+    fetch(`${API_URL}/api/v2/sectors`, { cache: "no-store", headers: { "Content-Type": "application/json" } })
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));

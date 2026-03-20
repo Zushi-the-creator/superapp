@@ -168,7 +168,7 @@ class ScanOpportunity(BaseModel):
     zone_trades: int
     zone_win_rate: float
     volume_ratio: float = 0
-    hold_days: int = 21
+    hold_days: int = 30
     # ML-discovered features
     low52_dist: float = 0  # % distance from 52-week low
     atr_pct: float = 0     # ATR(14) as % of price

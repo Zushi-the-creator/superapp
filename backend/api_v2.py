@@ -102,65 +102,6 @@ def _get_market_session() -> str:
     return "CLOSED"
 
 
-def _fetch_extended_quote_sync(ticker: str) -> Optional[Dict]:
-    """Fetch pre-market or after-hours price from Yahoo Finance chart API.
-    Uses the lightweight v8/chart endpoint. 3s timeout to avoid blocking."""
-    import requests as _req
-    session = _get_market_session()
-
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = _req.get(
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-            f"?range=1d&interval=1m&includePrePost=true",
-            headers=headers, timeout=3,  # Hard 3s timeout — never block longer
-        )
-        if resp.status_code == 200:
-            chart = resp.json().get("chart", {}).get("result", [{}])[0]
-            meta = chart.get("meta", {})
-            reg_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
-            reg_price = meta.get("regularMarketPrice", 0)
-
-            ext_price = None
-            if session == "PRE_MARKET":
-                # During pre-market: regularMarketPrice is last close, current price from timestamps
-                ts_data = chart.get("timestamp", [])
-                closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                if ts_data and closes:
-                    # Last non-null close in the series is the latest PM price
-                    for i in range(len(closes) - 1, -1, -1):
-                        if closes[i] is not None:
-                            ext_price = closes[i]
-                            break
-                # Use reg_price as base (yesterday's close)
-                base_price = reg_price or reg_close
-            elif session == "AFTER_HOURS":
-                ts_data = chart.get("timestamp", [])
-                closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                if ts_data and closes:
-                    for i in range(len(closes) - 1, -1, -1):
-                        if closes[i] is not None:
-                            ext_price = closes[i]
-                            break
-                base_price = reg_price  # today's close
-            else:
-                return None
-
-            if ext_price and ext_price > 0 and base_price and base_price > 0:
-                # Only return if ext_price differs from base (actual PM/AH activity)
-                if abs(ext_price - base_price) / base_price > 0.001:  # > 0.1% diff
-                    ext_change = round(((ext_price - base_price) / base_price) * 100, 2)
-                    return {
-                        "ext_price": round(ext_price, 2),
-                        "ext_change_pct": ext_change,
-                        "session": session,
-                        "ts": datetime.now(),
-                    }
-    except Exception as e:
-        print(f"[ExtHours] {ticker} Yahoo error: {e}")
-
-    return None
-
 # WebSocket connections for alerts
 _ws_connections: List[WebSocket] = []
 
@@ -1770,12 +1711,17 @@ def _check_market_regime() -> dict:
 
 
 def _try_load_scan_cache():
-    """Load today's scan results from on-disk cache file if available.
-    Only loads fully-validated stocks (have analyst + sentiment data)."""
+    """Load scan results from disk cache. Prefers today's file, falls back to most recent."""
     global _scan_cache, _scan_cache_time
     today = datetime.now().strftime('%Y-%m-%d')
     cache_path = os.path.join(os.path.dirname(__file__), "data", f"scan_{today}.json")
     if not os.path.exists(cache_path):
+        # Fallback: find most recent scan file (within last 7 days)
+        import glob
+        pattern = os.path.join(os.path.dirname(__file__), "data", "scan_2026-*.json")
+        files = sorted(glob.glob(pattern), reverse=True)
+        cache_path = files[0] if files else None
+    if not cache_path or not os.path.exists(cache_path):
         return
     try:
         with open(cache_path) as f:
@@ -1877,7 +1823,7 @@ async def get_best_replacement(sell_ticker: str):
     sell_score = holdings_scores.get(sell_ticker, {}).get("score", 0)
     if sell_score == 0:
         # Not a current holding — just use 0 as baseline
-        bt = _backtest_7day(sell_ticker)
+        bt = _backtest_30day(sell_ticker)
         sell_score = bt.get("avg_return", 0) * bt.get("win_rate", 0) / 100
 
     # Load all backtested candidates from today's scan cache
@@ -1959,7 +1905,7 @@ async def get_best_replacement(sell_ticker: str):
         }
 
 
-def _backtest_7day(ticker: str) -> dict:
+def _backtest_30day(ticker: str) -> dict:
     """Backtest using ATLAS V2.5: RSI<10 entry, 30-day fixed hold, price > SMA50.
     Fallback for holdings scoring when hybrid exit data unavailable."""
     df = _cache.get(ticker, 1260)
@@ -2014,7 +1960,7 @@ def _get_holdings_scores() -> tuple:
             strat_wr = min(strat_wr, tech["bayesian_wr"])  # Use the more conservative estimate
         if strat_ret == 0 or strat_wr == 0:
             try:
-                bt = _backtest_7day(ticker)
+                bt = _backtest_30day(ticker)
                 strat_wr = bt.get("win_rate", 0)
                 strat_ret = bt.get("avg_return", 0)
             except Exception:
@@ -2364,7 +2310,7 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
         zone_trades=r.get("zone_trades", 0),
         zone_win_rate=r.get("zone_win_rate", 0),
         volume_ratio=vol_ratio,
-        hold_days=r.get("hold_days", 21),
+        hold_days=r.get("hold_days", 30),
         low52_dist=r.get("low52_dist", 0),
         atr_pct=r.get("atr_pct", 0),
         sma50_buffer=r.get("sma50_buffer", 0),
@@ -2564,12 +2510,30 @@ async def _run_scan() -> Dict:
 
 # ── Buy/Sell Endpoints ──
 
+def _calc_trade_fee(ticker: str) -> float:
+    """Calculate trade fee: ILS = free, USD = first 10 trades/month free, then $1.50."""
+    if ticker.endswith(".TA"):
+        return 0.0
+    # Count trades this calendar month
+    import sqlite3 as _sq
+    _db = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+    conn = _sq.connect(_db)
+    try:
+        month_start = datetime.now().strftime("%Y-%m-01")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE date >= ?", (month_start,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return 0.0 if count < 10 else 1.50
+
+
 @router.post("/positions/buy", response_model=TradeResult)
 async def buy_position(req: BuyRequest):
     """Record a buy and create position + transaction."""
     ticker = req.ticker.upper()
     total = req.price * req.shares
-    fee = 1.50 if not ticker.endswith(".TA") else 0  # No fee tracking for ILS
+    fee = _calc_trade_fee(ticker)
     currency = "ILS" if ticker.endswith(".TA") else "USD"
 
     # Add position
@@ -2614,8 +2578,7 @@ async def sell_position(req: SellRequest):
     """Record a sell (full or partial), update position, and log transaction."""
     ticker = req.ticker.upper()
     total = req.price * req.shares
-    # ILS positions (.TA tickers) have no commission fee
-    fee = 0.0 if ticker.endswith(".TA") else 1.50
+    fee = _calc_trade_fee(ticker)
 
     # Find open position for this ticker
     positions = _position_mgr._get_open_positions_sync()
@@ -2732,12 +2695,10 @@ async def get_sectors():
 
     # Approximate sector mapping for common stocks
     STOCK_SECTORS = {
-        # Our holdings
         "FIGS": "Healthcare", "EFXT": "Energy", "MTRN": "Industrials",
         "WDC": "Technology", "PDS": "Energy", "LRCX": "Technology",
         "MKSI": "Technology", "LIND": "Industrials", "MAMA": "Communication",
         "HXL": "Industrials", "DBD": "Technology",
-        # Common stocks by sector
         "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology", "AVGO": "Technology",
         "GOOGL": "Communication", "META": "Communication", "NFLX": "Communication",
         "AMZN": "Consumer Disc", "TSLA": "Consumer Disc",
@@ -3008,14 +2969,12 @@ async def get_combined_opportunities():
     # Try disk cache first (instant)
     cached = load_cache()
     if not cached:
-        # No cache at all — return status so frontend shows what's happening
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "total": 0, "mean_reversion": 0, "momentum": 0, "both": 0,
-            "signals": [],
-            "system_status": _system_status,
-            "market_regime": _check_market_regime(),
-        }
+        # No today's cache — run evaluation now (fast, ~3-5s, pure CPU)
+        positions = _position_mgr._get_open_positions_sync()
+        held = set(p["ticker"] for p in positions) if positions else set()
+        signals = await asyncio.to_thread(evaluate_all, 10.0, held)
+        save_cache(signals)
+        cached = [asdict(s) for s in signals]
     if cached:
         valid = [s for s in cached if not s.get("vetoed")]
 
@@ -3057,28 +3016,6 @@ async def get_combined_opportunities():
             "system_status": _system_status,
             "market_regime": _check_market_regime(),
         }
-
-    # No cache — run evaluation in thread (fast, ~3s, no API calls)
-    positions = _position_mgr._get_open_positions_sync()
-    held = set(p["ticker"] for p in positions) if positions else set()
-
-    signals = await asyncio.to_thread(evaluate_all, 10.0, held)
-    save_cache(signals)
-
-    valid = [asdict(s) for s in signals if not s.vetoed]
-    mr = sum(1 for s in valid if s.get("strategy") == "MEAN_REVERSION")
-    mom = sum(1 for s in valid if s.get("strategy") == "MOMENTUM")
-    both_n = sum(1 for s in valid if s.get("strategy") == "BOTH")
-    data_date = valid[0].get("data_date", "") if valid else ""
-
-    return {
-        "timestamp": datetime.now().isoformat(),
-        "total": len(valid), "mean_reversion": mr, "momentum": mom, "both": both_n,
-        "data_date": data_date,
-        "signals": valid,
-        "market_regime": _check_market_regime(),
-    }
-
 
 @router.post("/scan/refresh-all")
 async def refresh_all_scans():
@@ -3571,7 +3508,7 @@ async def analyze_stock(ticker: str):
             raise HTTPException(status_code=404, detail=f"No data for {ticker}. Could not fetch historical prices.")
 
     # 2. 7-day fixed hold backtest
-    bt = _backtest_7day(ticker)
+    bt = _backtest_30day(ticker)
 
     # 3. Live quote (fall back to latest historical close if market closed)
     async with aiohttp.ClientSession() as session:
@@ -3672,7 +3609,7 @@ async def analyze_stock(ticker: str):
             df_hist = _cache.get(ticker, 365)
             if df_hist is not None and len(df_hist) >= 50:
                 closes_list = df_hist["Close"].dropna().tolist()
-                bt_data = _backtest_7day(ticker)
+                bt_data = _backtest_30day(ticker)
                 best_exit = _select_best_exit(ticker, closes_list, bt_data.get("trades", 0) if bt_data else 0, rsi2)
                 if best_exit:
                     triggered = _evaluate_exit_trigger(
@@ -4337,16 +4274,6 @@ async def price_level_monitor():
             print(f"[PriceMonitor] Error: {e}")
 
         await asyncio.sleep(60)  # Check every 60 seconds
-
-
-def _warmup_one_position(pos: dict):
-    """Sync helper: compute technicals for one position. Runs in thread pool."""
-    ticker = pos["ticker"]
-    try:
-        tech = _get_technicals(ticker, entry_price=pos.get("entry_price", 0), entry_date=pos.get("entry_date", ""))
-        return ticker, tech, None
-    except Exception as e:
-        return ticker, None, str(e)
 
 
 async def warmup_signal_cache():

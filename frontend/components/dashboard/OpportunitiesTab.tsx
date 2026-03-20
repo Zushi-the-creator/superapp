@@ -33,7 +33,7 @@ export function OpportunitiesTab() {
       const res = await api.getCombined();
       setCombined(res.signals ?? []);
       setCombinedStats({ mr: res.mean_reversion ?? 0, mom: res.momentum ?? 0, both: res.both ?? 0 });
-      if (res.system_status) setSystemStatus(res.system_status);
+      if (res.system_status) setSystemStatus(res.system_status as { stage: string; message: string; progress: number });
     } catch {}
   };
 
@@ -122,6 +122,19 @@ export function OpportunitiesTab() {
             Full Scan
           </button>
         </div>
+
+        {/* Market regime warning */}
+        {data?.market_regime?.pause_entries && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-3 flex items-center gap-3">
+            <ShieldCheck className="h-5 w-5 text-amber-400 flex-shrink-0" />
+            <div>
+              <div className="text-sm font-semibold text-amber-400">Entries Paused — Market Declining</div>
+              <div className="text-xs text-neutral-400">
+                SPY 5d return: {((data.market_regime.spy_5d_return ?? 0) * 100).toFixed(1)}% — mean reversion signals unreliable in declining markets
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Current holdings scores */}
         {holdingsScores.length > 0 && (
@@ -276,7 +289,7 @@ export function OpportunitiesTab() {
                 Best Candidates ({bestCandidates.length})
               </h3>
               <span className="text-xs text-neutral-500">
-                Passes ALL strict filters (RSI&lt;10, ATR&gt;3%, WR&gt;65%, buf&gt;5%)
+                Passes ALL strict ATLAS V2.6 filters (RSI&lt;10, ATR&gt;3%, WR&gt;65%, Fixed30d)
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">

@@ -517,7 +517,7 @@ const PositionRow = memo(function PositionRow({
   return (
     prev.isExpanded === next.isExpanded &&
     prev.pos.ticker === next.pos.ticker &&
-    prev.pos.live_price === next.pos.live_price &&
+    prev.pos.current_price === next.pos.current_price &&
     prev.pos.pnl_pct === next.pos.pnl_pct &&
     prev.pos.signal === next.pos.signal &&
     prev.pos.days_held === next.pos.days_held &&

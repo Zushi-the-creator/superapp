@@ -163,7 +163,7 @@ function SellForm({
   const total = (parseFloat(shares) || 0) * (parseFloat(price) || 0);
   const fee = 1.5;
   const pnl = pos
-    ? (parseFloat(price) || 0 - pos.entry_price) * (parseFloat(shares) || 0) - fee
+    ? ((parseFloat(price) || 0) - pos.entry_price) * (parseFloat(shares) || 0) - fee
     : 0;
 
   const handleSubmit = async () => {

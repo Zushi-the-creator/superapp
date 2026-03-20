@@ -201,6 +201,7 @@ export interface ScanResponse {
   worst_holding: string;
   worst_score: number;
   last_scan: string;
+  market_regime?: MarketRegime;
 }
 
 export interface TransactionRecord {
@@ -426,6 +427,8 @@ export interface CombinedResponse {
   data_date?: string;
   signals: CombinedSignal[];
   market_regime?: MarketRegime;
+  system_status?: Record<string, unknown>;
+  live_prices?: Record<string, number>;
 }
 
-export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "momentum" | "sectors";
+export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "sectors";

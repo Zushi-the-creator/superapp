@@ -9,7 +9,6 @@ import type {
   ScanResponse,
   HistoryResponse,
   PerformanceResponse,
-  MomentumResponse,
 } from "@/lib/types";
 
 interface PollingResult<T> {
@@ -25,7 +24,6 @@ interface DataContextType {
   scanner: PollingResult<ScanResponse>;
   history: PollingResult<HistoryResponse>;
   performance: PollingResult<PerformanceResponse>;
-  momentum: PollingResult<MomentumResponse>;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
@@ -56,14 +54,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     offHoursInterval: REFRESH_INTERVALS.healthOffHours,
   });
 
-  const momentum = usePolling<MomentumResponse>({
-    fetcher: api.getMomentum,
-    interval: REFRESH_INTERVALS.scanner,
-    offHoursInterval: REFRESH_INTERVALS.scannerOffHours,
-  });
-
   return (
-    <DataContext.Provider value={{ portfolio, scanner, history, performance, momentum }}>
+    <DataContext.Provider value={{ portfolio, scanner, history, performance }}>
       {children}
     </DataContext.Provider>
   );

@@ -536,14 +536,19 @@ async def main():
     parser.add_argument("--webhook", help="Push to Make.com webhook URL")
     args = parser.parse_args()
 
-    # Current holdings - UPDATE THESE when portfolio changes
-    # Last updated: 2026-02-12
-    holdings = [
-        {"ticker": "COHR", "shares": 9.3113, "entry": 220.59},
-        {"ticker": "LRCX", "shares": 4.5502, "entry": 220.42},
-        {"ticker": "ALB", "shares": 6.5893, "entry": 162.38},
-        {"ticker": "BE", "shares": 7.1667, "entry": 141.90},
-    ]
+    # Load holdings from positions.db instead of hardcoding
+    import sqlite3, os
+    db_path = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+    if not os.path.exists(db_path):
+        db_path = os.path.join(os.path.dirname(__file__), "positions.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT ticker, shares, entry_price FROM positions WHERE status='OPEN'").fetchall()
+    conn.close()
+    holdings = [{"ticker": r["ticker"], "shares": r["shares"], "entry": r["entry_price"]} for r in rows]
+    if not holdings:
+        print("  No open positions found in positions.db")
+        return
 
     if args.ticker:
         holdings = [h for h in holdings if h["ticker"] == args.ticker.upper()]

@@ -89,6 +89,9 @@ export const api = {
   refreshMomentum: () =>
     fetchJson<MomentumResponse>("/api/v2/momentum/refresh", { method: "POST" }),
 
+  // Sectors
+  getSectors: () => fetchJson<Record<string, unknown>>("/api/v2/sectors"),
+
   // Combined (MR + Momentum unified)
   getCombined: () => fetchJson<CombinedResponse>("/api/v2/scan/combined"),
   refreshAll: () =>
