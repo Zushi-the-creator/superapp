@@ -12,3 +12,12 @@ ralph/
 client/
 data/
 claude-scientific-skills/
+backend/data/stock_cache.db
+backend/data/stock_cache.db-shm
+backend/data/stock_cache.db-wal
+backend/data/historical.db
+backend/data/positions.db-shm
+backend/data/positions.db-wal
+backend/data/scan_*.json
+backend/data/entries_*.json
+backend/data/*.db-journal
