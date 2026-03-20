@@ -1,20 +1,24 @@
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+COPY backend/requirements-prod.txt .
+RUN pip install --no-cache-dir --target=/deps -r requirements-prod.txt gunicorn uvicorn[standard]
+RUN python -c "import sys; sys.path.insert(0,'/deps'); import nltk; nltk.download('vader_lexicon', download_dir='/deps/nltk_data'); nltk.download('punkt', download_dir='/deps/nltk_data'); nltk.download('punkt_tab', download_dir='/deps/nltk_data')"
+
 FROM python:3.11-slim
 
 WORKDIR /app
+COPY --from=builder /deps /deps
+ENV PYTHONPATH=/deps NLTK_DATA=/deps/nltk_data
 
-RUN apt-get update && apt-get install -y gcc g++ curl && rm -rf /var/lib/apt/lists/*
-
-# Copy only backend requirements and install
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
-
-RUN python -c "import nltk; nltk.download('vader_lexicon'); nltk.download('punkt')"
-
-# Copy only the backend code
-COPY backend/ .
+# Copy only backend code (no data/ DBs — they live on the Fly volume)
+COPY backend/*.py .
+COPY backend/atlas_v2/ atlas_v2/
+COPY backend/.env .env
+COPY backend/data/positions.db data/positions.db
+COPY backend/data/exit_strategy_validated.json data/exit_strategy_validated.json
 
 RUN mkdir -p /app/data
 
 EXPOSE 8000
-
-CMD ["gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "120"]
+CMD ["python", "-m", "gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "120"]
