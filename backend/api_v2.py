@@ -3019,19 +3019,29 @@ async def get_combined_opportunities():
 
 @router.post("/scan/refresh-all")
 async def refresh_all_scans():
-    """Re-evaluate all strategies against cached prices. Fast (~3s)."""
-    from strategy_evaluator import evaluate_all, save_cache
-    from dataclasses import asdict
-    positions = _position_mgr._get_open_positions_sync()
-    held = set(p["ticker"] for p in positions) if positions else set()
-    # Delete today's cache to force re-evaluation
+    """Re-evaluate all strategies against cached prices. Fast (~3-5s).
+    If today's cache exists and is <1 hour old, returns it without re-scanning."""
+    from strategy_evaluator import evaluate_all, save_cache, load_cache
     import os as _os
+
+    # Check if today's cache is recent enough (< 1 hour)
     cache_path = _os.path.join(_os.path.dirname(__file__), "data", f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
     if _os.path.exists(cache_path):
+        age_min = (datetime.now().timestamp() - _os.path.getmtime(cache_path)) / 60
+        if age_min < 60:
+            cached = load_cache()
+            valid = [s for s in (cached or []) if not s.get("vetoed")]
+            return {"status": "done", "message": f"Cache fresh ({int(age_min)}m old), {len(valid)} entries", "total": len(valid)}
         _os.remove(cache_path)
+
+    # Run evaluation with progress tracking
+    _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks...", "progress": 30})
+    positions = _position_mgr._get_open_positions_sync()
+    held = set(p["ticker"] for p in positions) if positions else set()
     signals = await asyncio.to_thread(evaluate_all, 10.0, held)
     save_cache(signals)
     valid = [s for s in signals if not s.vetoed]
+    _system_status.update({"stage": "ready", "message": f"{len(valid)} entries ready", "progress": 100})
     return {"status": "done", "message": f"Evaluated {len(signals)} stocks, {len(valid)} valid entries", "total": len(valid)}
 
 
