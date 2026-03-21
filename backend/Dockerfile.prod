@@ -15,10 +15,11 @@ ENV PYTHONPATH=/deps NLTK_DATA=/deps/nltk_data
 COPY backend/*.py .
 COPY backend/atlas_v2/ atlas_v2/
 COPY backend/.env .env
-COPY backend/data/positions.db data/positions.db
-COPY backend/data/exit_strategy_validated.json data/exit_strategy_validated.json
 
-RUN mkdir -p /app/data
+# Seed files — copied to /app/seed/, then startup copies to /app/data/ if missing
+RUN mkdir -p /app/seed /app/data
+COPY backend/data/positions.db /app/seed/positions.db
+COPY backend/data/exit_strategy_validated.json /app/seed/exit_strategy_validated.json
 
 EXPOSE 8000
-CMD ["python", "-m", "gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "120"]
+CMD ["sh", "-c", "python -c \"import shutil,os; [shutil.copy2(f'/app/seed/{f}', f'/app/data/{f}') for f in os.listdir('/app/seed') if not os.path.exists(f'/app/data/{f}')]; print('[Seed] Done')\" && python -m gunicorn main:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --timeout 120"]
