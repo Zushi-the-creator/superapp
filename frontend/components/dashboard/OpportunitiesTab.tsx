@@ -37,25 +37,28 @@ export function OpportunitiesTab() {
     } catch {}
   };
 
-  // Fetch combined on mount + poll every 30s while system is updating
+  // Fetch combined on mount + poll every 60s to keep data fresh
   useEffect(() => {
     fetchCombined();
-    const interval = setInterval(() => {
-      if (systemStatus.stage !== "idle" && systemStatus.stage !== "ready") {
-        fetchCombined();
-      }
-    }, 30000);
+    const interval = setInterval(fetchCombined, 60000);
     return () => clearInterval(interval);
   }, []);
 
   const handleForceRefresh = async () => {
     setRefreshing(true);
     try {
-      await api.refreshAll();
+      // Fire off refresh in background — don't wait for it
+      api.refreshAll().catch(() => {});
+      // Immediately fetch current results (shows cached data instantly)
+      await fetchCombined();
       await refresh();
-      // Refetch combined after a delay to allow scans to complete
-      setTimeout(fetchCombined, 5000);
-    } finally {
+      // Poll for updated results as scan runs
+      const poll = setInterval(async () => {
+        await fetchCombined();
+        await refresh();
+      }, 5000);
+      setTimeout(() => { clearInterval(poll); setRefreshing(false); }, 30000);
+    } catch {
       setRefreshing(false);
     }
   };
