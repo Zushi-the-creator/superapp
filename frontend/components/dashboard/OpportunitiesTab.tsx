@@ -204,7 +204,7 @@ export function OpportunitiesTab() {
               </h3>
               <span className="text-xs text-neutral-500">
                 {combinedStats.mr} dip buys · {combinedStats.mom} breakouts · {combinedStats.both} both
-                {combined[0]?.data_date && <> · Prices: {combined[0].data_date}</>}
+                · Prices: LIVE
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
