@@ -2969,10 +2969,11 @@ async def get_combined_opportunities():
     # Try disk cache first (instant)
     cached = load_cache()
     if not cached:
-        # No today's cache — run evaluation now (fast, ~3-5s, pure CPU)
+        # No today's cache — run evaluation with live prices for intraday RSI
         positions = _position_mgr._get_open_positions_sync()
         held = set(p["ticker"] for p in positions) if positions else set()
-        signals = await asyncio.to_thread(evaluate_all, 10.0, held)
+        live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+        signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
         save_cache(signals)
         cached = [asdict(s) for s in signals]
     if cached:
@@ -3028,17 +3029,18 @@ async def refresh_all_scans():
     cache_path = _os.path.join(_os.path.dirname(__file__), "data", f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
     if _os.path.exists(cache_path):
         age_min = (datetime.now().timestamp() - _os.path.getmtime(cache_path)) / 60
-        if age_min < 60:
+        if age_min < 15:
             cached = load_cache()
             valid = [s for s in (cached or []) if not s.get("vetoed")]
             return {"status": "done", "message": f"Cache fresh ({int(age_min)}m old), {len(valid)} entries", "total": len(valid)}
         _os.remove(cache_path)
 
-    # Run evaluation with progress tracking
-    _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks...", "progress": 30})
+    # Run evaluation with live prices for intraday RSI detection
+    _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks with live prices...", "progress": 30})
     positions = _position_mgr._get_open_positions_sync()
     held = set(p["ticker"] for p in positions) if positions else set()
-    signals = await asyncio.to_thread(evaluate_all, 10.0, held)
+    live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+    signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
     save_cache(signals)
     valid = [s for s in signals if not s.vetoed]
     _system_status.update({"stage": "ready", "message": f"{len(valid)} entries ready", "progress": 100})
@@ -4630,7 +4632,8 @@ async def cache_refresh_loop():
                     _system_status.update({"stage": "evaluating", "message": f"Evaluating strategies on {_upd} stocks...", "progress": 80})
                     from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
                     _held = set(p["ticker"] for p in positions) if positions else set()
-                    _signals = await asyncio.to_thread(_eval_all, 10.0, _held)
+                    _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                    _signals = await asyncio.to_thread(_eval_all, 10.0, _held, _live_px)
                     _save_eval(_signals)
                     _valid = sum(1 for s in _signals if not s.vetoed)
                     print(f"[CacheRefresh] Evaluator re-run: {_valid} valid entries with fresh prices")

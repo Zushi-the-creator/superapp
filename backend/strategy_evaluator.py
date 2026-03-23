@@ -85,11 +85,13 @@ def _bayesian_wr(wins, total):
     return (wins + pw) / (total + _PRIOR_WEIGHT) * 100
 
 
-def evaluate_all(min_price: float = 10.0, held_tickers: set = None) -> List[EntrySignal]:
+def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices: dict = None) -> List[EntrySignal]:
     """Evaluate all stocks in cache for MR + Momentum signals. No API calls.
+    live_prices: dict of {ticker: price} from Finnhub — appended to historical data for today's RSI.
     RULE: Never show entries on stale data. If cache is >1 trading day old, flag it."""
     t0 = time.time()
     held = held_tickers or set()
+    _live = live_prices or {}
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -119,6 +121,19 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None) -> List[Entr
         closes = [r[4] for r in rows]
         volumes = [r[5] for r in rows]
         n = len(closes)
+
+        # Append today's live price if available (for intraday RSI detection)
+        if ticker in _live and _live[ticker] > 0:
+            live_px = _live[ticker]
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            if dates[-1] != today_str:  # Don't double-append
+                closes = closes + [live_px]
+                opens = opens + [live_px]
+                highs = highs + [live_px]
+                lows = lows + [live_px]
+                volumes = volumes + [volumes[-1] if volumes else 0]
+                dates = dates + [today_str]
+                n = len(closes)
 
         price = closes[-1]
         if price < min_price:
