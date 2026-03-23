@@ -85,6 +85,93 @@ def _bayesian_wr(wins, total):
     return (wins + pw) / (total + _PRIOR_WEIGHT) * 100
 
 
+# Momentum ret_20d zones
+_MOM_ZONES = [(5, 10), (10, 20), (20, 30), (30, 999)]
+_MOM_ZONE_LABELS = ["5-10%", "10-20%", "20-30%", "30%+"]
+_MOM_HOLD_DAYS = 60  # Best exit from exit study: Fixed60d
+
+
+def _backtest_momentum(closes, opens, highs, lows, sma50, sma150, sma200, n):
+    """Backtest Minervini 6/6 momentum entries with Fixed60d exit.
+    Returns: (trades, bayesian_wr, avg_return, zone_label, zone_wr, zone_ret, zone_trades)"""
+    if n < 320:  # Need 252 lookback + 60 forward + buffer
+        return 0, 50.0, 0.0, {}
+
+    trades = []
+    zone_trades = {zl: [] for zl in _MOM_ZONE_LABELS}
+    last_exit = -1
+
+    for i in range(252, n - _MOM_HOLD_DAYS - 2):
+        if i <= last_exit:
+            continue
+
+        # Minervini 6/6
+        if sma50[i] <= 0 or sma150[i] <= 0 or sma200[i] <= 0:
+            continue
+        if not (closes[i] > sma50[i] and closes[i] > sma150[i] and closes[i] > sma200[i]):
+            continue
+        if not (sma50[i] > sma150[i] > sma200[i]):
+            continue
+
+        high_52w = max(highs[max(0, i-252):i+1])
+        low_52w = min(lows[max(0, i-252):i+1])
+        if high_52w <= 0 or low_52w <= 0:
+            continue
+        if ((closes[i] / high_52w) - 1) * 100 < -25:
+            continue
+        if ((closes[i] / low_52w) - 1) * 100 < 30:
+            continue
+
+        if i < 20:
+            continue
+        ret_20d = ((closes[i] / closes[i - 20]) - 1) * 100
+        if ret_20d < 5:
+            continue
+
+        # Entry at next-day open
+        ep = opens[i + 1] if opens[i + 1] > 0 else closes[i]
+        if ep < 10:
+            continue
+
+        # Fixed60d exit
+        exit_idx = min(i + 1 + _MOM_HOLD_DAYS, n - 1)
+        ret = ((closes[exit_idx] - ep) / ep) * 100 - 0.30
+        trades.append(ret)
+        last_exit = exit_idx
+
+        # Zone
+        for (zlo, zhi), zl in zip(_MOM_ZONES, _MOM_ZONE_LABELS):
+            if zlo <= ret_20d < zhi:
+                zone_trades[zl].append(ret)
+                break
+
+    if not trades:
+        return 0, 50.0, 0.0, {}
+
+    total = len(trades)
+    wins = sum(1 for r in trades if r > 0)
+    bwr = _bayesian_wr(wins, total)
+    avg_ret = sum(trades) / total
+
+    # Find current zone (last entry's zone, or use the zone with most trades)
+    # We'll determine the current zone in the caller based on current ret_20d
+    # Here just return per-zone data for the most relevant zone
+    return total, bwr, avg_ret, zone_trades
+
+
+def _get_mom_zone(ret_20d, zone_trades):
+    """Get zone stats for current ret_20d."""
+    for (zlo, zhi), zl in zip(_MOM_ZONES, _MOM_ZONE_LABELS):
+        if zlo <= ret_20d < zhi:
+            zt = zone_trades.get(zl, [])
+            if len(zt) >= 3:
+                zwr = sum(1 for r in zt if r > 0) / len(zt) * 100
+                zret = sum(zt) / len(zt)
+                return zl, zwr, zret, len(zt)
+            return zl, 0.0, 0.0, len(zt)
+    return "", 0.0, 0.0, 0
+
+
 def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices: dict = None) -> List[EntrySignal]:
     """Evaluate all stocks in cache for MR + Momentum signals. No API calls.
     live_prices: dict of {ticker: price} from Finnhub — appended to historical data for today's RSI.
@@ -229,21 +316,42 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         is_mom = (trend_score == 6 and ret_20d > 5)
 
         mom_score = 0
+        mom_wr = 0
+        mom_ret = 0
+        mom_trades = 0
+        mom_zone_label = ""
+        mom_zone_wr = 0
+        mom_zone_ret = 0
+
         if is_mom:
-            # Momentum score: emphasize recent acceleration + volume
-            squeeze_bonus = max(0, (1 - atr_squeeze)) * 2
-            mom_score = ret_20d * vol_ratio * (1 + squeeze_bonus) / 10  # Normalize to similar range as MR
+            # Backtest momentum: Minervini 6/6 + Fixed60d exit
+            _mt, _mwr, _mret, _mzones = _backtest_momentum(
+                closes, opens, highs, lows, sma50, sma150, sma200, n
+            )
+            mom_trades = _mt
+            if _mt >= 3:
+                mom_wr = _mwr
+                mom_ret = _mret
+                mom_score = mom_wr * mom_ret / 100  # Expected value
+                mom_zone_label, mom_zone_wr, mom_zone_ret, _ = _get_mom_zone(ret_20d, _mzones)
 
         # ═══════════════════════════════════════════
         # DETERMINE BEST STRATEGY + COMBINED SCORE
         # ═══════════════════════════════════════════
-        if is_mr and is_mom:
+        if is_mr and is_mom and mr_trades >= 5 and mom_trades >= 3:
             strategy = "BOTH"
             label = "RSI Dip + Breakout"
-            score = max(mr_score, mom_score) * 1.2  # 20% bonus for dual signal
-            exp_ret = mr_ret
-            conf = mr_wr
-            trades_n = mr_trades
+            # Use whichever has higher expected value
+            if mr_score >= mom_score:
+                score = mr_score * 1.2
+                exp_ret = mr_ret
+                conf = mr_wr
+                trades_n = mr_trades
+            else:
+                score = mom_score * 1.2
+                exp_ret = mom_ret
+                conf = mom_wr
+                trades_n = mom_trades
             mr_count += 1; mom_count += 1
         elif is_mr and mr_trades >= 5:
             strategy = "MEAN_REVERSION"
@@ -253,29 +361,34 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
             conf = mr_wr
             trades_n = mr_trades
             mr_count += 1
-        elif is_mom:
+        elif is_mom and mom_trades >= 3:
             strategy = "MOMENTUM"
-            label = "Breakout"
+            label = f"Breakout ({mom_zone_label})" if mom_zone_label else "Breakout"
             score = mom_score
-            exp_ret = ret_20d  # Use recent momentum as expected return proxy
-            conf = 50  # No backtest WR for momentum yet
-            trades_n = 0
+            exp_ret = mom_ret
+            conf = mom_wr
+            trades_n = mom_trades
             mom_count += 1
         else:
-            continue  # No signal
+            continue  # No signal or insufficient backtest data
 
-        # VETO: min trades for MR
+        # VETO filters
         vetoed = False
         veto_reason = ""
-        if strategy == "MEAN_REVERSION" and mr_trades < 20:
-            vetoed = True
-            veto_reason = f"Too few trades ({mr_trades})"
-        if strategy == "MEAN_REVERSION" and conf < 55:
-            vetoed = True
-            veto_reason = f"Bayesian WR {conf:.0f}% < 55%"
-        if strategy == "MEAN_REVERSION" and mr_ret < 3:
-            vetoed = True
-            veto_reason = f"Avg return {mr_ret:.1f}% < 3%"
+        if strategy == "MEAN_REVERSION":
+            if mr_trades < 20:
+                vetoed = True; veto_reason = f"Too few MR trades ({mr_trades})"
+            elif conf < 55:
+                vetoed = True; veto_reason = f"MR WR {conf:.0f}% < 55%"
+            elif mr_ret < 3:
+                vetoed = True; veto_reason = f"MR return {mr_ret:.1f}% < 3%"
+        elif strategy == "MOMENTUM":
+            if mom_trades < 5:
+                vetoed = True; veto_reason = f"Too few momentum trades ({mom_trades})"
+            elif conf < 50:
+                vetoed = True; veto_reason = f"Momentum WR {conf:.0f}% < 50%"
+            elif mom_ret < 2:
+                vetoed = True; veto_reason = f"Momentum return {mom_ret:.1f}% < 2%"
 
         signals.append(EntrySignal(
             ticker=ticker, price=round(price, 2),
