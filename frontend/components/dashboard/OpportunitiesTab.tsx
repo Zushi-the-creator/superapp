@@ -26,6 +26,8 @@ export function OpportunitiesTab() {
   const [combined, setCombined] = useState<import("@/lib/types").CombinedSignal[]>([]);
   const [combinedStats, setCombinedStats] = useState({ mr: 0, mom: 0, both: 0 });
   const [systemStatus, setSystemStatus] = useState({ stage: "idle", message: "", progress: 0 });
+  const [dataDate, setDataDate] = useState("");
+  const [cacheAge, setCacheAge] = useState(0);
 
   // Fetch combined on mount and refresh
   const fetchCombined = async () => {
@@ -34,6 +36,8 @@ export function OpportunitiesTab() {
       setCombined(res.signals ?? []);
       setCombinedStats({ mr: res.mean_reversion ?? 0, mom: res.momentum ?? 0, both: res.both ?? 0 });
       if (res.system_status) setSystemStatus(res.system_status as { stage: string; message: string; progress: number });
+      if (res.data_date) setDataDate(res.data_date);
+      if ((res as Record<string, unknown>).cache_age_min != null) setCacheAge((res as Record<string, unknown>).cache_age_min as number);
     } catch {}
   };
 
@@ -105,6 +109,13 @@ export function OpportunitiesTab() {
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 pb-20 md:pb-6">
         {/* Stats bar */}
         <div className="flex items-center gap-3 text-xs text-neutral-500 flex-wrap">
+          {dataDate && (
+            <span className={cn(cacheAge > 60 ? "text-signal-sell" : "text-neutral-500")}>
+              Data: <strong className={cacheAge > 60 ? "text-signal-sell" : "text-neutral-300"}>{dataDate}</strong>
+              {cacheAge > 0 && <span className="ml-1">({Math.round(cacheAge)}m ago)</span>}
+            </span>
+          )}
+          <span className="text-neutral-700">|</span>
           <span>Scanned: <strong className="text-neutral-300">{data?.total_scanned?.toLocaleString() ?? 0}</strong></span>
           <span className="text-neutral-700">|</span>
           <span>Ranked: <strong className="text-neutral-300">{data?.ranked_count ?? ranked.length}</strong></span>

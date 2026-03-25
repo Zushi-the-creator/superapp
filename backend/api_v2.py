@@ -2970,17 +2970,19 @@ async def get_combined_opportunities():
     from strategy_evaluator import evaluate_all, load_cache, save_cache, EntrySignal
     from dataclasses import asdict
 
-    # Try disk cache first (instant) — but only if it's from TODAY
+    # Try disk cache first (instant) — but only if it's from TODAY and < 60 min old
     cached = load_cache()
-    cache_age_min = 0
-    if cached:
-        import os as _os
-        cache_path = _os.path.join(_os.path.dirname(__file__), "data", f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
-        if _os.path.exists(cache_path):
-            cache_age_min = (datetime.now().timestamp() - _os.path.getmtime(cache_path)) / 60
+    cache_age_min = 999
+    import os as _os
+    cache_path = _os.path.join(_os.path.dirname(__file__), "data", f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
+    if cached and _os.path.exists(cache_path):
+        cache_age_min = (datetime.now().timestamp() - _os.path.getmtime(cache_path)) / 60
 
-    if not cached:
-        # No today's cache — run evaluation with live prices for intraday RSI
+    # Auto-refresh if no cache, stale (>60 min), or too few stocks evaluated
+    needs_refresh = (not cached or cache_age_min > 60
+                     or (cached and len(cached) < 20))  # <20 entries = cache too thin
+    if needs_refresh:
+        # Run fresh evaluation with live prices for intraday RSI
         positions = _position_mgr._get_open_positions_sync()
         held = set(p["ticker"] for p in positions) if positions else set()
         live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
@@ -3038,14 +3040,9 @@ async def refresh_all_scans():
     from strategy_evaluator import evaluate_all, save_cache, load_cache
     import os as _os
 
-    # Check if today's cache is recent enough (< 1 hour)
+    # Always force fresh evaluation (user explicitly requested refresh)
     cache_path = _os.path.join(_os.path.dirname(__file__), "data", f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
     if _os.path.exists(cache_path):
-        age_min = (datetime.now().timestamp() - _os.path.getmtime(cache_path)) / 60
-        if age_min < 15:
-            cached = load_cache()
-            valid = [s for s in (cached or []) if not s.get("vetoed")]
-            return {"status": "done", "message": f"Cache fresh ({int(age_min)}m old), {len(valid)} entries", "total": len(valid)}
         _os.remove(cache_path)
 
     # Run evaluation with live prices for intraday RSI detection
