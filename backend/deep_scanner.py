@@ -586,7 +586,7 @@ class DeepScanner:
                     except Exception as e:
                         print(f"  {r.ticker}: Earnings check failed: {e}")
 
-                    # 2. Analyst data (Finviz)
+                    # 2. Analyst data (Finviz) — VETO on Hold/Sell (CLAUDE.md V2.4)
                     try:
                         adata = await analyst_fetcher.fetch_analyst_data(r.ticker)
                         if adata:
@@ -595,7 +595,16 @@ class DeepScanner:
                             if r.analyst_target > 0:
                                 r.analyst_upside = round(
                                     ((r.analyst_target - r.price) / r.price) * 100, 1)
-                            # Overvalued + analyst consensus are now ranking factors, not vetos
+                            # VETO: analyst Hold/Sell/Underperform (aligned with api_v2.py)
+                            if r.analyst_consensus in ("Hold", "Sell", "Underperform", "Strong Sell"):
+                                r.vetoed = True
+                                r.veto_reason = f"Analyst says {r.analyst_consensus}"
+                                return
+                            # VETO: price above analyst target (overvalued)
+                            if r.analyst_target > 0 and r.price > r.analyst_target:
+                                r.vetoed = True
+                                r.veto_reason = f"Overvalued (${r.price:.0f} > target ${r.analyst_target:.0f})"
+                                return
                     except Exception as e:
                         print(f"  {r.ticker}: Analyst check failed: {e}")
 

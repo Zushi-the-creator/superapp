@@ -47,55 +47,21 @@ class ExitSignal:
 
 class ExitEngine:
     """
-    Research-backed exit system.
+    V2.6 Exit System — Fixed 30-day hold (universal).
 
-    Key insight from research:
-    "Even with random entries, keeping a good exit rule produced measurable returns.
-    This highlights how much exits shape the outcome of a strategy."
+    Mega-study (2,829 stocks, 307K trades) confirms:
+    - Fixed30d beats ALL other exits: +4.31% avg, 61% WR, PF 2.21
+    - ALL stops/targets/trailing stops HURT mean reversion returns
+    - No profit targets: let positions run to their optimal exit
 
-    Exit Rules (by priority):
-    1. Stop Loss: Fixed % based on regime (NOT trailing)
-    2. Profit Target: Fixed % based on regime
-    3. Time Exit: Maximum days based on regime
-    4. RSI Exit: RSI(2) > 80 indicates mean reversion complete
+    Valid early exit reasons (from CLAUDE.md):
+    (a) Earnings within 7 days — binary event risk
+    (b) Stock-specific negative sentiment — EXIT
+    (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT
     """
 
-    def __init__(self):
-        # Default exit parameters by regime
-        self.exit_params = {
-            MarketRegime.BULL: {
-                'stop_loss_pct': 8.0,
-                'profit_target_pct': 10.0,
-                'max_days': 10,
-                'rsi_exit_threshold': 85,
-                'scale_out_pct': 50,  # Sell 50% at first target
-                'scale_out_target_pct': 5.0,
-            },
-            MarketRegime.BEAR: {
-                'stop_loss_pct': 4.0,  # Tight stops
-                'profit_target_pct': 5.0,  # Quick profits
-                'max_days': 5,  # Short holding
-                'rsi_exit_threshold': 70,
-                'scale_out_pct': 75,  # Exit most quickly
-                'scale_out_target_pct': 3.0,
-            },
-            MarketRegime.SIDEWAYS: {
-                'stop_loss_pct': 5.0,
-                'profit_target_pct': 7.0,
-                'max_days': 7,
-                'rsi_exit_threshold': 80,
-                'scale_out_pct': 50,
-                'scale_out_target_pct': 4.0,
-            },
-            MarketRegime.HIGH_VOL: {
-                'stop_loss_pct': 10.0,  # Wider stops for volatility
-                'profit_target_pct': 12.0,  # Larger targets possible
-                'max_days': 7,
-                'rsi_exit_threshold': 85,
-                'scale_out_pct': 50,
-                'scale_out_target_pct': 6.0,
-            },
-        }
+    # V2.6: Fixed 30-day hold for ALL regimes
+    HOLD_DAYS = 30
 
     @staticmethod
     def calc_rsi(closes: List[float], period: int) -> float:
@@ -129,138 +95,91 @@ class ExitEngine:
         closes: List[float],
         highs: List[float] = None,
         lows: List[float] = None,
-        learned_params: dict = None  # From Thompson Sampling
+        learned_params: dict = None,
+        # V2.6 early exit triggers
+        earnings_within_7d: bool = False,
+        negative_sentiment: bool = False,
+        atlas_wr_fail: bool = False,
     ) -> ExitSignal:
         """
-        Determine if position should be exited.
+        V2.6: Fixed 30-day hold. No stops, no targets, no RSI exits.
+        Only valid early exits: earnings, stock-specific bad news, model failure.
 
         Args:
             entry_price: Original entry price
             current_price: Current price
             days_held: Days since entry
-            closes: Recent price history for regime detection
+            closes: Recent price history
             highs: High prices
             lows: Low prices
-            learned_params: Parameters from Thompson Sampling learner
-
-        Returns:
-            ExitSignal with action and reason
+            learned_params: (ignored in V2.6 — kept for API compat)
+            earnings_within_7d: True if earnings < 7 days away
+            negative_sentiment: True if stock-specific negative news
+            atlas_wr_fail: True if both ATLAS WR + zone WR fail 65%
         """
-        # Detect current regime
-        regime_info = RegimeDetector.detect(closes, highs, lows)
-        params = self.exit_params.get(regime_info.regime, self.exit_params[MarketRegime.SIDEWAYS])
-
-        # Override with learned params if provided
-        if learned_params:
-            params.update(learned_params)
-
-        # Calculate current return
         return_pct = ((current_price - entry_price) / entry_price) * 100
+        rsi2 = self.calc_rsi(closes, 2) if len(closes) >= 3 else 50
+        days_remaining = max(0, self.HOLD_DAYS - days_held)
 
-        # Calculate RSI(2)
-        rsi2 = self.calc_rsi(closes, 2)
+        # === VALID EARLY EXIT TRIGGERS (V2.6) ===
 
-        # Calculate stop and target prices
-        stop_price = entry_price * (1 - params['stop_loss_pct'] / 100)
-        target_price = entry_price * (1 + params['profit_target_pct'] / 100)
-
-        # === CHECK EXIT CONDITIONS IN PRIORITY ORDER ===
-
-        # 1. STOP LOSS (highest priority - protect capital)
-        if current_price <= stop_price:
+        # 1. Earnings within 7 days — binary event risk
+        if earnings_within_7d:
             return ExitSignal(
-                action=ExitAction.SELL_STOP,
-                urgency=100,
+                action=ExitAction.SELL_TIME,
+                urgency=95,
                 current_return_pct=return_pct,
                 days_held=days_held,
-                reason=f"STOP LOSS: Price ${current_price:.2f} hit stop ${stop_price:.2f} ({return_pct:.1f}%)",
-                target_price=target_price,
-                stop_price=stop_price
+                reason=f"EARNINGS EXIT: Earnings within 7 days, return {return_pct:.1f}%"
             )
 
-        # 2. REGIME CHANGE TO BEAR (sell if market turns against us)
-        if regime_info.regime == MarketRegime.BEAR and return_pct > 0:
+        # 2. Stock-specific negative sentiment
+        if negative_sentiment:
             return ExitSignal(
                 action=ExitAction.SELL_REGIME,
+                urgency=85,
+                current_return_pct=return_pct,
+                days_held=days_held,
+                reason=f"SENTIMENT EXIT: Stock-specific negative news, return {return_pct:.1f}%"
+            )
+
+        # 3. Model EXIT signal (both ATLAS WR + zone WR fail 65%)
+        if atlas_wr_fail:
+            return ExitSignal(
+                action=ExitAction.SELL_STOP,
                 urgency=80,
                 current_return_pct=return_pct,
                 days_held=days_held,
-                reason=f"REGIME CHANGE: Market turned BEAR, locking in {return_pct:.1f}% profit",
-                target_price=target_price,
-                stop_price=stop_price
+                reason=f"MODEL EXIT: Both ATLAS WR + zone WR fail 65%, return {return_pct:.1f}%"
             )
 
-        # 3. PROFIT TARGET
-        if current_price >= target_price:
-            return ExitSignal(
-                action=ExitAction.SELL_TARGET,
-                urgency=90,
-                current_return_pct=return_pct,
-                days_held=days_held,
-                reason=f"PROFIT TARGET: Price ${current_price:.2f} hit target ${target_price:.2f} ({return_pct:.1f}%)",
-                target_price=target_price,
-                stop_price=stop_price
-            )
-
-        # 4. TIME EXIT (mean reversion should complete within max_days)
-        if days_held >= params['max_days']:
+        # 4. Fixed 30-day time exit
+        if days_held >= self.HOLD_DAYS:
             return ExitSignal(
                 action=ExitAction.SELL_TIME,
                 urgency=70,
                 current_return_pct=return_pct,
                 days_held=days_held,
-                reason=f"TIME EXIT: Held {days_held} days (max {params['max_days']}), return {return_pct:.1f}%",
-                target_price=target_price,
-                stop_price=stop_price
+                reason=f"TIME EXIT: Held {days_held} days (Fixed{self.HOLD_DAYS}d), return {return_pct:.1f}%"
             )
 
-        # 5. RSI EXIT (mean reversion complete)
-        if rsi2 >= params['rsi_exit_threshold']:
-            return ExitSignal(
-                action=ExitAction.SELL_RSI,
-                urgency=60,
-                current_return_pct=return_pct,
-                days_held=days_held,
-                reason=f"RSI EXIT: RSI(2)={rsi2:.1f} >= {params['rsi_exit_threshold']} (mean reversion complete), return {return_pct:.1f}%",
-                target_price=target_price,
-                stop_price=stop_price
-            )
-
-        # 6. HOLD - no exit condition met
+        # 5. HOLD — let the trade work
         return ExitSignal(
             action=ExitAction.HOLD,
             urgency=0,
             current_return_pct=return_pct,
             days_held=days_held,
-            reason=f"HOLD: Return {return_pct:.1f}%, {params['max_days'] - days_held} days until time exit, RSI(2)={rsi2:.1f}",
-            target_price=target_price,
-            stop_price=stop_price
+            reason=f"HOLD: Day {days_held}/{self.HOLD_DAYS}, {days_remaining}d remaining, return {return_pct:.1f}%, RSI(2)={rsi2:.1f}"
         )
 
     def get_scale_out_signal(
         self,
         entry_price: float,
         current_price: float,
-        regime: MarketRegime
+        regime: MarketRegime = None
     ) -> Optional[dict]:
         """
-        Check if we should scale out (sell partial position).
-
-        Research: Scaling out 25-50% at first target locks in gains
-        while keeping exposure to further upside.
-
-        Returns:
-            dict with scale_out_pct and reason, or None
+        V2.6: No scale-out. Fixed 30-day hold only.
+        Kept for API compatibility — always returns None.
         """
-        params = self.exit_params.get(regime, self.exit_params[MarketRegime.SIDEWAYS])
-
-        return_pct = ((current_price - entry_price) / entry_price) * 100
-        scale_out_target = params['scale_out_target_pct']
-
-        if return_pct >= scale_out_target:
-            return {
-                'scale_out_pct': params['scale_out_pct'],
-                'reason': f"SCALE OUT: Return {return_pct:.1f}% hit {scale_out_target}% target, sell {params['scale_out_pct']}% of position"
-            }
-
         return None

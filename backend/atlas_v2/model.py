@@ -480,7 +480,8 @@ class ATLASV2Model:
         ticker: str = "UNKNOWN"
     ) -> Dict:
         """
-        Run simple backtest on historical data.
+        Run backtest on historical data.
+        V2.6: RSI(2) < 10, next-day open entry, Fixed30d hold, 0.30% fee, non-overlapping.
 
         Args:
             history: List of dicts with 'date', 'open', 'high', 'low', 'close', 'volume'
@@ -495,32 +496,38 @@ class ATLASV2Model:
                 'error': 'Insufficient data (need 60+ days)'
             }
 
-        results = []
-        forward_days = 7
+        _HOLD_DAYS = 30
+        _FEE_PCT = 0.30  # $3 round-trip on $1K
 
-        for i in range(50, len(history) - forward_days):
+        results = []
+        last_exit_idx = -1  # Prevent overlapping trades
+
+        for i in range(50, len(history) - _HOLD_DAYS - 1):
+            # Non-overlapping: skip if still in a previous trade
+            if i <= last_exit_idx:
+                continue
+
             closes = [h['close'] for h in history[:i+1]]
             volumes = [h.get('volume', 0) for h in history[:i+1]]
             highs = [h.get('high', h['close']) for h in history[:i+1]]
             lows = [h.get('low', h['close']) for h in history[:i+1]]
 
-            # Get regime and learned params
-            regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
-            learned_params = self.learner.get_learned_params(regime_info.regime.value)
-
-            # Generate signal
-            signal = self.entry_engine.generate_signal(
-                closes, volumes, highs, lows,
-                learned_params=learned_params
-            )
-
-            if signal.signal != SignalType.BUY:
+            # V2.6: RSI(2) < 10 + price > SMA50 (direct check, bypass regime-dependent thresholds)
+            rsi2 = self.entry_engine.calc_rsi(closes, 2)
+            sma50 = self.entry_engine.calc_sma(closes, 50)
+            if rsi2 >= 10 or closes[-1] <= sma50:
                 continue
 
-            # Calculate forward return
-            entry_price = history[i]['close']
-            exit_price = history[i + forward_days]['close']
-            return_pct = ((exit_price - entry_price) / entry_price) * 100
+            # Next-day open entry (eliminates look-ahead bias)
+            entry_price = history[i + 1].get('open', history[i + 1]['close'])
+            if entry_price <= 0:
+                entry_price = history[i + 1]['close']
+            # Fixed 30-day hold exit
+            exit_price = history[i + 1 + _HOLD_DAYS]['close']
+            return_pct = ((exit_price - entry_price) / entry_price) * 100 - _FEE_PCT
+
+            # Get regime for classification
+            regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
 
             results.append({
                 'date': history[i].get('date', f'day_{i}'),
@@ -529,9 +536,10 @@ class ATLASV2Model:
                 'return_pct': return_pct,
                 'win': return_pct > 0,
                 'regime': regime_info.regime.value,
-                'rsi2': signal.rsi2,
-                'score': signal.score
+                'rsi2': rsi2,
+                'score': 0
             })
+            last_exit_idx = i + 1 + _HOLD_DAYS
 
         if not results:
             return {

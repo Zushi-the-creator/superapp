@@ -126,14 +126,20 @@ export function OpportunitiesTab() {
           </button>
         </div>
 
-        {/* Market regime info — shown as info only, never blocks entries */}
+        {/* Market regime info — V2.6: DECLINING/CRISIS pauses entries */}
         {data?.market_regime && data.market_regime.regime !== "HEALTHY" && data.market_regime.regime !== "UNKNOWN" && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-2 flex items-center gap-3">
-            <ShieldCheck className="h-4 w-4 text-amber-400 flex-shrink-0" />
-            <div className="text-xs text-neutral-400">
-              Market: {data.market_regime.regime} — SPY 5d: {(data.market_regime.spy_5d_return ?? 0).toFixed(1)}%
-              {data.market_regime.vix > 0 && `, VIX: ${data.market_regime.vix.toFixed(0)}`}
-              {" "}— reduce position size to {data.market_regime.position_size_pct}%
+          <div className={cn(
+            "rounded-lg border px-4 py-2 flex items-center gap-3",
+            data.market_regime.pause_entries
+              ? "border-signal-sell/40 bg-signal-sell/10"
+              : "border-amber-500/30 bg-amber-500/5"
+          )}>
+            <ShieldCheck className={cn("h-4 w-4 flex-shrink-0", data.market_regime.pause_entries ? "text-signal-sell" : "text-amber-400")} />
+            <div className={cn("text-xs", data.market_regime.pause_entries ? "text-signal-sell font-medium" : "text-neutral-400")}>
+              {data.market_regime.pause_entries
+                ? `ENTRIES PAUSED — ${data.market_regime.reason}`
+                : `Market: ${data.market_regime.regime} — SPY 5d: ${(data.market_regime.spy_5d_return ?? 0).toFixed(1)}%${data.market_regime.vix > 0 ? `, VIX: ${data.market_regime.vix.toFixed(0)}` : ""} — reduce position size to ${data.market_regime.position_size_pct}%`
+              }
             </div>
           </div>
         )}

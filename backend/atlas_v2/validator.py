@@ -83,7 +83,8 @@ class WalkForwardValidator:
     # Configuration
     IN_SAMPLE_DAYS = 180  # 6 months training
     OUT_OF_SAMPLE_DAYS = 30  # 1 month testing
-    FORWARD_RETURN_DAYS = 7  # Measure 7-day returns
+    FORWARD_RETURN_DAYS = 30  # V2.6: Fixed 30-day hold (was 7)
+    FEE_PCT = 0.30  # $3 round-trip on $1K
     MIN_HISTORY = 50  # Need 50 days for indicators
 
     # Thresholds
@@ -224,6 +225,7 @@ class WalkForwardValidator:
     ) -> List[Dict]:
         """
         Run backtest on a specific window.
+        V2.6: RSI(2) < 10 (universal), next-day open entry, Fixed30d, fee-adjusted, non-overlapping.
 
         Args:
             history: Full price history
@@ -234,28 +236,36 @@ class WalkForwardValidator:
             List of trade results
         """
         results = []
+        last_exit_idx = -1  # Prevent overlapping trades
 
-        for i in range(start_idx, min(end_idx, len(history) - self.FORWARD_RETURN_DAYS)):
+        for i in range(start_idx, min(end_idx, len(history) - self.FORWARD_RETURN_DAYS - 1)):
             # Need enough history for indicators
             if i < self.MIN_HISTORY:
                 continue
 
-            # Extract data up to this point
-            closes = [h['close'] for h in history[:i+1]]
-            volumes = [h.get('volume', 0) for h in history[:i+1]]
-            highs = [h.get('high', h['close']) for h in history[:i+1]]
-            lows = [h.get('low', h['close']) for h in history[:i+1]]
-
-            # Generate entry signal
-            signal = self.entry_engine.generate_signal(closes, volumes, highs, lows)
-
-            if signal.signal != SignalType.BUY:
+            # Non-overlapping: skip if still in a previous trade
+            if i <= last_exit_idx:
                 continue
 
-            # Calculate forward return
-            entry_price = history[i]['close']
-            exit_price = history[i + self.FORWARD_RETURN_DAYS]['close']
-            return_pct = ((exit_price - entry_price) / entry_price) * 100
+            # Extract data up to this point
+            closes = [h['close'] for h in history[:i+1]]
+
+            # V2.6: Direct RSI(2) < 10 + price > SMA50 check (not regime-dependent)
+            rsi2 = self.entry_engine.calc_rsi(closes, 2)
+            sma50 = self.entry_engine.calc_sma(closes, 50)
+            if rsi2 >= 10 or closes[-1] <= sma50:
+                continue
+
+            # Next-day open entry (eliminates look-ahead bias)
+            entry_price = history[i + 1].get('open', history[i + 1]['close'])
+            if entry_price <= 0:
+                entry_price = history[i + 1]['close']
+            # Fixed 30-day hold exit
+            exit_idx = i + 1 + self.FORWARD_RETURN_DAYS
+            if exit_idx >= len(history):
+                continue
+            exit_price = history[exit_idx]['close']
+            return_pct = ((exit_price - entry_price) / entry_price) * 100 - self.FEE_PCT
 
             results.append({
                 'date': history[i].get('date', f'day_{i}'),
@@ -263,10 +273,10 @@ class WalkForwardValidator:
                 'exit_price': exit_price,
                 'return_pct': return_pct,
                 'win': return_pct > 0,
-                'regime': signal.regime.value,
-                'rsi2': signal.rsi2,
-                'score': signal.score
+                'rsi2': rsi2,
+                'score': 0
             })
+            last_exit_idx = exit_idx
 
         return results
 

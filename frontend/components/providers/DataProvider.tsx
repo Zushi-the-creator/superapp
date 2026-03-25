@@ -9,6 +9,7 @@ import type {
   ScanResponse,
   HistoryResponse,
   PerformanceResponse,
+  HealthCheckResponse,
 } from "@/lib/types";
 
 interface PollingResult<T> {
@@ -24,6 +25,7 @@ interface DataContextType {
   scanner: PollingResult<ScanResponse>;
   history: PollingResult<HistoryResponse>;
   performance: PollingResult<PerformanceResponse>;
+  health: PollingResult<HealthCheckResponse>;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
@@ -54,8 +56,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     offHoursInterval: REFRESH_INTERVALS.healthOffHours,
   });
 
+  const health = usePolling<HealthCheckResponse>({
+    fetcher: api.getHealth,
+    interval: REFRESH_INTERVALS.health,
+    offHoursInterval: REFRESH_INTERVALS.healthOffHours,
+  });
+
   return (
-    <DataContext.Provider value={{ portfolio, scanner, history, performance }}>
+    <DataContext.Provider value={{ portfolio, scanner, history, performance, health }}>
       {children}
     </DataContext.Provider>
   );

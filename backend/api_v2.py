@@ -1687,11 +1687,15 @@ def _check_market_regime() -> dict:
         size_pct = min(vix_size, spy_size)
         result["position_size_pct"] = size_pct
 
-        # Overall regime — informational only, never blocks entries
+        # Overall regime — V2.6: PAUSE entries when SPY 5d < -1% (CLAUDE.md rule #27)
         if size_pct == 0:
             result["regime"] = "CRISIS"
-            result["pause_entries"] = False
-            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, reduce size to {size_pct}%"
+            result["pause_entries"] = True
+            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, ALL entries paused"
+        elif spy_ret < -1:
+            result["regime"] = "DECLINING"
+            result["pause_entries"] = True
+            result["reason"] = f"SPY 5d {spy_ret:+.1f}% < -1% — entries PAUSED (MR breaks in declining markets)"
         elif size_pct <= 40:
             result["regime"] = "FEAR"
             result["pause_entries"] = False
@@ -2239,12 +2243,12 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     if not vetoed and r.get("sentiment_score", 0) < -0.3:
         vetoed = True
         veto_reason = f"Negative sentiment ({r.get('sentiment_score', 0):.2f})"
-    # 4. Zone WR < 55% Bayesian (shrunk toward universe prior)
+    # 4. Zone WR < 65% Bayesian (CLAUDE.md V2.4: zone WR < 65% = VETO)
     if not vetoed and zone_trades >= 5:
         _bayes_zone = _bayesian_wr(int(zone_wr * zone_trades / 100), zone_trades)
-        if _bayes_zone < 55:
+        if _bayes_zone < 65:
             vetoed = True
-            veto_reason = f"Bayesian zone WR too low ({_bayes_zone:.0f}% < 55%, raw {zone_wr:.0f}%)"
+            veto_reason = f"Bayesian zone WR too low ({_bayes_zone:.0f}% < 65%, raw {zone_wr:.0f}%)"
     # 5. Zone trades < 5 (insufficient sample)
     if not vetoed and zone_trades < 5 and r.get("trades", 0) < 10:
         vetoed = True
@@ -2966,8 +2970,15 @@ async def get_combined_opportunities():
     from strategy_evaluator import evaluate_all, load_cache, save_cache, EntrySignal
     from dataclasses import asdict
 
-    # Try disk cache first (instant)
+    # Try disk cache first (instant) — but only if it's from TODAY
     cached = load_cache()
+    cache_age_min = 0
+    if cached:
+        import os as _os
+        cache_path = _os.path.join(_os.path.dirname(__file__), "data", f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
+        if _os.path.exists(cache_path):
+            cache_age_min = (datetime.now().timestamp() - _os.path.getmtime(cache_path)) / 60
+
     if not cached:
         # No today's cache — run evaluation with live prices for intraday RSI
         positions = _position_mgr._get_open_positions_sync()
@@ -2976,6 +2987,7 @@ async def get_combined_opportunities():
         signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
         save_cache(signals)
         cached = [asdict(s) for s in signals]
+        cache_age_min = 0
     if cached:
         valid = [s for s in cached if not s.get("vetoed")]
 
@@ -3012,6 +3024,7 @@ async def get_combined_opportunities():
             "timestamp": datetime.now().isoformat(),
             "total": len(valid), "mean_reversion": mr, "momentum": mom, "both": both,
             "data_date": data_date,
+            "cache_age_min": round(cache_age_min, 1),
             "live_prices": live_count,
             "signals": valid,
             "system_status": _system_status,

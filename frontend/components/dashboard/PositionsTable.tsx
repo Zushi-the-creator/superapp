@@ -399,77 +399,48 @@ const PositionRow = memo(function PositionRow({
                   Open Full Chart
                 </button>
               </div>
-              {/* Stop Loss, Exit Price & Targets */}
+              {/* V2.6: Fixed 30-day exit countdown */}
               <div className="col-span-2 md:col-span-4 mt-1 pt-2 border-t border-neutral-800/50">
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-3 gap-3">
                   <div>
-                    <span className="text-neutral-500">Stop Loss ({pos.stop_pct}%)</span>
-                    <div className={cn("font-medium", pos.current_price <= pos.stop_loss ? "text-signal-sell animate-pulse" : "text-signal-sell/60")}>
-                      {formatCurrency(pos.stop_loss)}
+                    <span className="text-neutral-500">Exit Strategy</span>
+                    <div className="font-medium text-amber-400">
+                      Fixed 30d
                     </div>
                   </div>
                   <div>
-                    <span className="text-neutral-500">Exit ({pos.exit_strategy})</span>
-                    {pos.exit_price > 0 ? (
-                      <div className={cn(
-                        "font-medium",
-                        pos.exit_triggered
-                          ? "text-signal-sell animate-pulse"
-                          : "text-amber-400/60"
-                      )}>
-                        {formatCurrency(pos.exit_price)}
-                        <span className="text-[10px] ml-1">
-                          +{pos.exit_strategy_ret?.toFixed(1)}% WR {pos.exit_strategy_wr?.toFixed(0)}%
-                        </span>
-                      </div>
-                    ) : pos.exit_strategy?.startsWith("RSI") ? (
-                      <div className={cn(
-                        "font-medium",
-                        pos.exit_triggered
-                          ? "text-signal-sell animate-pulse"
-                          : "text-amber-400/60"
-                      )}>
-                        RSI(2) = {pos.rsi2?.toFixed(0)}
-                        <span className="text-[10px] ml-1">
-                          +{pos.exit_strategy_ret?.toFixed(1)}% WR {pos.exit_strategy_wr?.toFixed(0)}%
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="text-neutral-600 font-medium">—</div>
-                    )}
-                  </div>
-                  <div>
-                    <span className="text-neutral-500">Target 1 (+{pos.target_1_pct}%)</span>
-                    <div className={cn("font-medium", pos.current_price >= pos.target_1 ? "text-signal-buy animate-pulse" : "text-signal-buy/60")}>
-                      {formatCurrency(pos.target_1)}
+                    <span className="text-neutral-500">Days Held</span>
+                    <div className={cn(
+                      "font-medium",
+                      pos.days_held >= 30 ? "text-signal-sell animate-pulse" :
+                      pos.days_held >= 25 ? "text-amber-400" : "text-neutral-200"
+                    )}>
+                      {pos.days_held} / 30d
+                      {pos.days_held >= 30 && <span className="text-xs ml-1">(EXIT DUE)</span>}
                     </div>
                   </div>
                   <div>
-                    <span className="text-neutral-500">Target 2 (+{pos.target_2_pct}%)</span>
-                    <div className={cn("font-medium", pos.current_price >= pos.target_2 ? "text-signal-buy animate-pulse" : "text-signal-buy/60")}>
-                      {formatCurrency(pos.target_2)}
+                    <span className="text-neutral-500">P&L at Exit</span>
+                    <div className={cn("font-medium", pnlColor(pos.pnl_pct))}>
+                      {formatPercent(pos.pnl_pct)}
                     </div>
                   </div>
                 </div>
-                {/* Visual price bar */}
+                {/* Visual hold progress bar */}
                 <div className="mt-2 relative h-2 bg-neutral-800 rounded-full overflow-hidden">
-                  {(() => {
-                    const range = pos.target_2 - pos.stop_loss;
-                    const pricePct = Math.max(0, Math.min(100, ((pos.current_price - pos.stop_loss) / range) * 100));
-                    const t1Pct = ((pos.target_1 - pos.stop_loss) / range) * 100;
-                    return (
-                      <>
-                        <div className="absolute left-0 top-0 h-full bg-signal-sell/30 rounded-l-full" style={{width: `${t1Pct * 0.2}%`}} />
-                        <div className={cn("absolute top-0 h-full rounded-full transition-all", pos.pnl >= 0 ? "bg-signal-buy" : "bg-signal-sell")} style={{width: `${pricePct}%`}} />
-                        <div className="absolute top-0 h-full w-px bg-neutral-500" style={{left: `${t1Pct}%`}} title="Target 1" />
-                      </>
-                    );
-                  })()}
+                  <div
+                    className={cn(
+                      "absolute top-0 left-0 h-full rounded-full transition-all",
+                      pos.days_held >= 30 ? "bg-signal-sell" :
+                      pos.days_held >= 25 ? "bg-amber-500" : "bg-blue-500"
+                    )}
+                    style={{ width: `${Math.min(100, (pos.days_held / 30) * 100)}%` }}
+                  />
                 </div>
                 <div className="flex justify-between text-[10px] text-neutral-600 mt-0.5">
-                  <span>Stop</span>
-                  <span>Current</span>
-                  <span>Target</span>
+                  <span>Entry</span>
+                  <span>{Math.max(0, 30 - pos.days_held)}d remaining</span>
+                  <span>30d Exit</span>
                 </div>
               </div>
               {pos.issues.length > 0 && (

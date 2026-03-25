@@ -91,6 +91,8 @@ export function KPICards({
   const regimeLabel = regime
     ? regime.regime === "CRISIS"
       ? `VIX ${regime.vix} — PAUSED`
+      : regime.regime === "DECLINING"
+      ? `SPY ${regime.spy_5d_return >= 0 ? "+" : ""}${regime.spy_5d_return.toFixed(1)}% — ENTRIES PAUSED`
       : regime.regime === "FEAR"
       ? `VIX ${regime.vix} — ${regime.position_size_pct}% Size`
       : regime.regime === "CAUTION"

@@ -368,8 +368,9 @@ class EntryEngine:
         factors.append(f"Price ${price:.2f} > SMA50 ${sma50:.2f} (uptrend)")
         score += 20
 
-        # === RSI(2) Scoring ===
-        rsi_threshold = regime_params['rsi_threshold']
+        # === RSI(2) Scoring — V2.6: Universal RSI(2) < 10 threshold ===
+        # Research: regime-dependent thresholds (BULL:25, SIDEWAYS:15) let in too many
+        # weak signals. Fixed < 10 matches scanner, strategy_qa, portfolio_check.
 
         if rsi2 < 5:
             score += 40
@@ -377,9 +378,6 @@ class EntryEngine:
         elif rsi2 < 10:
             score += 25
             factors.append(f"RSI(2)={rsi2:.1f} very oversold (<10)")
-        elif rsi2 < rsi_threshold:
-            score += 15
-            factors.append(f"RSI(2)={rsi2:.1f} oversold (<{rsi_threshold})")
         else:
             return EntrySignal(
                 signal=SignalType.HOLD,
@@ -388,7 +386,7 @@ class EntryEngine:
                 regime=regime_info.regime,
                 rsi2=rsi2,
                 rsi14=rsi14,
-                factors=[f"RSI(2)={rsi2:.1f} not oversold (need <{rsi_threshold})"]
+                factors=[f"RSI(2)={rsi2:.1f} not oversold (need <10)"]
             )
 
         # === Additional Factors ===
