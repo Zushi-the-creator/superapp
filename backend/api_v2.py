@@ -1133,17 +1133,19 @@ async def get_portfolio():
         )
 
         # Extended hours data (pre-market / after-hours)
-        # Only show ext_price when it's meaningfully different from current_price
-        # (Finnhub free tier returns last close when no pre-market trades)
+        # Yahoo chart provides real extended hours prices when available
         ext = _extended_hours_cache.get(ticker)
         detail.market_session = _get_market_session()
         if ext:
-            ext_px = ext["ext_price"]
-            # Only show if ext price differs from current by > 0.1% (real pre-market activity)
-            if detail.current_price > 0 and abs(ext_px - detail.current_price) / detail.current_price > 0.001:
-                detail.ext_price = ext_px
-                detail.ext_change_pct = ext["ext_change_pct"]
+            detail.ext_price = ext["ext_price"]
+            detail.ext_change_pct = ext["ext_change_pct"]
             detail.market_session = ext["session"]
+            # Also update current_price to latest if ext is newer
+            if ext["ext_price"] > 0:
+                detail.current_price = ext["ext_price"]
+                detail.pnl = round((ext["ext_price"] - detail.entry_price) * pos["shares"], 2)
+                detail.pnl_pct = round(((ext["ext_price"] - detail.entry_price) / detail.entry_price) * 100, 2) if detail.entry_price > 0 else 0
+                detail.current_value = round(ext["ext_price"] * pos["shares"], 2)
 
         details.append(detail)
 
@@ -4512,11 +4514,12 @@ async def quote_refresh_loop():
 
 
 async def extended_hours_refresh_loop():
-    """Fetch pre-market/after-hours prices via Finnhub (non-blocking).
-    Finnhub quote 'c' field includes extended hours prices when market is closed.
-    Replaces Yahoo Finance (BANNED: 429 rate limit errors on Fly.io)."""
+    """Fetch pre-market/after-hours prices via Yahoo Finance chart API.
+    Yahoo chart with includePrePost=true returns actual extended hours trades.
+    Finnhub REST free tier only returns last regular close.
+    Rate limit: 1 request per 2 seconds, max ~15 tickers per cycle."""
     await asyncio.sleep(30)
-    print("[ExtHoursRefresh] Started (using Finnhub)")
+    print("[ExtHoursRefresh] Started (Yahoo chart + Finnhub fallback)")
 
     while True:
         try:
@@ -4537,41 +4540,69 @@ async def extended_hours_refresh_loop():
 
             async with aiohttp.ClientSession() as ext_session:
                 for t in tickers:
-                    try:
-                        if not _check_finnhub_rate():
-                            break
-                        url = f"https://finnhub.io/api/v1/quote?symbol={t}&token={FINNHUB_KEY}"
-                        async with ext_session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                            if resp.status != 200:
-                                continue
-                            data = await resp.json()
-                            current = data.get("c", 0)
-                            prev_close = data.get("pc", 0)
+                    ext_price = None
+                    reg_price = None
 
-                            if current > 0 and prev_close > 0:
-                                # Finnhub 'c' includes extended hours price
-                                ext_change = round(((current - prev_close) / prev_close) * 100, 2)
-                                _extended_hours_cache[t] = {
-                                    "ext_price": round(current, 2),
-                                    "ext_change_pct": ext_change,
-                                    "session": session,
-                                    "ts": datetime.now(),
-                                }
-                                # Also update live price cache
-                                _price_cache[t] = {"price": round(current, 2), "ts": datetime.now()}
-                                updated += 1
+                    # Try Yahoo chart first (has real pre/post market data)
+                    try:
+                        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{t}?range=1d&interval=5m&includePrePost=true"
+                        async with ext_session.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                                                   timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                chart = data.get("chart", {}).get("result", [{}])[0]
+                                meta = chart.get("meta", {})
+                                reg_price = meta.get("regularMarketPrice", 0)
+                                prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
+
+                                # Get latest non-null price from time series
+                                ts_closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                                for i in range(len(ts_closes) - 1, -1, -1):
+                                    if ts_closes[i] is not None:
+                                        ext_price = ts_closes[i]
+                                        break
+
+                                base = reg_price if session == "AFTER_HOURS" else prev_close
+                                if ext_price and ext_price > 0 and base and base > 0:
+                                    ext_change = round(((ext_price - base) / base) * 100, 2)
+                                    _extended_hours_cache[t] = {
+                                        "ext_price": round(ext_price, 2),
+                                        "ext_change_pct": ext_change,
+                                        "session": session,
+                                        "ts": datetime.now(),
+                                    }
+                                    _price_cache[t] = {"price": round(ext_price, 2), "ts": datetime.now()}
+                                    updated += 1
                     except Exception:
                         pass
-                    await asyncio.sleep(0.5)
+
+                    # Fallback: Finnhub (at least updates _price_cache)
+                    if ext_price is None:
+                        try:
+                            if _check_finnhub_rate():
+                                url = f"https://finnhub.io/api/v1/quote?symbol={t}&token={FINNHUB_KEY}"
+                                async with ext_session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                                    if resp.status == 200:
+                                        data = await resp.json()
+                                        current = data.get("c", 0)
+                                        prev_close = data.get("pc", 0)
+                                        if current > 0 and prev_close > 0:
+                                            _price_cache[t] = {"price": round(current, 2), "ts": datetime.now()}
+                        except Exception:
+                            pass
+
+                    await asyncio.sleep(2)  # Rate limit: Yahoo gets 429 if too fast
 
             if updated:
                 prices = {t: f"${r['ext_price']:.2f} ({r['ext_change_pct']:+.2f}%)" for t, r in _extended_hours_cache.items()}
                 print(f"[ExtHoursRefresh] {session}: {updated}/{len(tickers)} updated: {prices}")
+            else:
+                print(f"[ExtHoursRefresh] {session}: 0 updated (Yahoo may be rate-limited, Finnhub has no PM data)")
 
         except Exception as e:
             print(f"[ExtHoursRefresh] Error: {e}")
 
-        await asyncio.sleep(120)
+        await asyncio.sleep(180)  # 3 min between cycles (gentle on Yahoo)
 
 
 async def cache_refresh_loop():
