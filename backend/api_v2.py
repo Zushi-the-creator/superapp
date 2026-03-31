@@ -4520,12 +4520,12 @@ async def quote_refresh_loop():
 
 
 async def extended_hours_refresh_loop():
-    """Fetch pre-market/after-hours prices via Yahoo Finance chart API.
-    Yahoo chart with includePrePost=true returns actual extended hours trades.
-    Finnhub REST free tier only returns last regular close.
-    Rate limit: 1 request per 2 seconds, max ~15 tickers per cycle."""
+    """Fetch pre-market/after-hours prices via CNBC quote API.
+    CNBC provides real-time extended hours prices for ALL stocks (including small caps).
+    Free, no auth, JSON response with ExtendedMktQuote field.
+    Tested: returns accurate PM prices matching Google Finance."""
     await asyncio.sleep(30)
-    print("[ExtHoursRefresh] Started (Yahoo chart + Finnhub fallback)")
+    print("[ExtHoursRefresh] Started (CNBC API)")
 
     while True:
         try:
@@ -4546,69 +4546,60 @@ async def extended_hours_refresh_loop():
 
             async with aiohttp.ClientSession() as ext_session:
                 for t in tickers:
-                    ext_price = None
-                    reg_price = None
-
-                    # Try Yahoo chart first (has real pre/post market data)
                     try:
-                        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{t}?range=1d&interval=5m&includePrePost=true"
+                        url = (f"https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+                               f"?symbols={t}&requestMethod=itv&noCache=1&partnerId=2&fund=1&exthrs=1&output=json&events=1")
                         async with ext_session.get(url, headers={"User-Agent": "Mozilla/5.0"},
                                                    timeout=aiohttp.ClientTimeout(total=6)) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                chart = data.get("chart", {}).get("result", [{}])[0]
-                                meta = chart.get("meta", {})
-                                reg_price = meta.get("regularMarketPrice", 0)
-                                prev_close = meta.get("chartPreviousClose", 0) or meta.get("previousClose", 0)
+                            if resp.status != 200:
+                                continue
+                            data = await resp.json()
+                            quotes = data.get("FormattedQuoteResult", {}).get("FormattedQuote", [])
+                            if not quotes:
+                                continue
 
-                                # Get latest non-null price from time series
-                                ts_closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                                for i in range(len(ts_closes) - 1, -1, -1):
-                                    if ts_closes[i] is not None:
-                                        ext_price = ts_closes[i]
-                                        break
+                            q = quotes[0]
+                            reg_close = float(q.get("last", 0) or 0)
+                            ext_data = q.get("ExtendedMktQuote", {})
+                            ext_last_str = ext_data.get("last", "")
+                            ext_chg_str = ext_data.get("change_pct", "")
 
-                                base = reg_price if session == "AFTER_HOURS" else prev_close
-                                if ext_price and ext_price > 0 and base and base > 0:
-                                    ext_change = round(((ext_price - base) / base) * 100, 2)
-                                    _extended_hours_cache[t] = {
-                                        "ext_price": round(ext_price, 2),
-                                        "ext_change_pct": ext_change,
-                                        "session": session,
-                                        "ts": datetime.now(),
-                                    }
-                                    _price_cache[t] = {"price": round(ext_price, 2), "ts": datetime.now()}
-                                    updated += 1
+                            if not ext_last_str or ext_last_str == "UNCH":
+                                # No extended hours activity — use regular close
+                                if reg_close > 0:
+                                    _price_cache[t] = {"price": reg_close, "prev_close": reg_close, "ts": datetime.now()}
+                                continue
+
+                            ext_price = float(ext_last_str)
+                            if ext_price <= 0 or reg_close <= 0:
+                                continue
+
+                            ext_change = round(((ext_price - reg_close) / reg_close) * 100, 2)
+                            _extended_hours_cache[t] = {
+                                "ext_price": round(ext_price, 2),
+                                "ext_change_pct": ext_change,
+                                "session": session,
+                                "ts": datetime.now(),
+                            }
+                            _price_cache[t] = {
+                                "price": round(ext_price, 2),
+                                "prev_close": reg_close,
+                                "day_chg": ext_change,
+                                "ts": datetime.now(),
+                            }
+                            updated += 1
                     except Exception:
                         pass
-
-                    # Fallback: Finnhub (at least updates _price_cache)
-                    if ext_price is None:
-                        try:
-                            if _check_finnhub_rate():
-                                url = f"https://finnhub.io/api/v1/quote?symbol={t}&token={FINNHUB_KEY}"
-                                async with ext_session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                                    if resp.status == 200:
-                                        data = await resp.json()
-                                        current = data.get("c", 0)
-                                        prev_close = data.get("pc", 0)
-                                        if current > 0 and prev_close > 0:
-                                            _price_cache[t] = {"price": round(current, 2), "ts": datetime.now()}
-                        except Exception:
-                            pass
-
-                    await asyncio.sleep(2)  # Rate limit: Yahoo gets 429 if too fast
+                    await asyncio.sleep(0.5)
 
             if updated:
                 prices = {t: f"${r['ext_price']:.2f} ({r['ext_change_pct']:+.2f}%)" for t, r in _extended_hours_cache.items()}
                 print(f"[ExtHoursRefresh] {session}: {updated}/{len(tickers)} updated: {prices}")
-            else:
-                print(f"[ExtHoursRefresh] {session}: 0 updated (Yahoo may be rate-limited, Finnhub has no PM data)")
 
         except Exception as e:
             print(f"[ExtHoursRefresh] Error: {e}")
 
-        await asyncio.sleep(180)  # 3 min between cycles (gentle on Yahoo)
+        await asyncio.sleep(60)  # Refresh every 60s during extended hours
 
 
 async def cache_refresh_loop():
