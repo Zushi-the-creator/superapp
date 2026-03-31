@@ -966,15 +966,46 @@ async def get_portfolio():
         ez_trades = tech.get("exit_zone_trades", 0) if tech else 0
         atlas_wr = tech.get("win_rate", 0) if tech else 0
         atlas_trades = tech.get("total_trades", 0) if tech else 0
+
+        # Check bear market regime for crash exit rule
+        _regime = _check_market_regime()
+        _spy_bear = _regime.get("spy_below_sma200", False)
+
+        # Priority 1: Fixed30d exit triggered
         if exit_triggered:
             signal = "EXIT"
             issues.append(f"Exit triggered ({tech.get('exit_strategy', '')}: {tech.get('exit_label', '')})")
+
+        # Priority 2: Earnings within 7 days (checked via Finnhub in background)
+        # (already handled by exit_triggered if earnings check ran)
+
+        # Priority 3: Bear market crash exit rule (backtested: 1,005 trades, 500 stocks, 5yr)
+        # SPY < SMA200 during hold:
+        #   WR >= 65% + losing: HOLD (55% improve, avg -4.1% vs sell -6.0%)
+        #   WR < 65% + losing: SELL (34% improve, avg -11.4% vs sell -8.7%)
+        #   Profitable during crash: SELL regardless (lock gains)
+        elif _spy_bear and atlas_wr < 65 and pnl_pct < 0:
+            signal = "EXIT"
+            issues.append(f"BEAR EXIT: WR {atlas_wr:.0f}%<65% + losing {pnl_pct:+.1f}% in bear (backtest: hold -11.4% vs sell -8.7%, 697t)")
+        elif _spy_bear and atlas_wr < 65 and pnl_pct >= 0:
+            signal = "EXIT"
+            issues.append(f"BEAR EXIT: WR {atlas_wr:.0f}%<65% + profitable {pnl_pct:+.1f}% — lock gains (backtest: sell +7.3% vs hold +2.9%, 207t)")
+        elif _spy_bear and atlas_wr >= 65 and pnl_pct >= 0:
+            signal = "EXIT"
+            issues.append(f"BEAR EXIT: Profitable {pnl_pct:+.1f}% in bear — lock gains (backtest: sell +3.4% vs hold +2.2%, 26t)")
+
+        # Priority 4: Bad backtest stats (strong evidence)
         elif ez_trades >= 20 and ez_ret < -2 and atlas_wr < 50:
-            # Only EXIT on backtest stats if STRONG evidence (20+ trades, clearly negative)
             signal = "EXIT"
             issues.append(f"Bad backtest ({ez_ret:+.1f}% zone, {atlas_wr:.0f}% WR on {atlas_trades}t)")
+
+        # Priority 5: Bear market + high WR + losing = HOLD (55% improve in backtest)
+        elif _spy_bear and atlas_wr >= 65 and pnl_pct < 0:
+            signal = "HOLD"
+            issues.append(f"BEAR HOLD: WR {atlas_wr:.0f}%>=65% losing {pnl_pct:+.1f}% — hold (55% improve, avg -4.1% vs sell -6.0%, 75t)")
+
         else:
-            # Existing positions: HOLD. Note concerns but DON'T trigger EXIT on weak data.
+            # Non-bear market: standard checks
             if not above_sma50:
                 issues.append("Below SMA50")
             if rsi2 > 80:
@@ -985,11 +1016,10 @@ async def get_portfolio():
                 issues.append(f"Zone WR {ez_wr:.0f}% below 65% ({ez_trades}t) — monitor")
             if atlas_trades >= 10 and atlas_wr < 55:
                 issues.append(f"ATLAS WR {atlas_wr:.0f}% below 55% ({atlas_trades}t) — weak")
-        # Crash warning — note but DON'T override signal for existing positions.
-        # Crash filter is for NEW entries (veto buying). For holdings, trust exit strategy.
-        # See lesson #28: during broad crashes, selling on panic = emotional trading.
+
+        # Crash day warning (informational only)
         if day_chg < -8 and not any("CRASH" in i for i in issues):
-            issues.append(f"CRASH ({day_chg:.1f}% today) — exit strategy still active")
+            issues.append(f"CRASH ({day_chg:.1f}% today)")
 
         # Days held calculation (trading days to match backtest bars)
         days_held = 0
