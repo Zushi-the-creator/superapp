@@ -1136,16 +1136,22 @@ async def get_portfolio():
         # Yahoo chart provides real extended hours prices when available
         ext = _extended_hours_cache.get(ticker)
         detail.market_session = _get_market_session()
-        if ext:
+        if ext and ext["ext_price"] > 0:
             detail.ext_price = ext["ext_price"]
             detail.ext_change_pct = ext["ext_change_pct"]
             detail.market_session = ext["session"]
-            # Also update current_price to latest if ext is newer
-            if ext["ext_price"] > 0:
-                detail.current_price = ext["ext_price"]
-                detail.pnl = round((ext["ext_price"] - detail.entry_price) * pos["shares"], 2)
-                detail.pnl_pct = round(((ext["ext_price"] - detail.entry_price) / detail.entry_price) * 100, 2) if detail.entry_price > 0 else 0
-                detail.current_value = round(ext["ext_price"] * pos["shares"], 2)
+            # Update ALL price-dependent fields with latest extended hours price
+            detail.current_price = ext["ext_price"]
+            detail.pnl = round((ext["ext_price"] - detail.entry_price) * pos["shares"], 2)
+            detail.pnl_pct = round(((ext["ext_price"] - detail.entry_price) / detail.entry_price) * 100, 2) if detail.entry_price > 0 else 0
+            detail.current_value = round(ext["ext_price"] * pos["shares"], 2)
+            # Fix day_change_pct — use ext_change_pct (vs previous close) not stale cache
+            detail.day_change_pct = ext["ext_change_pct"]
+        # Even without ext data, fix day_chg if Finnhub quote has fresh prev_close
+        elif quote and quote.get("price", 0) > 0:
+            fh_prev = quote.get("prev_close", 0)
+            if fh_prev > 0:
+                detail.day_change_pct = round(((quote["price"] - fh_prev) / fh_prev) * 100, 2)
 
         details.append(detail)
 
