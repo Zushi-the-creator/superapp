@@ -1133,13 +1133,17 @@ async def get_portfolio():
         )
 
         # Extended hours data (pre-market / after-hours)
+        # Only show ext_price when it's meaningfully different from current_price
+        # (Finnhub free tier returns last close when no pre-market trades)
         ext = _extended_hours_cache.get(ticker)
+        detail.market_session = _get_market_session()
         if ext:
-            detail.ext_price = ext["ext_price"]
-            detail.ext_change_pct = ext["ext_change_pct"]
+            ext_px = ext["ext_price"]
+            # Only show if ext price differs from current by > 0.1% (real pre-market activity)
+            if detail.current_price > 0 and abs(ext_px - detail.current_price) / detail.current_price > 0.001:
+                detail.ext_price = ext_px
+                detail.ext_change_pct = ext["ext_change_pct"]
             detail.market_session = ext["session"]
-        else:
-            detail.market_session = _get_market_session()
 
         details.append(detail)
 
