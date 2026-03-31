@@ -317,26 +317,53 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
     print("done")
 
     # ── Step 7: Determine signal ──
+    # Crash exit rule (backtested: 1,005 crash trades, 500 stocks, 5yr):
+    #   SPY < SMA200 during hold → check WR:
+    #     WR >= 65% + losing: HOLD (55% improve, avg -4.1% vs sell -6.0%)
+    #     WR < 65% + losing: SELL (34% improve, avg -11.4% vs sell -8.7%)
+    #     Profitable during crash: SELL regardless (lock in gains)
     print("  [7/8] Generating signals...", end=" ", flush=True)
+
+    # Check if SPY is in bear (below SMA200)
+    spy_bear = not results[0].spy_above_sma50 if results else False  # approximation
+    spy_data = cache.get("SPY", 730)
+    if spy_data is not None:
+        spy_c = spy_data["Close"].dropna().tolist()
+        if len(spy_c) >= 200:
+            spy_sma200 = sum(spy_c[-200:]) / 200
+            spy_bear = spy_c[-1] < spy_sma200
+
     for check in results:
         # Priority order: most critical issues first
-        # NOTE: BELOW SMA50 alone is NOT an exit trigger — ATLAS V2.4 uses per-stock
-        # exit strategies (Fixed14d, RSI80, etc.). SMA50 breach is a CAUTION, not SELL.
-        if any("NEGATIVE zone return" in i for i in check.issues):
-            check.signal = "SELL"
-        elif any("Zone WR below 65%" in i for i in check.issues):
-            check.signal = "SELL"
+        if any("EARNINGS" in i for i in check.issues):
+            check.signal = "SELL BEFORE EARNINGS"
         elif any("CRASH" in i for i in check.issues):
             check.signal = "CRASH"
-        elif any("EARNINGS" in i for i in check.issues):
-            check.signal = "SELL BEFORE EARNINGS"
+        elif any("NEGATIVE zone return" in i for i in check.issues):
+            check.signal = "SELL"
+        elif any("NEGATIVE sentiment" in i for i in check.issues) and check.pnl_pct < 0:
+            check.signal = "SELL"
+        # Crash exit rule: SPY < SMA200 during hold
+        elif spy_bear and check.overall_wr < 65 and check.pnl_pct < 0:
+            check.signal = "SELL"
+            check.issues.append(f"CRASH EXIT: WR {check.overall_wr:.0f}%<65% + losing {check.pnl_pct:+.1f}% in bear market (backtest: hold→-11.4% vs sell→-8.7%)")
+        elif spy_bear and check.overall_wr < 65 and check.pnl_pct >= 0:
+            check.signal = "SELL"
+            check.issues.append(f"CRASH EXIT: WR {check.overall_wr:.0f}%<65% + profitable {check.pnl_pct:+.1f}% in bear (lock gains, backtest: sell +7.3% vs hold +2.9%)")
+        elif spy_bear and check.overall_wr >= 65 and check.pnl_pct >= 0:
+            check.signal = "SELL"
+            check.issues.append(f"CRASH EXIT: Profitable {check.pnl_pct:+.1f}% in bear — lock gains (backtest: sell +3.4% vs hold +2.2%)")
+        elif any("Zone WR below 65%" in i for i in check.issues):
+            check.signal = "SELL"
         elif any("BEAR regime" in i for i in check.issues):
             check.signal = "SELL"
         elif any("WR below" in i for i in check.issues):
             check.signal = "SELL"
+        # SPY bear + high WR + losing = HOLD (55% improve)
+        elif spy_bear and check.overall_wr >= 65 and check.pnl_pct < 0:
+            check.signal = "HOLD"
+            check.issues.append(f"BEAR HOLD: WR {check.overall_wr:.0f}%>=65% + losing — hold (55% improve in backtest)")
         elif any("BELOW SMA50" in i for i in check.issues):
-            check.signal = "CAUTION"
-        elif any("NEGATIVE sentiment" in i for i in check.issues):
             check.signal = "CAUTION"
         elif any("OVERVALUED" in i for i in check.issues):
             check.signal = "CAUTION"

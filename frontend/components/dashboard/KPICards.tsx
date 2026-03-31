@@ -89,7 +89,9 @@ export function KPICards({
     ? "bg-amber-500/10"
     : "bg-signal-sell/10";
   const regimeLabel = regime
-    ? regime.regime === "CRISIS"
+    ? regime.regime === "BEAR"
+      ? `SPY < SMA200 — BEAR MARKET`
+      : regime.regime === "CRISIS"
       ? `VIX ${regime.vix} — PAUSED`
       : regime.regime === "DECLINING"
       ? `SPY ${regime.spy_5d_return >= 0 ? "+" : ""}${regime.spy_5d_return.toFixed(1)}% — ENTRIES PAUSED`

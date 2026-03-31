@@ -1627,54 +1627,73 @@ async def get_opportunities():
 
 def _check_market_regime() -> dict:
     """Check if broad market supports mean reversion entries.
-    Uses SPY momentum + VIX level for regime detection.
-    Research: MR WR drops from 60% to 19% in declining markets (our data, 27K trades).
-    VIX regimes from Alvarez/Connors: <20 normal, 20-30 caution, >30 fear, >40 crisis."""
+    Hierarchy (most severe wins):
+      1. BEAR: SPY < SMA200 → PAUSE entries (5yr backtest: WR drops 56.6%→26.3%, avg +2.79%→-7.52%)
+      2. CRISIS: VIX > 40 → PAUSE entries
+      3. DECLINING: SPY 5d < -1% → PAUSE entries (MR breaks in declining markets)
+      4. FEAR: VIX 30-40 → reduce to 40%
+      5. CAUTION: VIX 25-30 or SPY 5d -1% to -2% → reduce to 70%
+      6. HEALTHY: all clear → full size
+
+    Crash exit rule (backtested on 1,005 crash trades, 500 stocks, 5yr):
+      - WR >= 65% + losing: HOLD (55% improve, hold avg -4.1% vs sell -6.0%)
+      - WR < 65% + losing: SELL (only 34% improve, hold avg -11.4% vs sell -8.7%)
+      - Profitable during crash: SELL regardless of WR (lock in gains)
+
+    Sources: Connors/Alvarez (200-day SMA filter), our 7,032 trade backtest."""
     result = {"regime": "UNKNOWN", "pause_entries": False, "reason": "No data",
               "vix": 0, "vix_regime": "UNKNOWN", "spy_5d_return": 0,
+              "spy_below_sma50": False, "spy_below_sma200": False,
               "position_size_pct": 100}
     try:
-        spy_df = _cache.get("SPY", 365)
+        spy_df = _cache.get("SPY", 730)
+        spy_price = 0
+        sma50 = 0
+        sma200 = 0
         if spy_df is not None and len(spy_df) >= 6:
             closes = spy_df["Close"].dropna().tolist()
+            spy_price = closes[-1]
             ret_5d = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if len(closes) >= 6 else 0
             sma50 = sum(closes[-min(50, len(closes)):]) / min(50, len(closes))
+            sma200 = sum(closes[-min(200, len(closes)):]) / min(200, len(closes)) if len(closes) >= 200 else 0
             result["spy_5d_return"] = round(ret_5d, 2)
             result["spy_below_sma50"] = closes[-1] < sma50
+            result["spy_below_sma200"] = closes[-1] < sma200 if sma200 > 0 else False
+            result["spy_price"] = round(spy_price, 2)
+            result["spy_sma50"] = round(sma50, 2)
+            result["spy_sma200"] = round(sma200, 2)
+
+        # Also check live price from Finnhub cache if available
+        live_spy = _price_cache.get("SPY", {}).get("price", 0)
+        if live_spy > 0 and sma200 > 0:
+            result["spy_price_live"] = round(live_spy, 2)
+            result["spy_below_sma200"] = live_spy < sma200
+            result["spy_below_sma50"] = live_spy < sma50
 
         # VIX regime — read from cache ONLY (never block event loop with HTTP)
-        # Use 365d lookback so cache.get returns enough rows (min 50 required by cache)
         vix_df = _cache.get("VIX", 365)
-
         vix = 0
         if vix_df is not None and len(vix_df) >= 1:
             vix_closes = vix_df["Close"].dropna().tolist() if "Close" in vix_df.columns else []
             if vix_closes:
                 vix = vix_closes[-1]
-
         result["vix"] = round(vix, 2)
 
         # VIX regime classification
         if vix <= 0:
-            result["vix_regime"] = "UNKNOWN"
-            vix_size = 100
+            result["vix_regime"] = "UNKNOWN"; vix_size = 100
         elif vix < 20:
-            result["vix_regime"] = "LOW"
-            vix_size = 100  # Full size
+            result["vix_regime"] = "LOW"; vix_size = 100
         elif vix < 25:
-            result["vix_regime"] = "NORMAL"
-            vix_size = 100
+            result["vix_regime"] = "NORMAL"; vix_size = 100
         elif vix < 30:
-            result["vix_regime"] = "ELEVATED"
-            vix_size = 70  # Reduce to 70%
+            result["vix_regime"] = "ELEVATED"; vix_size = 70
         elif vix < 40:
-            result["vix_regime"] = "FEAR"
-            vix_size = 40  # Reduce to 40%
+            result["vix_regime"] = "FEAR"; vix_size = 40
         else:
-            result["vix_regime"] = "CRISIS"
-            vix_size = 0  # No new entries
+            result["vix_regime"] = "CRISIS"; vix_size = 0
 
-        # SPY momentum regime
+        # SPY momentum sizing
         spy_ret = result.get("spy_5d_return", 0)
         if spy_ret < -2:
             spy_size = 40
@@ -1683,15 +1702,23 @@ def _check_market_regime() -> dict:
         else:
             spy_size = 100
 
-        # Combined: use the more conservative of VIX and SPY sizing
         size_pct = min(vix_size, spy_size)
         result["position_size_pct"] = size_pct
 
-        # Overall regime — V2.6: PAUSE entries when SPY 5d < -1% (CLAUDE.md rule #27)
-        if size_pct == 0:
+        # Overall regime — BEAR (SMA200) is highest priority
+        is_bear = result.get("spy_below_sma200", False)
+
+        if is_bear:
+            result["regime"] = "BEAR"
+            result["pause_entries"] = True
+            result["position_size_pct"] = 0
+            result["reason"] = (f"SPY below SMA200 — BEAR MARKET, entries PAUSED. "
+                                f"Backtest: WR drops 56.6%→26.3%, avg +2.79%→-7.52% in bear. "
+                                f"Connors/Alvarez: go to cash below 200-day MA.")
+        elif size_pct == 0:
             result["regime"] = "CRISIS"
             result["pause_entries"] = True
-            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, ALL entries paused"
+            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, entries paused"
         elif spy_ret < -1:
             result["regime"] = "DECLINING"
             result["pause_entries"] = True
