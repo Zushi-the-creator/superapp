@@ -3193,6 +3193,31 @@ async def get_data_status():
     }
 
 
+@router.post("/cache/populate")
+async def populate_cache():
+    """One-time full history fetch via Tiingo (400d). Use after fresh deploy."""
+    _system_status.update({"stage": "populating", "message": "Fetching full history for all stocks...", "progress": 0})
+    try:
+        stale = _cache.get_stale_tickers()
+        if not stale:
+            return {"status": "ok", "message": "All tickers already fresh"}
+        result = await _cache.refresh(stale)
+        # Also re-run evaluator
+        _system_status.update({"stage": "evaluating", "message": "Re-evaluating...", "progress": 80})
+        from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
+        positions = _position_mgr._get_open_positions_sync()
+        held = set(p["ticker"] for p in positions) if positions else set()
+        live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+        signals = await asyncio.to_thread(_eval_all, 10.0, held, live_px)
+        _save_eval(signals)
+        valid = sum(1 for s in signals if not s.vetoed)
+        _system_status.update({"stage": "ready", "message": f"{valid} entries ready", "progress": 100})
+        return {"status": "ok", "refreshed": result.get("refreshed", 0), "failed": result.get("failed", 0), "entries": valid}
+    except Exception as e:
+        _system_status.update({"stage": "error", "message": str(e), "progress": 0})
+        return {"status": "error", "message": str(e)}
+
+
 @router.get("/scan/combined")
 async def get_combined_opportunities():
     """Fast unified entry signals — MR + Momentum evaluated against cached prices.
