@@ -281,11 +281,17 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         mr_trades = 0
 
         if is_mr:
-            # Backtest: RSI<10 + above SMA50 + 30d hold
+            # Backtest: RSI<10 + above SMA50 + ATR>=3% + 30d hold
+            # BUG 6 FIX: ATR filter must match live entry criteria
             trades = []; le = -1
             for i in range(50, n - 32):
                 if i <= le: continue
-                if rsi2[i] < 10 and closes[i] > sma50[i]:
+                if rsi2[i] < 10 and closes[i] > sma50[i] and closes[i] >= 10:
+                    # ATR check at historical entry (matches live filter)
+                    _atr_vals = [max(highs[j]-lows[j], abs(highs[j]-closes[j-1]), abs(lows[j]-closes[j-1])) for j in range(max(1,i-13),i+1)]
+                    _atr_pct = (sum(_atr_vals)/len(_atr_vals)/closes[i]*100) if _atr_vals and closes[i]>0 else 0
+                    if _atr_pct < 3:
+                        continue
                     ep = opens[i+1] if i+1 < len(opens) and opens[i+1] > 0 else closes[i]
                     ret = ((closes[i+1+30] - ep) / ep) * 100 - 0.30
                     trades.append(ret > 0)
@@ -329,7 +335,7 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
                 closes, opens, highs, lows, sma50, sma150, sma200, n
             )
             mom_trades = _mt
-            if _mt >= 3:
+            if _mt >= 5:
                 mom_wr = _mwr
                 mom_ret = _mret
                 mom_score = mom_wr * mom_ret / 100  # Expected value
@@ -338,17 +344,17 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         # ═══════════════════════════════════════════
         # DETERMINE BEST STRATEGY + COMBINED SCORE
         # ═══════════════════════════════════════════
-        if is_mr and is_mom and mr_trades >= 5 and mom_trades >= 3:
+        if is_mr and is_mom and mr_trades >= 5 and mom_trades >= 5:
             strategy = "BOTH"
             label = "RSI Dip + Breakout"
-            # Use whichever has higher expected value
+            # Use whichever has higher expected value (no arbitrary multiplier)
             if mr_score >= mom_score:
-                score = mr_score * 1.2
+                score = mr_score
                 exp_ret = mr_ret
                 conf = mr_wr
                 trades_n = mr_trades
             else:
-                score = mom_score * 1.2
+                score = mom_score
                 exp_ret = mom_ret
                 conf = mom_wr
                 trades_n = mom_trades
