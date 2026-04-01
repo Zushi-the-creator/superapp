@@ -378,15 +378,15 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         if trades_n < 5:
             vetoed = True; veto_reason = f"Too few trades ({trades_n} < 5 minimum)"
         elif strategy == "MEAN_REVERSION":
-            if mr_trades < 10:
-                vetoed = True; veto_reason = f"Too few MR trades ({mr_trades} < 10)"
+            if mr_trades < 5:
+                vetoed = True; veto_reason = f"Too few MR trades ({mr_trades} < 5)"
             elif conf < 55:
                 vetoed = True; veto_reason = f"MR WR {conf:.0f}% < 55%"
             elif mr_ret < 3:
                 vetoed = True; veto_reason = f"MR return {mr_ret:.1f}% < 3%"
         elif strategy == "MOMENTUM":
-            if mom_trades < 10:
-                vetoed = True; veto_reason = f"Too few momentum trades ({mom_trades} < 10)"
+            if mom_trades < 5:
+                vetoed = True; veto_reason = f"Too few momentum trades ({mom_trades} < 5)"
             elif conf < 55:
                 vetoed = True; veto_reason = f"Momentum WR {conf:.0f}% < 55%"
             elif mom_ret < 2:
