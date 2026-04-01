@@ -1757,70 +1757,93 @@ def _check_market_regime() -> dict:
         else:
             result["vix_regime"] = "CRISIS"
 
-        # ── COMPOSITE REGIME SCORING ──
-        # Instead of binary "below SMA200 = BEAR", use multiple factors with weights.
+        # ── DATA-DRIVEN REGIME SCORING ──
+        # Backtested on 10,421 trades across 500 stocks, 5 years.
+        # Key finding: the DANGER ZONE is -10% to -15% drawdown (26% WR, -6.17% avg).
+        # Deep bears (-20%+) actually bounce well (67% WR, +7.34%).
+        # SPY near SMA200 (0% to -2% gap) is worst for MR (37% WR, -3.83%).
         drawdown = result.get("drawdown_pct", 0)
         sma200_gap = result.get("sma200_gap_pct", 0)
         sma50_gap = result.get("sma50_gap_pct", 0)
         spy_ret = result.get("spy_5d_return", 0)
-        spy_ret_20d = result.get("spy_20d_return", 0)
 
-        # 1. TRUE BEAR: Drawdown >20% from peak OR SPY >5% below SMA200
-        #    This is an actual bear market — pause everything.
-        if drawdown < -20 or sma200_gap < -5:
-            result["regime"] = "BEAR"
+        # 1. DANGER ZONE: Drawdown -10% to -15% — WORST for MR (26% WR, -6.17%)
+        #    Also: SPY 0% to -2% below SMA200 is deadly (37% WR, -3.83%)
+        if -15 <= drawdown < -10:
+            result["regime"] = "DANGER"
             result["pause_entries"] = True
             result["position_size_pct"] = 0
-            result["reason"] = (f"BEAR MARKET — SPY {drawdown:+.1f}% from peak"
-                                f"{', ' + str(round(sma200_gap, 1)) + '% below SMA200' if sma200_gap < 0 else ''}")
+            result["reason"] = (f"DANGER ZONE — SPY {drawdown:+.1f}% from peak. "
+                                f"Backtest: 26% WR, -6.17% avg in this zone. PAUSE entries.")
 
-        # 2. CRISIS: VIX >40 (panicked market, spreads blow out)
+        # 2. CRISIS: VIX >40
         elif vix > 40:
             result["regime"] = "CRISIS"
             result["pause_entries"] = True
             result["position_size_pct"] = 0
             result["reason"] = f"VIX {vix:.0f} — crisis, entries paused"
 
-        # 3. CORRECTION: Drawdown 10-20% OR SPY 2-5% below SMA200
-        #    Mean reversion still works but with reduced size.
-        elif drawdown < -10 or sma200_gap < -2:
+        # 3. NEAR SMA200: SPY 0% to -2% below SMA200 — very weak (37% WR, -3.83%)
+        elif -2 < sma200_gap < 0:
+            result["regime"] = "WEAK"
+            result["pause_entries"] = True
+            result["position_size_pct"] = 0
+            result["reason"] = (f"SPY {sma200_gap:+.1f}% vs SMA200 — WEAK ZONE. "
+                                f"Backtest: 37% WR, -3.83% avg. PAUSE entries.")
+
+        # 4. CORRECTION: -15% to -20% drawdown — marginal (52% WR, +0.81%)
+        elif -20 <= drawdown < -15:
             result["regime"] = "CORRECTION"
             result["pause_entries"] = False
             result["position_size_pct"] = 50
-            result["reason"] = (f"Correction — SPY {drawdown:+.1f}% from peak, "
-                                f"{sma200_gap:+.1f}% vs SMA200. Half size entries.")
+            result["reason"] = (f"Correction — SPY {drawdown:+.1f}% from peak. "
+                                f"Backtest: 52% WR, +0.81% avg. Half size.")
 
-        # 4. DECLINING: SPY below SMA200 (mild, <2% gap) AND short-term momentum negative
-        #    Near the SMA200 line — reduce but don't pause.
-        elif sma200_gap < 0 and spy_ret < 0:
+        # 5. DEEP BEAR: >20% drawdown — actually GREAT for MR (67% WR, +7.34%)
+        elif drawdown < -20:
+            result["regime"] = "BEAR_BOUNCE"
+            result["pause_entries"] = False
+            result["position_size_pct"] = 100
+            result["reason"] = (f"Deep bear bounce — SPY {drawdown:+.1f}% from peak. "
+                                f"Backtest: 67% WR, +7.34% avg. FULL SIZE entries.")
+
+        # 6. BELOW SMA200 (>2% gap): Moderate (46% WR, -0.16%)
+        elif sma200_gap < -2:
             result["regime"] = "CAUTION"
             result["pause_entries"] = False
-            result["position_size_pct"] = 60
-            result["reason"] = (f"SPY {sma200_gap:+.1f}% vs SMA200, 5d {spy_ret:+.1f}% — "
-                                f"mild correction, reduced size")
+            result["position_size_pct"] = 50
+            result["reason"] = (f"SPY {sma200_gap:+.1f}% below SMA200. "
+                                f"Backtest: 46% WR, -0.16% avg. Half size.")
 
-        # 5. ELEVATED: SPY below SMA50 but above SMA200 — normal pullback
+        # 7. BELOW SMA50 but above SMA200: Negative edge (50% WR, -0.30%)
         elif sma50_gap < 0:
-            result["regime"] = "CAUTION"
-            result["pause_entries"] = False
-            pct = 70 if vix > 25 else 80
-            result["position_size_pct"] = pct
-            result["reason"] = (f"SPY below SMA50 ({sma50_gap:+.1f}%), VIX {vix:.0f} — "
-                                f"pullback, {pct}% size")
+            result["regime"] = "PULLBACK"
+            result["pause_entries"] = True
+            result["position_size_pct"] = 0
+            result["reason"] = (f"SPY below SMA50 ({sma50_gap:+.1f}%). "
+                                f"Backtest: 50% WR, -0.30% avg. PAUSE entries.")
 
-        # 6. FEAR: VIX elevated but price structure OK
+        # 8. DIP BUY SWEET SPOT: -3% to -10% drawdown (60% WR, +4.09%)
+        elif drawdown < -3:
+            result["regime"] = "DIP_BUY"
+            result["pause_entries"] = False
+            result["position_size_pct"] = 100
+            result["reason"] = (f"Dip buy zone — SPY {drawdown:+.1f}% from peak. "
+                                f"Backtest: 60% WR, +4.09% avg. FULL SIZE.")
+
+        # 9. FEAR: VIX elevated but structure OK
         elif vix > 30:
             result["regime"] = "FEAR"
             result["pause_entries"] = False
             result["position_size_pct"] = 50
             result["reason"] = f"VIX {vix:.0f} elevated — half size entries"
 
-        # 7. HEALTHY: All clear
+        # 10. HEALTHY: All clear (54% WR, +1.68%)
         else:
             result["regime"] = "HEALTHY"
             result["pause_entries"] = False
             result["position_size_pct"] = 100
-            result["reason"] = f"VIX {vix:.0f}, SPY {drawdown:+.1f}% from peak — full size"
+            result["reason"] = f"Healthy — VIX {vix:.0f}, SPY {drawdown:+.1f}% from peak. Full size."
 
     except Exception as e:
         result["reason"] = str(e)
