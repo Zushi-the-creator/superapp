@@ -4602,14 +4602,22 @@ async def extended_hours_refresh_loop():
     await asyncio.sleep(30)
     print("[ExtHoursRefresh] Started (CNBC API)")
 
+    _first_run = True
     while True:
         try:
             session = _get_market_session()
-            if session not in ("PRE_MARKET", "AFTER_HOURS"):
+            if session == "REGULAR" and not _first_run:
+                # During market hours, clear ext cache — regular prices are live via Finnhub
                 if _extended_hours_cache:
                     _extended_hours_cache.clear()
                 await asyncio.sleep(120)
                 continue
+            if session == "CLOSED" and not _first_run:
+                # Keep last known ext prices (don't clear) but stop refreshing
+                await asyncio.sleep(120)
+                continue
+            # First run: always fetch once so we have prices after deploy/restart
+            # PRE_MARKET / AFTER_HOURS: keep refreshing every 60s
 
             positions = _position_mgr._get_open_positions_sync()
             if not positions:
@@ -4670,11 +4678,15 @@ async def extended_hours_refresh_loop():
             if updated:
                 prices = {t: f"${r['ext_price']:.2f} ({r['ext_change_pct']:+.2f}%)" for t, r in _extended_hours_cache.items()}
                 print(f"[ExtHoursRefresh] {session}: {updated}/{len(tickers)} updated: {prices}")
+            if _first_run:
+                print(f"[ExtHoursRefresh] Initial fetch done ({session}): {updated} prices cached")
+                _first_run = False
 
         except Exception as e:
             print(f"[ExtHoursRefresh] Error: {e}")
 
-        await asyncio.sleep(60)  # Refresh every 60s during extended hours
+        # During active ext hours: refresh every 60s. Otherwise: sleep longer.
+        await asyncio.sleep(60 if session in ("PRE_MARKET", "AFTER_HOURS") else 300)
 
 
 async def cache_refresh_loop():

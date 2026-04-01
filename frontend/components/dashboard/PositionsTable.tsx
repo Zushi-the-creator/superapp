@@ -128,13 +128,15 @@ const PositionRow = memo(function PositionRow({
           <span className={cn("text-xs", pnlColor(pos.day_change_pct))}>
             {formatPercent(pos.day_change_pct)}
           </span>
-          {/* Extended hours price (pre-market or after-hours) */}
-          {pos.ext_price != null && pos.ext_price > 0 && (
+          {/* Extended hours price (pre-market, after-hours, or last known) */}
+          {pos.ext_price != null && pos.ext_price > 0 && pos.market_session !== "REGULAR" && (
             <div className={cn(
               "text-[10px] mt-0.5 font-medium",
-              pos.market_session === "PRE_MARKET" ? "text-blue-400" : "text-amber-400"
+              pos.market_session === "PRE_MARKET" ? "text-blue-400" :
+              pos.market_session === "AFTER_HOURS" ? "text-amber-400" : "text-neutral-400"
             )}>
-              {pos.market_session === "PRE_MARKET" ? "PM" : "AH"} {formatCurrency(pos.ext_price)}{" "}
+              {pos.market_session === "PRE_MARKET" ? "PM" :
+               pos.market_session === "AFTER_HOURS" ? "AH" : "EXT"} {formatCurrency(pos.ext_price)}{" "}
               <span className={cn(pnlColor(pos.ext_change_pct ?? 0))}>
                 {(pos.ext_change_pct ?? 0) >= 0 ? "+" : ""}{(pos.ext_change_pct ?? 0).toFixed(2)}%
               </span>
