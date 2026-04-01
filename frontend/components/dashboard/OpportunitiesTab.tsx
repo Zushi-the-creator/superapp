@@ -111,8 +111,10 @@ export function OpportunitiesTab() {
         <div className="flex items-center gap-3 text-xs text-neutral-500 flex-wrap">
           {dataDate && (
             <span className={cn(cacheAge > 60 ? "text-signal-sell" : "text-neutral-500")}>
-              Data: <strong className={cacheAge > 60 ? "text-signal-sell" : "text-neutral-300"}>{dataDate}</strong>
-              {cacheAge > 0 && <span className="ml-1">({Math.round(cacheAge)}m ago)</span>}
+              Scan: <strong className={cacheAge > 60 ? "text-signal-sell" : "text-neutral-300"}>
+                {cacheAge < 1 ? "just now" : cacheAge < 60 ? `${Math.round(cacheAge)}m ago` : cacheAge < 1440 ? `${Math.round(cacheAge / 60)}h ago` : `${Math.round(cacheAge / 1440)}d ago`}
+              </strong>
+              <span className="ml-1 text-neutral-600">(data: {dataDate})</span>
             </span>
           )}
           <span className="text-neutral-700">|</span>
@@ -221,7 +223,6 @@ export function OpportunitiesTab() {
               </h3>
               <span className="text-xs text-neutral-500">
                 {combinedStats.mr} dip buys · {combinedStats.mom} breakouts · {combinedStats.both} both
-                · Prices: LIVE
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -243,9 +244,9 @@ export function OpportunitiesTab() {
                     </div>
                     <div className="text-right">
                       <span className="text-neutral-300 font-medium">{formatCurrency(sig.price)}</span>
-                      <span className={cn("text-[9px] ml-1", sig.price_is_live ? "text-signal-buy" : "text-signal-sell")}>
-                        {sig.price_is_live ? "LIVE" : "DELAYED"}
-                      </span>
+                      {!sig.price_is_live && (
+                        <span className="text-[9px] ml-1 text-signal-sell">DELAYED</span>
+                      )}
                     </div>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-xs">
