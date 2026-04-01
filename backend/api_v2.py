@@ -3031,6 +3031,81 @@ async def get_system_status():
     return {**_system_status, "timestamp": datetime.now().isoformat()}
 
 
+@router.get("/data/status")
+async def get_data_status():
+    """Data freshness dashboard — shows cache age, quote freshness, market session."""
+    from datetime import date as _date
+
+    today_str = _date.today().isoformat()
+
+    # 1. Historical cache freshness
+    positions = _position_mgr._get_open_positions_sync()
+    holding_tickers = [p["ticker"] for p in positions] if positions else []
+    cache_status = {}
+    stale_count = 0
+    for t in holding_tickers + ["SPY", "QQQ", "VIX"]:
+        df = _cache.get(t, 365)
+        is_fresh = _cache.is_fresh(t)
+        latest = str(df.index[-1].date()) if df is not None and len(df) > 0 else None
+        rows = len(df) if df is not None else 0
+        if not is_fresh:
+            stale_count += 1
+        cache_status[t] = {"latest": latest, "rows": rows, "fresh": is_fresh}
+
+    # 2. Live quote freshness
+    quote_status = {}
+    for t in holding_tickers:
+        q = _price_cache.get(t, {})
+        quote_status[t] = {
+            "price": q.get("price", 0),
+            "ts": q.get("ts", ""),
+            "age_sec": (datetime.now() - q["ts"]).total_seconds() if isinstance(q.get("ts"), datetime) else None,
+        }
+
+    # 3. Extended hours
+    ext_status = {}
+    session = _get_market_session()
+    for t in holding_tickers:
+        ext = _extended_hours_cache.get(t, {})
+        if ext:
+            ext_status[t] = {
+                "ext_price": ext.get("ext_price"),
+                "session": ext.get("session"),
+                "ts": ext.get("ts").isoformat() if isinstance(ext.get("ts"), datetime) else None,
+            }
+
+    # 4. Market regime
+    regime = _check_market_regime()
+
+    # 5. Scan cache age
+    scan_age_min = None
+    if _scan_cache_time:
+        scan_age_min = (datetime.now() - _scan_cache_time).total_seconds() / 60
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "today": today_str,
+        "market_session": session,
+        "cache": {
+            "stale_count": stale_count,
+            "total_checked": len(cache_status),
+            "tickers": cache_status,
+        },
+        "quotes": {
+            "cached_count": len([q for q in quote_status.values() if q["price"] > 0]),
+            "tickers": quote_status,
+        },
+        "extended_hours": {
+            "available": len(ext_status),
+            "session": session,
+            "tickers": ext_status,
+        },
+        "market_regime": regime,
+        "scan_cache_age_min": round(scan_age_min, 1) if scan_age_min else None,
+        "system": _system_status,
+    }
+
+
 @router.get("/scan/combined")
 async def get_combined_opportunities():
     """Fast unified entry signals — MR + Momentum evaluated against cached prices.
@@ -4646,9 +4721,8 @@ async def cache_refresh_loop():
                         pass
                     return 0
                 for _idx_ticker in ["SPY", "VIX"]:
-                    # Always fetch VIX/SPY on first run (old Stooq data may be stale/empty)
-                    existing = _cache.get(_idx_ticker, 365)
-                    need_fetch = existing is None or len(existing) < 20
+                    # Always fetch VIX/SPY on first run if stale or missing
+                    need_fetch = not _cache.is_fresh(_idx_ticker)
                     if need_fetch:
                         try:
                             n = await asyncio.wait_for(asyncio.to_thread(_fetch_index, _idx_ticker), timeout=15)

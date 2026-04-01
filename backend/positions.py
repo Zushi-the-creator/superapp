@@ -324,9 +324,15 @@ class PositionManager:
         finally:
             conn.close()
 
-        # Calculate days held
+        # Calculate days held (TRADING days to match backtest bars)
         entry_dt = datetime.strptime(position['entry_date'], '%Y-%m-%d')
-        days_held = (datetime.now() - entry_dt).days
+        from datetime import timedelta as _td
+        _entry_d = entry_dt.date() if hasattr(entry_dt, 'date') else entry_dt
+        _today_d = datetime.now().date()
+        days_held = sum(
+            1 for n in range((_today_d - _entry_d).days)
+            if (_entry_d + _td(days=n + 1)).weekday() < 5
+        )
 
         # Determine if entry was a good decision based on P&L
         was_good_entry = unrealized_pnl_pct > 5  # Profitable by >5%

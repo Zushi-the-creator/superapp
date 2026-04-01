@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { DataStatusBar } from "@/components/layout/DataStatusBar";
 import { PortfolioTab } from "@/components/dashboard/PortfolioTab";
 import { OpportunitiesTab } from "@/components/dashboard/OpportunitiesTab";
 import { PerformanceTab } from "@/components/dashboard/PerformanceTab";
@@ -18,13 +19,16 @@ export default function DashboardPage() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
       />
-      <main className="flex-1 overflow-hidden">
-        {activeTab === "portfolio" && <PortfolioTab />}
-        {activeTab === "opportunities" && <OpportunitiesTab />}
-        {activeTab === "performance" && <PerformanceTab />}
-        {activeTab === "sectors" && <SectorsTab />}
-        {activeTab === "history" && <HistoryTab />}
-      </main>
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <DataStatusBar />
+        <main className="flex-1 overflow-hidden">
+          {activeTab === "portfolio" && <PortfolioTab />}
+          {activeTab === "opportunities" && <OpportunitiesTab />}
+          {activeTab === "performance" && <PerformanceTab />}
+          {activeTab === "sectors" && <SectorsTab />}
+          {activeTab === "history" && <HistoryTab />}
+        </main>
+      </div>
     </div>
   );
 }
