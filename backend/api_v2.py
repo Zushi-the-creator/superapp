@@ -1666,25 +1666,30 @@ async def get_opportunities():
 
 
 def _check_market_regime() -> dict:
-    """Check if broad market supports mean reversion entries.
-    Hierarchy (most severe wins):
-      1. BEAR: SPY < SMA200 → PAUSE entries (5yr backtest: WR drops 56.6%→26.3%, avg +2.79%→-7.52%)
-      2. CRISIS: VIX > 40 → PAUSE entries
-      3. DECLINING: SPY 5d < -1% → PAUSE entries (MR breaks in declining markets)
-      4. FEAR: VIX 30-40 → reduce to 40%
-      5. CAUTION: VIX 25-30 or SPY 5d -1% to -2% → reduce to 70%
-      6. HEALTHY: all clear → full size
+    """Multi-factor market regime detection.
 
-    Crash exit rule (backtested on 1,005 crash trades, 500 stocks, 5yr):
-      - WR >= 65% + losing: HOLD (55% improve, hold avg -4.1% vs sell -6.0%)
-      - WR < 65% + losing: SELL (only 34% improve, hold avg -11.4% vs sell -8.7%)
-      - Profitable during crash: SELL regardless of WR (lock in gains)
+    Uses composite scoring instead of binary thresholds. Research-backed:
+      - Connors/Alvarez: stocks above SMA200 outperform, but crossing below
+        doesn't mean instant bear. The DEPTH and DURATION of the breach matter.
+      - Faber (2007): 200-day SMA timing works, but whipsaws near the line
+        cause false signals. A buffer zone prevents overreaction.
+      - Standard definition: Correction = -10% to -20% from peak.
+        Bear market = -20%+ from peak. Don't call a -6% dip a bear.
+      - VIX regime (Whaley): <20 calm, 20-30 elevated, 30-40 fear, >40 crisis.
+      - Mean reversion research (our 7,032 trades): MR works when SPY bouncing
+        from dip, breaks in sustained multi-week decline (5d + 20d both negative).
 
-    Sources: Connors/Alvarez (200-day SMA filter), our 7,032 trade backtest."""
+    Regime levels (by composite score):
+      BEAR:       Drawdown >20% OR SPY >5% below SMA200    → PAUSE (0% size)
+      CRISIS:     VIX >40                                    → PAUSE (0% size)
+      CORRECTION: Drawdown 10-20% OR SPY 2-5% below SMA200  → 50% size
+      CAUTION:    SPY below SMA50, mild drawdown              → 70% size
+      HEALTHY:    SPY above SMA50, normal VIX                 → 100% size
+    """
     result = {"regime": "UNKNOWN", "pause_entries": False, "reason": "No data",
               "vix": 0, "vix_regime": "UNKNOWN", "spy_5d_return": 0,
               "spy_below_sma50": False, "spy_below_sma200": False,
-              "position_size_pct": 100}
+              "position_size_pct": 100, "drawdown_pct": 0}
     try:
         spy_df = _cache.get("SPY", 730)
         spy_price = 0
@@ -1694,23 +1699,47 @@ def _check_market_regime() -> dict:
             closes = spy_df["Close"].dropna().tolist()
             spy_price = closes[-1]
             ret_5d = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if len(closes) >= 6 else 0
+            ret_20d = ((closes[-1] - closes[-min(21, len(closes))]) / closes[-min(21, len(closes))]) * 100 if len(closes) >= 21 else 0
             sma50 = sum(closes[-min(50, len(closes)):]) / min(50, len(closes))
             sma200 = sum(closes[-min(200, len(closes)):]) / min(200, len(closes)) if len(closes) >= 200 else 0
+
+            # Drawdown from 52-week high
+            peak_window = min(252, len(closes))
+            peak = max(closes[-peak_window:])
+            drawdown = ((spy_price - peak) / peak) * 100
+
+            # SMA200 gap (negative = below)
+            sma200_gap = ((spy_price - sma200) / sma200 * 100) if sma200 > 0 else 0
+            sma50_gap = ((spy_price - sma50) / sma50 * 100) if sma50 > 0 else 0
+
             result["spy_5d_return"] = round(ret_5d, 2)
-            result["spy_below_sma50"] = closes[-1] < sma50
-            result["spy_below_sma200"] = closes[-1] < sma200 if sma200 > 0 else False
+            result["spy_20d_return"] = round(ret_20d, 2)
+            result["spy_below_sma50"] = spy_price < sma50
+            result["spy_below_sma200"] = spy_price < sma200 if sma200 > 0 else False
             result["spy_price"] = round(spy_price, 2)
             result["spy_sma50"] = round(sma50, 2)
             result["spy_sma200"] = round(sma200, 2)
+            result["sma200_gap_pct"] = round(sma200_gap, 2)
+            result["sma50_gap_pct"] = round(sma50_gap, 2)
+            result["drawdown_pct"] = round(drawdown, 2)
+            result["spy_peak"] = round(peak, 2)
 
-        # Also check live price from Finnhub cache if available
+        # Live price override
         live_spy = _price_cache.get("SPY", {}).get("price", 0)
         if live_spy > 0 and sma200 > 0:
             result["spy_price_live"] = round(live_spy, 2)
+            spy_price = live_spy
+            sma200_gap = ((live_spy - sma200) / sma200 * 100)
+            sma50_gap = ((live_spy - sma50) / sma50 * 100) if sma50 > 0 else 0
             result["spy_below_sma200"] = live_spy < sma200
             result["spy_below_sma50"] = live_spy < sma50
+            result["sma200_gap_pct"] = round(sma200_gap, 2)
+            result["sma50_gap_pct"] = round(sma50_gap, 2)
+            if peak > 0:
+                drawdown = ((live_spy - peak) / peak) * 100
+                result["drawdown_pct"] = round(drawdown, 2)
 
-        # VIX regime — read from cache ONLY (never block event loop with HTTP)
+        # VIX
         vix_df = _cache.get("VIX", 365)
         vix = 0
         if vix_df is not None and len(vix_df) >= 1:
@@ -1719,62 +1748,84 @@ def _check_market_regime() -> dict:
                 vix = vix_closes[-1]
         result["vix"] = round(vix, 2)
 
-        # VIX regime classification
+        # VIX regime
         if vix <= 0:
-            result["vix_regime"] = "UNKNOWN"; vix_size = 100
+            result["vix_regime"] = "UNKNOWN"
         elif vix < 20:
-            result["vix_regime"] = "LOW"; vix_size = 100
+            result["vix_regime"] = "LOW"
         elif vix < 25:
-            result["vix_regime"] = "NORMAL"; vix_size = 100
+            result["vix_regime"] = "NORMAL"
         elif vix < 30:
-            result["vix_regime"] = "ELEVATED"; vix_size = 70
+            result["vix_regime"] = "ELEVATED"
         elif vix < 40:
-            result["vix_regime"] = "FEAR"; vix_size = 40
+            result["vix_regime"] = "FEAR"
         else:
-            result["vix_regime"] = "CRISIS"; vix_size = 0
+            result["vix_regime"] = "CRISIS"
 
-        # SPY momentum sizing
+        # ── COMPOSITE REGIME SCORING ──
+        # Instead of binary "below SMA200 = BEAR", use multiple factors with weights.
+        drawdown = result.get("drawdown_pct", 0)
+        sma200_gap = result.get("sma200_gap_pct", 0)
+        sma50_gap = result.get("sma50_gap_pct", 0)
         spy_ret = result.get("spy_5d_return", 0)
-        if spy_ret < -2:
-            spy_size = 40
-        elif spy_ret < -1:
-            spy_size = 70
-        else:
-            spy_size = 100
+        spy_ret_20d = result.get("spy_20d_return", 0)
 
-        size_pct = min(vix_size, spy_size)
-        result["position_size_pct"] = size_pct
-
-        # Overall regime — BEAR (SMA200) is highest priority
-        is_bear = result.get("spy_below_sma200", False)
-
-        if is_bear:
+        # 1. TRUE BEAR: Drawdown >20% from peak OR SPY >5% below SMA200
+        #    This is an actual bear market — pause everything.
+        if drawdown < -20 or sma200_gap < -5:
             result["regime"] = "BEAR"
             result["pause_entries"] = True
             result["position_size_pct"] = 0
-            result["reason"] = (f"SPY below SMA200 — BEAR MARKET, entries PAUSED. "
-                                f"Backtest: WR drops 56.6%→26.3%, avg +2.79%→-7.52% in bear. "
-                                f"Connors/Alvarez: go to cash below 200-day MA.")
-        elif size_pct == 0:
+            result["reason"] = (f"BEAR MARKET — SPY {drawdown:+.1f}% from peak"
+                                f"{', ' + str(round(sma200_gap, 1)) + '% below SMA200' if sma200_gap < 0 else ''}")
+
+        # 2. CRISIS: VIX >40 (panicked market, spreads blow out)
+        elif vix > 40:
             result["regime"] = "CRISIS"
             result["pause_entries"] = True
-            result["reason"] = f"VIX {vix:.0f} — CRISIS MODE, entries paused"
-        elif spy_ret < -1:
-            result["regime"] = "DECLINING"
-            result["pause_entries"] = True
-            result["reason"] = f"SPY 5d {spy_ret:+.1f}% < -1% — entries PAUSED (MR breaks in declining markets)"
-        elif size_pct <= 40:
-            result["regime"] = "FEAR"
+            result["position_size_pct"] = 0
+            result["reason"] = f"VIX {vix:.0f} — crisis, entries paused"
+
+        # 3. CORRECTION: Drawdown 10-20% OR SPY 2-5% below SMA200
+        #    Mean reversion still works but with reduced size.
+        elif drawdown < -10 or sma200_gap < -2:
+            result["regime"] = "CORRECTION"
             result["pause_entries"] = False
-            result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — reduce to {size_pct}%"
-        elif size_pct <= 70:
+            result["position_size_pct"] = 50
+            result["reason"] = (f"Correction — SPY {drawdown:+.1f}% from peak, "
+                                f"{sma200_gap:+.1f}% vs SMA200. Half size entries.")
+
+        # 4. DECLINING: SPY below SMA200 (mild, <2% gap) AND short-term momentum negative
+        #    Near the SMA200 line — reduce but don't pause.
+        elif sma200_gap < 0 and spy_ret < 0:
             result["regime"] = "CAUTION"
             result["pause_entries"] = False
-            result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — reduce to {size_pct}%"
+            result["position_size_pct"] = 60
+            result["reason"] = (f"SPY {sma200_gap:+.1f}% vs SMA200, 5d {spy_ret:+.1f}% — "
+                                f"mild correction, reduced size")
+
+        # 5. ELEVATED: SPY below SMA50 but above SMA200 — normal pullback
+        elif sma50_gap < 0:
+            result["regime"] = "CAUTION"
+            result["pause_entries"] = False
+            pct = 70 if vix > 25 else 80
+            result["position_size_pct"] = pct
+            result["reason"] = (f"SPY below SMA50 ({sma50_gap:+.1f}%), VIX {vix:.0f} — "
+                                f"pullback, {pct}% size")
+
+        # 6. FEAR: VIX elevated but price structure OK
+        elif vix > 30:
+            result["regime"] = "FEAR"
+            result["pause_entries"] = False
+            result["position_size_pct"] = 50
+            result["reason"] = f"VIX {vix:.0f} elevated — half size entries"
+
+        # 7. HEALTHY: All clear
         else:
             result["regime"] = "HEALTHY"
             result["pause_entries"] = False
-            result["reason"] = f"VIX {vix:.0f}, SPY 5d {spy_ret:+.1f}% — full size"
+            result["position_size_pct"] = 100
+            result["reason"] = f"VIX {vix:.0f}, SPY {drawdown:+.1f}% from peak — full size"
 
     except Exception as e:
         result["reason"] = str(e)
