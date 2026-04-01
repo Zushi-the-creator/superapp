@@ -27,7 +27,8 @@ from typing import Optional, List, Dict
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'stock_cache.db')
 POLYGON_KEY = os.environ.get("POLYGON_API_KEY", "")
-TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "")
+TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
+IS_FLY = bool(os.environ.get("FLY_APP_NAME"))
 FMP_KEY = os.environ.get("FMP_API_KEY", "")
 
 
@@ -200,9 +201,10 @@ class DataCache:
     # ── Tiingo Fetch ──
 
     async def _fetch_tiingo(self, session: aiohttp.ClientSession,
-                            ticker: str, days: int = 800,
+                            ticker: str, days: int = 400,
                             min_rows: int = 0) -> Optional[pd.DataFrame]:
-        """Fetch from Tiingo API (500 req/hr free tier). Returns None on rate limit.
+        """Fetch from Tiingo API. Full access: 10K req/hr, 100K req/day, 40GB/mo.
+        IMPORTANT: Use days=10 for refresh, days=400 for populate (saves bandwidth).
         min_rows: minimum rows required (0 = use 50 for full fetch, 1 for refresh)."""
         start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         end = datetime.now().strftime('%Y-%m-%d')
@@ -379,15 +381,12 @@ class DataCache:
 
     async def populate(self, tickers: List[str], force: bool = False) -> Dict:
         """
-        Multi-source parallel populate using ALL free APIs simultaneously.
+        Multi-source parallel populate.
 
-        Strategy: Split tickers across sources for maximum throughput.
-        - yfinance: Bulk batches of 20 (no rate limit, ~200/min)
-        - Polygon: 5/min free tier (slow but reliable)
-        - Tiingo: 500/hr (~8/min)
-        - FMP: 250/day (~4/min)
-        - Stooq: Unlimited, no API key (final fallback)
-        Fallback chain: yfinance → Polygon → Tiingo → FMP → Stooq
+        Strategy: Tiingo PRIMARY (full access, high concurrency), yfinance fallback.
+        - Tiingo: Full access (~500+/hr, 50 concurrent) — PRIMARY
+        - yfinance: Bulk batches of 20 — FALLBACK (skipped on Fly.io where it's blocked)
+        - Stooq/Polygon/FMP: Final fallback for remaining failures
         """
         import time
         tickers = [t.upper() for t in tickers]
@@ -398,55 +397,102 @@ class DataCache:
             print(f'[CACHE] All {len(tickers)} tickers already cached')
             return {'fetched': 0, 'cached': len(cached), 'failed': 0}
 
-        print(f'[CACHE] Multi-source fetch: {len(to_fetch)} tickers '
+        print(f'[CACHE] Populate: {len(to_fetch)} tickers to fetch '
               f'({len(cached)} already cached)')
-        print(f'  Sources: yfinance (bulk) + Polygon (5/min) + Tiingo (8/min) + FMP (4/min) + Stooq (unlimited)')
+        if IS_FLY:
+            print(f'  Fly.io detected — skipping yfinance, Tiingo primary')
+        print(f'  Sources: Tiingo (primary, 50 concurrent) → yfinance (fallback) → Stooq/Polygon/FMP')
 
         fetched = 0
         failed_tickers = set()
         fetched_tickers = set()
         start_time = time.time()
 
-        # Phase 1: yfinance bulk (fastest - handles most tickers)
-        print(f'\n  [Phase 1] yfinance bulk fetch...')
-        loop = asyncio.get_running_loop()
-        yf_batch_size = 20
-
-        for i in range(0, len(to_fetch), yf_batch_size):
-            batch = to_fetch[i:i + yf_batch_size]
-            try:
-                results = await loop.run_in_executor(
-                    None, self._fetch_yfinance_batch, batch)
-                for ticker, df in results.items():
-                    self.store(ticker, df)
-                    fetched_tickers.add(ticker)
-                    fetched += 1
-            except Exception:
-                pass
-
-            done = min(i + yf_batch_size, len(to_fetch))
-            elapsed = time.time() - start_time
-            rate = fetched / elapsed * 60 if elapsed > 0 else 0
-            if done % 100 == 0 or done == len(to_fetch):
-                print(f'    [{done}/{len(to_fetch)}] OK: {fetched} | '
-                      f'{elapsed:.0f}s | ~{rate:.0f}/min')
-
-        print(f'  [Phase 1] yfinance: {fetched} fetched')
-
-        # Phase 2: Stooq-first fast path for remaining tickers
-        # Stooq is unlimited with no API key — perfect for bulk population.
-        # Only fall back to Polygon/Tiingo/FMP if Stooq fails AND keys exist.
-        remaining = [t for t in to_fetch if t not in fetched_tickers]
-        if remaining:
-            has_api_keys = bool(POLYGON_KEY or TIINGO_KEY or FMP_KEY)
-            print(f'\n  [Phase 2] Stooq fast-path for {len(remaining)} remaining...')
-
-            api_fetched = 0
-            stooq_sem = asyncio.Semaphore(10)  # 10 concurrent Stooq requests
+        # Phase 1: Tiingo bulk (PRIMARY — 20 concurrent to stay under 10K/hr)
+        # Full access: 10K req/hr, 100K/day, 40GB/mo
+        # 400 days history for populate (enough for SMA200 + backtest)
+        if TIINGO_KEY:
+            print(f'\n  [Phase 1] Tiingo bulk fetch ({len(to_fetch)} tickers, 20 concurrent, 400d)...')
+            tiingo_sem = asyncio.Semaphore(20)
+            tiingo_fetched = 0
 
             async with aiohttp.ClientSession() as session:
-                async def fetch_stooq_fast(ticker):
+                async def fetch_tiingo_one(ticker):
+                    nonlocal tiingo_fetched
+                    async with tiingo_sem:
+                        result = await self._fetch_tiingo(session, ticker, days=400)
+                        if isinstance(result, pd.DataFrame):
+                            self.store(ticker, result)
+                            tiingo_fetched += 1
+                            fetched_tickers.add(ticker)
+
+                # Process in batches of 100 for progress reporting
+                for i in range(0, len(to_fetch), 100):
+                    batch = to_fetch[i:i + 100]
+                    await asyncio.gather(*[fetch_tiingo_one(t) for t in batch])
+                    done = min(i + 100, len(to_fetch))
+                    elapsed = time.time() - start_time
+                    rate = tiingo_fetched / elapsed * 60 if elapsed > 0 else 0
+                    remaining_count = len(to_fetch) - done
+                    eta_min = remaining_count / rate if rate > 0 else 0
+                    print(f'    [{done}/{len(to_fetch)}] OK: {tiingo_fetched} | '
+                          f'{elapsed:.0f}s | ~{rate:.0f}/min | ETA: {eta_min:.1f}min')
+
+            fetched += tiingo_fetched
+            print(f'  [Phase 1] Tiingo: {tiingo_fetched} fetched')
+
+        # Phase 2: yfinance fallback (skipped on Fly.io where it's blocked)
+        remaining = [t for t in to_fetch if t not in fetched_tickers]
+        if remaining and not IS_FLY:
+            print(f'\n  [Phase 2] yfinance fallback for {len(remaining)} remaining...')
+            loop = asyncio.get_running_loop()
+            yf_batch_size = 20
+            yf_fetched = 0
+            yf_consecutive_failures = 0
+
+            for i in range(0, len(remaining), yf_batch_size):
+                batch = remaining[i:i + yf_batch_size]
+                batch_before = yf_fetched
+                try:
+                    results = await loop.run_in_executor(
+                        None, self._fetch_yfinance_batch, batch)
+                    for ticker, df in results.items():
+                        self.store(ticker, df)
+                        fetched_tickers.add(ticker)
+                        yf_fetched += 1
+                except Exception:
+                    pass
+
+                if yf_fetched == batch_before:
+                    yf_consecutive_failures += 1
+                else:
+                    yf_consecutive_failures = 0
+
+                if yf_consecutive_failures >= 3:
+                    print(f'    yfinance blocked (3 consecutive failed batches). Skipping.')
+                    break
+
+                done = min(i + yf_batch_size, len(remaining))
+                elapsed = time.time() - start_time
+                rate = yf_fetched / elapsed * 60 if elapsed > 0 else 0
+                if done % 100 == 0 or done == len(remaining):
+                    print(f'    [{done}/{len(remaining)}] yfinance OK: {yf_fetched} | '
+                          f'{elapsed:.0f}s | ~{rate:.0f}/min')
+
+            fetched += yf_fetched
+            print(f'  [Phase 2] yfinance: {yf_fetched} fetched')
+
+        # Phase 3: Stooq/Polygon/FMP fallback for anything still missing
+        remaining = [t for t in to_fetch if t not in fetched_tickers]
+        if remaining:
+            print(f'\n  [Phase 3] Stooq/API fallback for {len(remaining)} remaining...')
+            api_fetched = 0
+            stooq_sem = asyncio.Semaphore(10)
+
+            async with aiohttp.ClientSession() as session:
+                async def fetch_fallback(ticker):
                     nonlocal api_fetched
+                    # Try Stooq first (unlimited, no key)
                     async with stooq_sem:
                         result = await self._fetch_stooq(session, ticker)
                         if isinstance(result, pd.DataFrame):
@@ -454,69 +500,35 @@ class DataCache:
                             api_fetched += 1
                             fetched_tickers.add(ticker)
                             return
-                        await asyncio.sleep(0.5)
+                    # Try Polygon
+                    if POLYGON_KEY:
+                        result = await self._fetch_polygon(session, ticker)
+                        if isinstance(result, pd.DataFrame):
+                            self.store(ticker, result)
+                            api_fetched += 1
+                            fetched_tickers.add(ticker)
+                            return
+                    # Try FMP
+                    if FMP_KEY:
+                        result = await self._fetch_fmp(session, ticker)
+                        if isinstance(result, pd.DataFrame):
+                            self.store(ticker, result)
+                            api_fetched += 1
+                            fetched_tickers.add(ticker)
+                            return
                     failed_tickers.add(ticker)
 
-                # Process in batches of 20 with concurrent Stooq fetches
-                for i in range(0, len(remaining), 20):
-                    batch = remaining[i:i + 20]
-                    await asyncio.gather(*[fetch_stooq_fast(t) for t in batch])
-                    done = min(i + 20, len(remaining))
+                for i in range(0, len(remaining), 50):
+                    batch = remaining[i:i + 50]
+                    await asyncio.gather(*[fetch_fallback(t) for t in batch])
+                    done = min(i + 50, len(remaining))
                     elapsed = time.time() - start_time
-                    rate = api_fetched / elapsed * 60 if elapsed > 0 else 0
                     if done % 100 == 0 or done == len(remaining):
-                        print(f'    [{done}/{len(remaining)}] Stooq: {api_fetched} OK | '
-                              f'{len(failed_tickers)} failed | {elapsed:.0f}s | ~{rate:.0f}/min')
-                    await asyncio.sleep(1)  # Brief pause between batches
-
-            # Phase 3: API fallback for Stooq failures (only if API keys configured)
-            stooq_failed = list(failed_tickers)
-            if stooq_failed and has_api_keys:
-                print(f'\n  [Phase 3] API fallback for {len(stooq_failed)} Stooq failures...')
-                polygon_sem = asyncio.Semaphore(1)
-                tiingo_sem = asyncio.Semaphore(2)
-                fmp_sem = asyncio.Semaphore(1)
-
-                async with aiohttp.ClientSession() as session:
-                    async def fetch_with_api(ticker):
-                        nonlocal api_fetched
-                        if POLYGON_KEY:
-                            async with polygon_sem:
-                                result = await self._fetch_polygon(session, ticker)
-                                if isinstance(result, pd.DataFrame):
-                                    self.store(ticker, result)
-                                    api_fetched += 1
-                                    fetched_tickers.add(ticker)
-                                    failed_tickers.discard(ticker)
-                                    return
-                                await asyncio.sleep(12)
-                        if TIINGO_KEY:
-                            async with tiingo_sem:
-                                result = await self._fetch_tiingo(session, ticker)
-                                if isinstance(result, pd.DataFrame):
-                                    self.store(ticker, result)
-                                    api_fetched += 1
-                                    fetched_tickers.add(ticker)
-                                    failed_tickers.discard(ticker)
-                                    return
-                                await asyncio.sleep(7)
-                        if FMP_KEY:
-                            async with fmp_sem:
-                                result = await self._fetch_fmp(session, ticker)
-                                if isinstance(result, pd.DataFrame):
-                                    self.store(ticker, result)
-                                    api_fetched += 1
-                                    fetched_tickers.add(ticker)
-                                    failed_tickers.discard(ticker)
-                                    return
-                                await asyncio.sleep(15)
-
-                    for i in range(0, len(stooq_failed), 10):
-                        batch = stooq_failed[i:i + 10]
-                        await asyncio.gather(*[fetch_with_api(t) for t in batch])
+                        print(f'    [{done}/{len(remaining)}] Fallback OK: {api_fetched} | '
+                              f'Failed: {len(failed_tickers)} | {elapsed:.0f}s')
 
             fetched += api_fetched
-            print(f'  [Phase 2] Total: {api_fetched} fetched, {len(failed_tickers)} failed')
+            print(f'  [Phase 3] Fallback: {api_fetched} fetched, {len(failed_tickers)} failed')
 
         elapsed = time.time() - start_time
         print(f'\n[CACHE] Done in {elapsed:.0f}s: {fetched} fetched, '
@@ -563,8 +575,9 @@ class DataCache:
         """
         Multi-source parallel refresh for all stale tickers.
 
-        Strategy: yfinance bulk (5-day window) for speed, API fallback for failures.
-        ~3,000 tickers in ~10-15 minutes vs 6+ hours with old single-source method.
+        Strategy: Tiingo PRIMARY (50 concurrent, full access), yfinance fallback.
+        On Fly.io: skip yfinance entirely (blocked).
+        ~3,000 tickers in ~5-10 minutes with Tiingo full access.
         """
         import time
 
@@ -577,102 +590,126 @@ class DataCache:
             print('[CACHE] All tickers already up to date')
             return {'refreshed': 0, 'failed': 0}
 
-        print(f'[CACHE] Multi-source refresh: {len(stale)} stale tickers')
+        print(f'[CACHE] Refresh: {len(stale)} stale tickers')
+        if IS_FLY:
+            print(f'  Fly.io detected — Tiingo only (skipping yfinance)')
         start_time = time.time()
         refreshed = 0
         refreshed_tickers = set()
         failed_tickers = set()
 
-        # Phase 1: yfinance bulk (fast - 20 tickers per batch, 5-day window)
-        # Fast-fail: if first 3 batches get 0 results, yfinance is blocked → skip to APIs
-        print(f'  [Phase 1] yfinance bulk refresh (5-day window)...')
-        loop = asyncio.get_running_loop()
-        batch_size = 20
-        yf_consecutive_failures = 0
-
-        for i in range(0, len(stale), batch_size):
-            batch = stale[i:i + batch_size]
-            batch_before = refreshed
-            try:
-                results = await loop.run_in_executor(
-                    None, self._refresh_yfinance_batch, batch)
-                for ticker, df in results.items():
-                    self.store(ticker, df)
-                    refreshed_tickers.add(ticker)
-                    refreshed += 1
-            except Exception:
-                pass
-
-            if refreshed == batch_before:
-                yf_consecutive_failures += 1
-            else:
-                yf_consecutive_failures = 0
-
-            # Fast-fail: 3 consecutive batches with 0 results = yfinance blocked
-            if yf_consecutive_failures >= 3:
-                print(f'  [Phase 1] yfinance blocked (3 consecutive failed batches). Skipping to APIs.')
-                break
-
-            done = min(i + batch_size, len(stale))
-            elapsed = time.time() - start_time
-            rate = refreshed / elapsed * 60 if elapsed > 0 else 0
-            if done % 200 == 0 or done == len(stale):
-                print(f'    [{done}/{len(stale)}] Refreshed: {refreshed} | '
-                      f'{elapsed:.0f}s | ~{rate:.0f}/min')
-
-        print(f'  [Phase 1] yfinance: {refreshed} refreshed')
-
-        # Phase 2: API fallback (Tiingo primary → Polygon → Stooq)
-        # Tiingo: 500/hr = ~8/min. With 10 concurrent = ~80/min → 3000 tickers in ~37 min
-        remaining = [t for t in stale if t not in refreshed_tickers]
-        if remaining:
-            print(f'  [Phase 2] API fallback for {len(remaining)} remaining...')
-            api_refreshed = 0
+        # Phase 1: Tiingo bulk refresh (PRIMARY — 20 concurrent, 10-day window)
+        # 10-day window = minimal bandwidth (~0.5KB per ticker vs ~20KB for full history)
+        if TIINGO_KEY:
+            print(f'  [Phase 1] Tiingo refresh ({len(stale)} tickers, 20 concurrent, 10d)...')
+            tiingo_refreshed = 0
+            tiingo_sem = asyncio.Semaphore(20)
 
             async with aiohttp.ClientSession() as session:
-                sem = asyncio.Semaphore(10)  # 10 concurrent requests
-
-                async def refresh_one(ticker):
-                    nonlocal api_refreshed
-                    async with sem:
-                        # Try Tiingo first (500/hr, reliable from cloud IPs)
+                async def refresh_tiingo(ticker):
+                    nonlocal tiingo_refreshed
+                    async with tiingo_sem:
                         result = await self._fetch_tiingo(session, ticker, days=10, min_rows=1)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
-                            api_refreshed += 1
+                            tiingo_refreshed += 1
                             refreshed_tickers.add(ticker)
-                            return
-                        await asyncio.sleep(0.5)
 
-                        # Try Polygon (5/min free tier, but works)
-                        result = await self._fetch_polygon(session, ticker)
-                        if isinstance(result, pd.DataFrame):
-                            self.store(ticker, result)
-                            api_refreshed += 1
-                            refreshed_tickers.add(ticker)
-                            return
+                for i in range(0, len(stale), 100):
+                    batch = stale[i:i + 100]
+                    await asyncio.gather(*[refresh_tiingo(t) for t in batch])
+                    done = min(i + 100, len(stale))
+                    elapsed = time.time() - start_time
+                    rate = tiingo_refreshed / elapsed * 60 if elapsed > 0 else 0
+                    remaining_count = len(stale) - done
+                    eta_min = remaining_count / rate if rate > 0 else 0
+                    print(f'    [{done}/{len(stale)}] OK: {tiingo_refreshed} | '
+                          f'{elapsed:.0f}s | ~{rate:.0f}/min | ETA: {eta_min:.1f}min')
 
-                        # Try Stooq (unlimited, no API key — may be blocked on Fly.io)
+            refreshed += tiingo_refreshed
+            print(f'  [Phase 1] Tiingo: {tiingo_refreshed} refreshed')
+
+        # Phase 2: yfinance fallback (skipped on Fly.io)
+        remaining = [t for t in stale if t not in refreshed_tickers]
+        if remaining and not IS_FLY:
+            print(f'  [Phase 2] yfinance fallback for {len(remaining)} remaining...')
+            loop = asyncio.get_running_loop()
+            batch_size = 20
+            yf_refreshed = 0
+            yf_consecutive_failures = 0
+
+            for i in range(0, len(remaining), batch_size):
+                batch = remaining[i:i + batch_size]
+                batch_before = yf_refreshed
+                try:
+                    results = await loop.run_in_executor(
+                        None, self._refresh_yfinance_batch, batch)
+                    for ticker, df in results.items():
+                        self.store(ticker, df)
+                        refreshed_tickers.add(ticker)
+                        yf_refreshed += 1
+                except Exception:
+                    pass
+
+                if yf_refreshed == batch_before:
+                    yf_consecutive_failures += 1
+                else:
+                    yf_consecutive_failures = 0
+
+                if yf_consecutive_failures >= 3:
+                    print(f'    yfinance blocked (3 consecutive failed batches). Skipping.')
+                    break
+
+                done = min(i + batch_size, len(remaining))
+                elapsed = time.time() - start_time
+                rate = yf_refreshed / elapsed * 60 if elapsed > 0 else 0
+                if done % 200 == 0 or done == len(remaining):
+                    print(f'    [{done}/{len(remaining)}] yfinance OK: {yf_refreshed} | '
+                          f'{elapsed:.0f}s | ~{rate:.0f}/min')
+
+            refreshed += yf_refreshed
+            print(f'  [Phase 2] yfinance: {yf_refreshed} refreshed')
+
+        # Phase 3: Stooq/Polygon fallback for remaining
+        remaining = [t for t in stale if t not in refreshed_tickers]
+        if remaining:
+            print(f'  [Phase 3] Stooq/API fallback for {len(remaining)} remaining...')
+            api_refreshed = 0
+
+            async with aiohttp.ClientSession() as session:
+                sem = asyncio.Semaphore(10)
+
+                async def refresh_fallback(ticker):
+                    nonlocal api_refreshed
+                    async with sem:
+                        # Stooq (unlimited, no key)
                         result = await self._fetch_stooq(session, ticker, days=10)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
                             api_refreshed += 1
                             refreshed_tickers.add(ticker)
                             return
-
+                        # Polygon
+                        if POLYGON_KEY:
+                            result = await self._fetch_polygon(session, ticker)
+                            if isinstance(result, pd.DataFrame):
+                                self.store(ticker, result)
+                                api_refreshed += 1
+                                refreshed_tickers.add(ticker)
+                                return
                         failed_tickers.add(ticker)
 
                 for i in range(0, len(remaining), 50):
                     batch = remaining[i:i + 50]
-                    await asyncio.gather(*[refresh_one(t) for t in batch])
+                    await asyncio.gather(*[refresh_fallback(t) for t in batch])
                     done = min(i + 50, len(remaining))
                     elapsed = time.time() - start_time
                     if done % 100 == 0 or done == len(remaining):
-                        print(f'    [{done}/{len(remaining)}] API refreshed: {api_refreshed} | '
+                        print(f'    [{done}/{len(remaining)}] Fallback OK: {api_refreshed} | '
                               f'Failed: {len(failed_tickers)} | {elapsed:.0f}s')
 
             refreshed += api_refreshed
-            print(f'  [Phase 2] APIs: {api_refreshed} refreshed, {len(failed_tickers)} failed')
+            print(f'  [Phase 3] Fallback: {api_refreshed} refreshed, {len(failed_tickers)} failed')
 
         elapsed = time.time() - start_time
         print(f'\n[CACHE] Refresh done in {elapsed:.0f}s: {refreshed} refreshed, '
