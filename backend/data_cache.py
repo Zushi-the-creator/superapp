@@ -584,12 +584,15 @@ class DataCache:
         failed_tickers = set()
 
         # Phase 1: yfinance bulk (fast - 20 tickers per batch, 5-day window)
+        # Fast-fail: if first 3 batches get 0 results, yfinance is blocked → skip to APIs
         print(f'  [Phase 1] yfinance bulk refresh (5-day window)...')
         loop = asyncio.get_running_loop()
         batch_size = 20
+        yf_consecutive_failures = 0
 
         for i in range(0, len(stale), batch_size):
             batch = stale[i:i + batch_size]
+            batch_before = refreshed
             try:
                 results = await loop.run_in_executor(
                     None, self._refresh_yfinance_batch, batch)
@@ -600,6 +603,16 @@ class DataCache:
             except Exception:
                 pass
 
+            if refreshed == batch_before:
+                yf_consecutive_failures += 1
+            else:
+                yf_consecutive_failures = 0
+
+            # Fast-fail: 3 consecutive batches with 0 results = yfinance blocked
+            if yf_consecutive_failures >= 3:
+                print(f'  [Phase 1] yfinance blocked (3 consecutive failed batches). Skipping to APIs.')
+                break
+
             done = min(i + batch_size, len(stale))
             elapsed = time.time() - start_time
             rate = refreshed / elapsed * 60 if elapsed > 0 else 0
@@ -609,28 +622,29 @@ class DataCache:
 
         print(f'  [Phase 1] yfinance: {refreshed} refreshed')
 
-        # Phase 2: API fallback for yfinance failures
+        # Phase 2: API fallback (Tiingo primary → Polygon → Stooq)
+        # Tiingo: 500/hr = ~8/min. With 10 concurrent = ~80/min → 3000 tickers in ~37 min
         remaining = [t for t in stale if t not in refreshed_tickers]
         if remaining:
             print(f'  [Phase 2] API fallback for {len(remaining)} remaining...')
             api_refreshed = 0
 
             async with aiohttp.ClientSession() as session:
-                sem = asyncio.Semaphore(5)
+                sem = asyncio.Semaphore(10)  # 10 concurrent requests
 
                 async def refresh_one(ticker):
                     nonlocal api_refreshed
                     async with sem:
-                        # Try Tiingo (best for incremental updates)
+                        # Try Tiingo first (500/hr, reliable from cloud IPs)
                         result = await self._fetch_tiingo(session, ticker, days=10, min_rows=1)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
                             api_refreshed += 1
                             refreshed_tickers.add(ticker)
                             return
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5)
 
-                        # Try Polygon
+                        # Try Polygon (5/min free tier, but works)
                         result = await self._fetch_polygon(session, ticker)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
@@ -638,7 +652,7 @@ class DataCache:
                             refreshed_tickers.add(ticker)
                             return
 
-                        # Try Stooq (unlimited, no API key)
+                        # Try Stooq (unlimited, no API key — may be blocked on Fly.io)
                         result = await self._fetch_stooq(session, ticker, days=10)
                         if isinstance(result, pd.DataFrame):
                             self.store(ticker, result)
@@ -648,13 +662,14 @@ class DataCache:
 
                         failed_tickers.add(ticker)
 
-                for i in range(0, len(remaining), 20):
-                    batch = remaining[i:i + 20]
+                for i in range(0, len(remaining), 50):
+                    batch = remaining[i:i + 50]
                     await asyncio.gather(*[refresh_one(t) for t in batch])
-                    done = min(i + 20, len(remaining))
+                    done = min(i + 50, len(remaining))
+                    elapsed = time.time() - start_time
                     if done % 100 == 0 or done == len(remaining):
                         print(f'    [{done}/{len(remaining)}] API refreshed: {api_refreshed} | '
-                              f'Failed: {len(failed_tickers)}')
+                              f'Failed: {len(failed_tickers)} | {elapsed:.0f}s')
 
             refreshed += api_refreshed
             print(f'  [Phase 2] APIs: {api_refreshed} refreshed, {len(failed_tickers)} failed')
