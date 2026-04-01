@@ -12,35 +12,44 @@ MIN_TICKERS = 500  # If volume DB has fewer tickers, re-seed
 
 
 def seed_if_needed():
-    if not os.path.exists(SEED_PATH):
-        print("[Seed] No seed DB found, skipping")
-        return
-
-    need_seed = not os.path.exists(DEST_PATH)
-
-    if not need_seed:
+    # Always check if volume DB is valid — delete if corrupted
+    if os.path.exists(DEST_PATH):
         try:
             conn = sqlite3.connect(DEST_PATH)
+            conn.execute("PRAGMA integrity_check")
             count = conn.execute(
                 "SELECT COUNT(DISTINCT ticker) FROM cache_meta"
             ).fetchone()[0]
             conn.close()
-            if count < MIN_TICKERS:
-                print(f"[Seed] Volume DB has only {count} tickers (< {MIN_TICKERS}), re-seeding...")
-                need_seed = True
-            else:
-                print(f"[Seed] Volume DB OK ({count} tickers)")
+            print(f"[Seed] Volume DB OK ({count} tickers)")
+            if count >= MIN_TICKERS:
+                return  # DB is good
+            print(f"[Seed] Only {count} tickers (< {MIN_TICKERS})")
         except Exception as e:
-            print(f"[Seed] Volume DB corrupted ({e}), re-seeding...")
-            need_seed = True
+            print(f"[Seed] Volume DB corrupted ({e}), removing...")
+            try:
+                os.remove(DEST_PATH)
+            except Exception:
+                pass
+            # Also clean WAL/SHM files
+            for suffix in ['-wal', '-shm']:
+                try:
+                    os.remove(DEST_PATH + suffix)
+                except Exception:
+                    pass
 
-    if need_seed:
-        # Remove corrupted/small DB first
-        if os.path.exists(DEST_PATH):
-            os.remove(DEST_PATH)
-        shutil.copy2(SEED_PATH, DEST_PATH)
-        size_mb = os.path.getsize(DEST_PATH) // 1024 // 1024
-        print(f"[Seed] Copied stock_cache.db ({size_mb}MB) to volume")
+    # Try seed file first
+    if os.path.exists(SEED_PATH):
+        try:
+            shutil.copy2(SEED_PATH, DEST_PATH)
+            size_mb = os.path.getsize(DEST_PATH) // 1024 // 1024
+            print(f"[Seed] Copied stock_cache.db ({size_mb}MB) to volume")
+            return
+        except Exception as e:
+            print(f"[Seed] Copy failed: {e}")
+
+    # No seed available — app will create empty DB and populate via Tiingo
+    print("[Seed] No seed DB available — will populate via Tiingo on startup")
 
 
 if __name__ == "__main__":
