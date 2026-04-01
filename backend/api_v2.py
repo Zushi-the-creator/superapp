@@ -1140,13 +1140,11 @@ async def get_portfolio():
             detail.ext_price = ext["ext_price"]
             detail.ext_change_pct = ext["ext_change_pct"]
             detail.market_session = ext["session"]
-            # Update ALL price-dependent fields with latest extended hours price
-            detail.current_price = ext["ext_price"]
+            # P&L uses ext_price (most recent), but current_price stays as regular close
+            # so the frontend can show "Close: $X" + "AH: $Y (+Z%)" without duplication
             detail.pnl = round((ext["ext_price"] - detail.entry_price) * pos["shares"], 2)
             detail.pnl_pct = round(((ext["ext_price"] - detail.entry_price) / detail.entry_price) * 100, 2) if detail.entry_price > 0 else 0
             detail.current_value = round(ext["ext_price"] * pos["shares"], 2)
-            # Fix day_change_pct — use ext_change_pct (vs previous close) not stale cache
-            detail.day_change_pct = ext["ext_change_pct"]
         # Even without ext data, fix day_chg if Finnhub quote has fresh prev_close
         elif quote and quote.get("price", 0) > 0:
             fh_prev = quote.get("prev_close", 0)
