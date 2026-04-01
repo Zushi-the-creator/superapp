@@ -1803,13 +1803,16 @@ def _check_market_regime() -> dict:
             result["position_size_pct"] = 0
             result["reason"] = f"VIX {vix:.0f} — crisis, entries paused"
 
-        # 3. NEAR SMA200: SPY 0% to -2% below SMA200 — very weak (37% WR, -3.83%)
+        # 3. NEAR SMA200: SPY 0% to -2% below SMA200
+        #    Backtested 102K trades: MR loses (-0.48%), Momentum works (+1.71%)
+        #    PAUSE mean reversion only. Allow momentum entries at 50% size.
         elif -2 < sma200_gap < 0:
             result["regime"] = "WEAK"
-            result["pause_entries"] = True
-            result["position_size_pct"] = 0
-            result["reason"] = (f"SPY {sma200_gap:+.1f}% vs SMA200 — WEAK ZONE. "
-                                f"Backtest: 37% WR, -3.83% avg. PAUSE entries.")
+            result["pause_entries"] = False  # Momentum still works
+            result["pause_mr"] = True        # MR specifically paused
+            result["position_size_pct"] = 50
+            result["reason"] = (f"SPY {sma200_gap:+.1f}% vs SMA200 — WEAK. "
+                                f"MR paused (48% WR, -0.48%). Momentum OK (54% WR, +1.71%). Half size.")
 
         # 4. CORRECTION: -15% to -20% drawdown — marginal (52% WR, +0.81%)
         elif -20 <= drawdown < -15:
