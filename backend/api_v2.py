@@ -513,20 +513,40 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     """
     df = _cache.get(ticker, 1260)
     if df is None or len(df) < 60:
-        # Fallback: try fetching from Stooq directly (for cold cache on Fly)
+        # Fallback: try fetching from Tiingo directly (for cold cache on Fly)
+        # Tiingo is primary — works on Fly.io unlike Stooq which is blocked
         try:
-            stooq_url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&d1={(datetime.now() - timedelta(days=800)).strftime('%Y%m%d')}&d2={datetime.now().strftime('%Y%m%d')}&i=d"
-            stooq_df = pd.read_csv(stooq_url)
-            if len(stooq_df) >= 60:
-                stooq_df['Date'] = pd.to_datetime(stooq_df['Date'])
-                stooq_df = stooq_df.set_index('Date').sort_index()
-                _cache.store(ticker, stooq_df)
-                df = stooq_df
-                print(f"[TechFallback] Fetched {ticker} from Stooq: {len(df)} bars")
+            _tiingo_key = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
+            start_d = (datetime.now() - timedelta(days=800)).strftime('%Y-%m-%d')
+            end_d = datetime.now().strftime('%Y-%m-%d')
+            tiingo_url = f'https://api.tiingo.com/tiingo/daily/{ticker}/prices?startDate={start_d}&endDate={end_d}&token={_tiingo_key}'
+            import requests
+            resp = requests.get(tiingo_url, headers={'Content-Type': 'application/json'}, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and isinstance(data, list) and len(data) >= 60:
+                    tiingo_df = pd.DataFrame(data)
+                    tiingo_df['date'] = pd.to_datetime(tiingo_df['date']).dt.tz_localize(None)
+                    tiingo_df = tiingo_df.set_index('date').sort_index()
+                    if 'adjClose' in tiingo_df.columns:
+                        col_map = {'adjOpen': 'Open', 'adjHigh': 'High',
+                                   'adjLow': 'Low', 'adjClose': 'Close', 'adjVolume': 'Volume'}
+                    else:
+                        col_map = {'open': 'Open', 'high': 'High',
+                                   'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+                    tiingo_df = tiingo_df.rename(columns=col_map)
+                    tiingo_df = tiingo_df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                    for col in tiingo_df.columns:
+                        tiingo_df[col] = pd.to_numeric(tiingo_df[col], errors='coerce')
+                    _cache.store(ticker, tiingo_df)
+                    df = tiingo_df
+                    print(f"[TechFallback] Fetched {ticker} from Tiingo: {len(df)} bars")
+                else:
+                    return {}
             else:
                 return {}
         except Exception as e:
-            print(f"[TechFallback] Stooq failed for {ticker}: {e}")
+            print(f"[TechFallback] Tiingo failed for {ticker}: {e}")
             return {}
 
     # Drop NaN closes first, then extract all columns in sync to prevent misalignment
@@ -4769,45 +4789,49 @@ async def cache_refresh_loop():
             holding_tickers = [p["ticker"] for p in positions] if positions else []
 
             if first_run:
-                # Populate VIX + SPY for market regime detection (in thread, non-blocking)
-                def _fetch_index(sym):
-                    """Fetch VIX/SPY from Yahoo Finance (Stooq blocked on Fly.io)."""
+                # Fetch SPY via Tiingo, VIX via Yahoo (Tiingo doesn't have ^VIX)
+                def _fetch_vix():
+                    """VIX only — Yahoo chart API (Tiingo doesn't support index tickers)."""
                     import requests as _req
                     try:
-                        yahoo_sym = '%5EVIX' if sym == 'VIX' else sym
-                        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_sym}?range=60d&interval=1d"
+                        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=60d&interval=1d"
                         r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
                         if r.status_code == 200:
                             chart = r.json().get("chart", {}).get("result", [{}])[0]
                             ts = chart.get("timestamp", [])
-                            quotes = chart.get("indicators", {}).get("quote", [{}])[0]
-                            closes = quotes.get("close", [])
-                            opens = quotes.get("open", [])
-                            highs = quotes.get("high", [])
-                            lows = quotes.get("low", [])
-                            vols = quotes.get("volume", [])
-                            if ts and closes and len(ts) >= 5:
+                            q = chart.get("indicators", {}).get("quote", [{}])[0]
+                            if ts and q.get("close") and len(ts) >= 5:
                                 from datetime import datetime as _dt
                                 dates = [_dt.utcfromtimestamp(t).strftime('%Y-%m-%d') for t in ts]
-                                df = pd.DataFrame({"Date": dates, "Open": opens, "High": highs,
-                                                   "Low": lows, "Close": closes, "Volume": vols})
+                                df = pd.DataFrame({"Date": dates, "Open": q["open"], "High": q["high"],
+                                                   "Low": q["low"], "Close": q["close"], "Volume": q.get("volume", [0]*len(ts))})
                                 df["Date"] = pd.to_datetime(df["Date"])
                                 df = df.set_index("Date").sort_index().dropna(subset=["Close"])
                                 if len(df) >= 5:
-                                    _cache.store(sym, df)
+                                    _cache.store("VIX", df)
                                     return len(df)
                     except Exception:
                         pass
                     return 0
-                for _idx_ticker in ["SPY", "VIX"]:
-                    # Always fetch VIX/SPY on first run if stale or missing
-                    need_fetch = not _cache.is_fresh(_idx_ticker)
-                    if need_fetch:
-                        try:
-                            n = await asyncio.wait_for(asyncio.to_thread(_fetch_index, _idx_ticker), timeout=15)
-                            if n: print(f"[CacheRefresh] Fetched {_idx_ticker}: {n} bars")
-                        except (asyncio.TimeoutError, Exception) as _e:
-                            print(f"[CacheRefresh] {_idx_ticker} fetch failed/timeout: {_e}")
+
+                # SPY: Use Tiingo (same as all other stocks)
+                if not _cache.is_fresh("SPY"):
+                    try:
+                        async with aiohttp.ClientSession() as _sess:
+                            _spy_df = await _cache._fetch_tiingo(_sess, "SPY", days=400)
+                            if _spy_df is not None:
+                                _cache.store("SPY", _spy_df)
+                                print(f"[CacheRefresh] SPY: {len(_spy_df)} bars via Tiingo")
+                    except Exception as _e:
+                        print(f"[CacheRefresh] SPY fetch failed: {_e}")
+
+                # VIX: Yahoo only (Tiingo doesn't have ^VIX)
+                if not _cache.is_fresh("VIX"):
+                    try:
+                        n = await asyncio.wait_for(asyncio.to_thread(_fetch_vix), timeout=15)
+                        if n: print(f"[CacheRefresh] VIX: {n} bars via Yahoo")
+                    except (asyncio.TimeoutError, Exception) as _e:
+                        print(f"[CacheRefresh] VIX fetch failed: {_e}")
 
                 # FIRST RUN: Populate holdings with NO data, refresh stale ones
                 empty_holdings = [t for t in holding_tickers if _cache.get(t, 365) is None]
@@ -4829,8 +4853,7 @@ async def cache_refresh_loop():
                     print(f"[CacheRefresh] Holdings already fresh")
                 first_run = False
 
-                # DAILY PRICE UPDATE: Use DataCache.refresh() which handles multi-source
-                # fallback (yfinance → Tiingo → Polygon → Stooq) with proper rate limiting
+                # DAILY PRICE UPDATE: Tiingo only (20 concurrent, 10-day window)
                 _system_status.update({"stage": "updating_prices", "message": "Refreshing stale stock prices...", "progress": 0})
                 stale_tickers = _cache.get_stale_tickers()
                 print(f"[CacheRefresh] {len(stale_tickers)} stale tickers to refresh")
