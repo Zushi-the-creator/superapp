@@ -4682,63 +4682,68 @@ async def technicals_refresh_loop():
 
 
 async def quote_refresh_loop():
-    """Centralized quote refresher. Fetches position quotes every 60s.
-    All other code reads from _quote_cache instead of hitting Finnhub directly.
-    This is the ONLY recurring Finnhub caller — conserves rate limit."""
-    await asyncio.sleep(3)  # Brief wait for warmup Phase 1 to seed SQLite prices
-    print("[QuoteRefresh] Started — refreshing position quotes every 60s")
+    """Centralized quote refresher via Tiingo IEX batch API.
+    ONE request for ALL tickers every 30s. Replaces per-ticker Finnhub calls.
+    Tiingo IEX: real-time prices, batch endpoint, 10K req/hr."""
+    await asyncio.sleep(3)
+    _tiingo_key = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
+    print("[QuoteRefresh] Started — Tiingo IEX batch every 30s")
 
     while True:
         try:
             positions = _position_mgr._get_open_positions_sync()
             if not positions:
-                await asyncio.sleep(60)
+                await asyncio.sleep(30)
                 continue
 
+            tickers = [p["ticker"] for p in positions]
+            tickers_str = ",".join(tickers)
+
             async with aiohttp.ClientSession() as session:
-                for pos in positions:
-                    ticker = pos["ticker"]
-                    if not _check_finnhub_rate():
-                        print(f"[QuoteRefresh] Finnhub rate limit — skipping remaining")
-                        break
-                    quote = await _get_finnhub_quote(session, ticker)
-                    if quote:
-                        if quote.get("price", 0) <= 0:
-                            # Finnhub returned stale/zero — use direct SQL (no pandas)
+                # Single batch request for ALL holdings
+                url = f"https://api.tiingo.com/iex/?tickers={tickers_str}"
+                headers = {"Authorization": f"Token {_tiingo_key}", "Content-Type": "application/json"}
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        updated = {}
+                        for d in data:
+                            ticker = d.get("ticker", "").upper()
+                            last = d.get("last") or d.get("tngoLast") or d.get("prevClose") or 0
+                            prev = d.get("prevClose") or last
+                            if last and last > 0:
+                                result = {
+                                    "price": round(float(last), 2),
+                                    "prev_close": round(float(prev), 2),
+                                    "day_chg": round(((last - prev) / prev) * 100, 2) if prev > 0 else 0,
+                                    "ts": datetime.now(),
+                                }
+                                _price_cache[ticker] = result
+                                _quote_cache[ticker] = (result, datetime.now())
+                                updated[ticker] = round(float(last), 2)
+
+                        if updated:
+                            print(f"[QuoteRefresh] Tiingo IEX batch: {updated} | {len(updated)} tickers in 1 request")
+                    else:
+                        # Fallback: seed from SQLite if Tiingo fails
+                        for pos in positions:
+                            ticker = pos["ticker"]
                             if ticker not in _price_cache:
                                 try:
                                     import sqlite3 as _sql3
                                     _cdb = _sql3.connect(os.path.join(os.path.dirname(__file__), "data", "stock_cache.db"))
-                                    _rows = _cdb.execute(
-                                        "SELECT close FROM daily_prices WHERE ticker=? ORDER BY date DESC LIMIT 2",
-                                        (ticker.upper(),)
-                                    ).fetchall()
+                                    _rows = _cdb.execute("SELECT close FROM daily_prices WHERE ticker=? ORDER BY date DESC LIMIT 2", (ticker.upper(),)).fetchall()
                                     _cdb.close()
                                     if len(_rows) >= 2:
                                         close, prev = _rows[0][0], _rows[1][0]
-                                        _price_cache[ticker] = {
-                                            "price": close,
-                                            "prev_close": prev,
-                                            "day_chg": round(((close - prev) / prev) * 100, 2) if prev > 0 else 0,
-                                        }
-                                        _quote_cache[ticker] = (_price_cache[ticker], datetime.now())
+                                        _price_cache[ticker] = {"price": close, "prev_close": prev, "day_chg": round(((close - prev) / prev) * 100, 2) if prev > 0 else 0}
                                 except Exception:
                                     pass
-                    await asyncio.sleep(1.5)  # ~40 calls/min with 5 tickers = conservative
-
-            prices = {t: _price_cache.get(t, {}).get("price", 0) for t in [p["ticker"] for p in positions]}
-            print(f"[QuoteRefresh] Updated: {prices} | API calls: {_finnhub_calls_this_minute}/min")
-
-            # Limit price cache to 500 entries (prevent unbounded growth)
-            if len(_price_cache) > 500:
-                # Keep only tickers that are current positions or recent quotes
-                keep = set(p["ticker"] for p in positions) if positions else set()
-                _price_cache.update({t: v for t, v in list(_price_cache.items()) if t in keep})
 
         except Exception as e:
             print(f"[QuoteRefresh] Error: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)  # Tiingo IEX: 1 request per 30s = 120/hr (well under 10K limit)
 
 
 async def extended_hours_refresh_loop():
