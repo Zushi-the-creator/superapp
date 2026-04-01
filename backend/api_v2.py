@@ -4840,7 +4840,7 @@ async def cache_refresh_loop():
     """Daily historical data refresh. Holdings first (fast), then scanner universe later.
     Keeps stock_cache.db up to date so scanner/backtest use fresh data."""
     global _scan_cache
-    await asyncio.sleep(10)  # Brief wait for app startup
+    await asyncio.sleep(30)  # Wait for uvicorn to be fully ready before heavy I/O
 
     first_run = True
     while True:
