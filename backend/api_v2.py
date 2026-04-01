@@ -4811,109 +4811,21 @@ async def cache_refresh_loop():
                     print(f"[CacheRefresh] Holdings already fresh")
                 first_run = False
 
-                # DAILY PRICE UPDATE: Refresh ALL cached stocks with latest 5d
-                # Uses yfinance batch download (20 per batch) — 10x faster than sequential Yahoo API
-                _system_status.update({"stage": "updating_prices", "message": "Updating 3000+ stocks (batch download)...", "progress": 0})
-                print(f"[CacheRefresh] Updating daily prices via yfinance batch...")
-                def _update_all_prices():
-                    """Batch-download last 5 days for all cached stocks via yfinance."""
-                    import sqlite3 as _sql
-                    import time as _time
-                    _conn = _sql.connect(os.path.join(os.path.dirname(__file__), "data", "stock_cache.db"))
-                    _c = _conn.cursor()
-                    _c.execute("SELECT DISTINCT ticker FROM daily_prices")
-                    _all = [r[0] for r in _c.fetchall()]
-                    _updated = 0; _failed = 0
-                    _batch_size = 20  # yfinance handles multi-ticker download efficiently
-                    _start = _time.time()
-
-                    try:
-                        import yfinance as yf
-                    except ImportError:
-                        yf = None
-
-                    for _i in range(0, len(_all), _batch_size):
-                        _batch = _all[_i:_i + _batch_size]
-                        try:
-                            if yf:
-                                # yfinance batch: single HTTP request for 20 tickers
-                                _tickers_str = " ".join(_batch)
-                                _data = yf.download(_tickers_str, period="5d", interval="1d",
-                                                   group_by="ticker", progress=False, threads=True)
-                                if _data is not None and not _data.empty:
-                                    for _ticker in _batch:
-                                        try:
-                                            if len(_batch) == 1:
-                                                _df = _data
-                                            else:
-                                                _df = _data[_ticker] if _ticker in _data.columns.get_level_values(0) else None
-                                            if _df is None or _df.empty:
-                                                _failed += 1; continue
-                                            for _idx, _row in _df.iterrows():
-                                                _d = _idx.strftime('%Y-%m-%d')
-                                                _cl = _row.get("Close")
-                                                if _cl is None or pd.isna(_cl): continue
-                                                _op = _row.get("Open", _cl)
-                                                _hi = _row.get("High", _cl)
-                                                _lo = _row.get("Low", _cl)
-                                                _vo = _row.get("Volume", 0)
-                                                if pd.isna(_op): _op = _cl
-                                                if pd.isna(_hi): _hi = _cl
-                                                if pd.isna(_lo): _lo = _cl
-                                                if pd.isna(_vo): _vo = 0
-                                                _c.execute("INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?,?,?,?)",
-                                                          (_ticker, _d, float(_op), float(_hi), float(_lo), float(_cl), float(_vo)))
-                                            _conn.commit()
-                                            _updated += 1
-                                        except Exception:
-                                            _failed += 1
-                            else:
-                                # Fallback: sequential Yahoo chart API
-                                import requests as _req
-                                for _ticker in _batch:
-                                    try:
-                                        _r = _req.get(
-                                            f"https://query1.finance.yahoo.com/v8/finance/chart/{_ticker}?range=5d&interval=1d",
-                                            headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-                                        if _r.status_code != 200: _failed += 1; continue
-                                        _chart = _r.json().get("chart", {}).get("result", [{}])[0]
-                                        _ts = _chart.get("timestamp", [])
-                                        _q = _chart.get("indicators", {}).get("quote", [{}])[0]
-                                        if not _ts or not _q.get("close"): _failed += 1; continue
-                                        from datetime import datetime as _dt
-                                        for _j in range(len(_ts)):
-                                            _d = _dt.utcfromtimestamp(_ts[_j]).strftime('%Y-%m-%d')
-                                            _cl = _q["close"][_j]
-                                            if _cl is None: continue
-                                            _c.execute("INSERT OR REPLACE INTO daily_prices VALUES (?,?,?,?,?,?,?)",
-                                                      (_ticker, _d, _q.get("open", [_cl])[_j] or _cl,
-                                                       _q.get("high", [_cl])[_j] or _cl,
-                                                       _q.get("low", [_cl])[_j] or _cl, _cl,
-                                                       _q.get("volume", [0])[_j] or 0))
-                                        _conn.commit()
-                                        _updated += 1
-                                    except Exception:
-                                        _failed += 1
-                        except Exception:
-                            _failed += len(_batch)
-
-                        # Progress logging every 200 stocks
-                        _done = min(_i + _batch_size, len(_all))
-                        if _done % 200 == 0 or _done == len(_all):
-                            _elapsed = _time.time() - _start
-                            _rate = _updated / _elapsed * 60 if _elapsed > 0 else 0
-                            print(f"[CacheRefresh] [{_done}/{len(_all)}] Updated: {_updated} | "
-                                  f"Failed: {_failed} | {_elapsed:.0f}s | ~{_rate:.0f}/min")
-                            _system_status.update({"stage": "updating_prices",
-                                "message": f"Updating prices: {_done}/{len(_all)} ({_updated} OK)",
-                                "progress": int(_done / len(_all) * 80)})
-
-                    _conn.close()
-                    return _updated, _failed
+                # DAILY PRICE UPDATE: Use DataCache.refresh() which handles multi-source
+                # fallback (yfinance → Tiingo → Polygon → Stooq) with proper rate limiting
+                _system_status.update({"stage": "updating_prices", "message": "Refreshing stale stock prices...", "progress": 0})
+                stale_tickers = _cache.get_stale_tickers()
+                print(f"[CacheRefresh] {len(stale_tickers)} stale tickers to refresh")
 
                 try:
-                    _upd, _fail = await asyncio.wait_for(asyncio.to_thread(_update_all_prices), timeout=1200)
-                    print(f"[CacheRefresh] Daily prices updated: {_upd} stocks, {_fail} failed")
+                    if stale_tickers:
+                        _result = await asyncio.wait_for(_cache.refresh(stale_tickers), timeout=900)
+                        _upd = _result.get("refreshed", 0)
+                        _fail = _result.get("failed", 0)
+                        print(f"[CacheRefresh] Daily prices updated: {_upd} stocks, {_fail} failed")
+                    else:
+                        _upd = 0
+                        print(f"[CacheRefresh] All stocks already fresh")
 
                     # Re-run evaluator with fresh prices
                     _system_status.update({"stage": "evaluating", "message": f"Evaluating strategies on {_upd} stocks...", "progress": 80})
@@ -4926,6 +4838,7 @@ async def cache_refresh_loop():
                     print(f"[CacheRefresh] Evaluator re-run: {_valid} valid entries with fresh prices")
                     _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
                 except (asyncio.TimeoutError, Exception) as _e:
+                    import traceback; traceback.print_exc()
                     print(f"[CacheRefresh] Daily update error: {_e}")
                     _system_status.update({"stage": "error", "message": str(_e), "progress": 0})
 
