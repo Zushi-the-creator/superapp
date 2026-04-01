@@ -1835,13 +1835,13 @@ def _check_market_regime() -> dict:
             result["reason"] = (f"SPY {sma200_gap:+.1f}% below SMA200. "
                                 f"Backtest: 46% WR, -0.16% avg. Half size.")
 
-        # 7. BELOW SMA50 but above SMA200: Negative edge (50% WR, -0.30%)
+        # 7. BELOW SMA50 but above SMA200: Mild edge (54% WR, +1.30% — 7yr, 4622 trades)
         elif sma50_gap < 0:
             result["regime"] = "PULLBACK"
-            result["pause_entries"] = True
-            result["position_size_pct"] = 0
+            result["pause_entries"] = False
+            result["position_size_pct"] = 50
             result["reason"] = (f"SPY below SMA50 ({sma50_gap:+.1f}%). "
-                                f"Backtest: 50% WR, -0.30% avg. PAUSE entries.")
+                                f"Backtest: 54% WR, +1.30% avg. Half size.")
 
         # 8. DIP BUY SWEET SPOT: -3% to -10% drawdown (60% WR, +4.09%)
         elif drawdown < -3:
