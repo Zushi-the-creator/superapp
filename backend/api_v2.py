@@ -3194,14 +3194,49 @@ async def get_data_status():
 
 
 @router.post("/cache/populate")
-async def populate_cache():
-    """One-time full history fetch via Tiingo (400d). Use after fresh deploy."""
-    _system_status.update({"stage": "populating", "message": "Fetching full history for all stocks...", "progress": 0})
+async def populate_cache(days: int = 10):
+    """Fetch historical data via Tiingo. days=10 for daily refresh, days=2600 for 10yr backfill."""
+    label = f"{days}d" if days <= 30 else f"{days//365}yr"
+    _system_status.update({"stage": "populating", "message": f"Fetching {label} history for all stocks...", "progress": 0})
     try:
         stale = _cache.get_stale_tickers()
-        if not stale:
+        all_tickers = _cache.get_cached_tickers()
+        # For long backfill, re-fetch ALL tickers (not just stale)
+        targets = all_tickers if days > 30 else stale
+        if not targets:
             return {"status": "ok", "message": "All tickers already fresh"}
-        result = await _cache.refresh(stale)
+
+        # Fetch with specified lookback
+        import time as _time
+        sem = asyncio.Semaphore(20)
+        refreshed = 0
+        failed = 0
+        t0 = _time.time()
+
+        async with aiohttp.ClientSession() as session:
+            async def fetch_one(ticker):
+                nonlocal refreshed, failed
+                async with sem:
+                    result = await _cache._fetch_tiingo(session, ticker, days=days, min_rows=1 if days <= 30 else 50)
+                    if isinstance(result, pd.DataFrame):
+                        _cache.store(ticker, result)
+                        refreshed += 1
+                    else:
+                        failed += 1
+
+            for i in range(0, len(targets), 100):
+                batch = targets[i:i + 100]
+                await asyncio.gather(*[fetch_one(t) for t in batch])
+                done = min(i + 100, len(targets))
+                elapsed = _time.time() - t0
+                rate = refreshed / elapsed * 60 if elapsed > 0 else 0
+                _system_status.update({
+                    "stage": "populating",
+                    "message": f"Fetching {label}: {done}/{len(targets)} ({refreshed} OK, {elapsed:.0f}s)",
+                    "progress": int(done / len(targets) * 80)
+                })
+
+        result = {"refreshed": refreshed, "failed": failed}
         # Also re-run evaluator
         _system_status.update({"stage": "evaluating", "message": "Re-evaluating...", "progress": 80})
         from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
