@@ -3667,10 +3667,56 @@ async def get_performance():
     total_fees = round(tx_summary.get("total_fees", 0) + BROKER_TAX_FEES, 2)
     realized_pnl_pct = round(total_realized / total_deposited * 100, 2) if total_deposited > 0 else 0
 
+    # Advanced metrics from daily P&L curve
+    _cagr = 0.0
+    _max_dd = 0.0
+    _sharpe = 0.0
+    _pf = 0.0
+    _avg_hold = 0.0
+
+    if len(daily_pnl) >= 2:
+        first_val = daily_pnl[0].portfolio_value
+        last_val = daily_pnl[-1].portfolio_value
+        days_span = (date.fromisoformat(daily_pnl[-1].date) - date.fromisoformat(daily_pnl[0].date)).days
+        years_span = days_span / 365.25 if days_span > 0 else 1
+
+        # CAGR
+        if first_val > 0 and last_val > 0 and years_span > 0:
+            _cagr = round(((last_val / first_val) ** (1 / years_span) - 1) * 100, 2)
+
+        # Max Drawdown from daily curve
+        pv_vals = [d.portfolio_value for d in daily_pnl]
+        peak = pv_vals[0]
+        for v in pv_vals:
+            if v > peak:
+                peak = v
+            dd = ((v - peak) / peak) * 100 if peak > 0 else 0
+            if dd < _max_dd:
+                _max_dd = dd
+        _max_dd = round(_max_dd, 2)
+
+        # Sharpe (daily returns annualized)
+        daily_rets = []
+        for i in range(1, len(pv_vals)):
+            if pv_vals[i-1] > 0:
+                daily_rets.append((pv_vals[i] - pv_vals[i-1]) / pv_vals[i-1])
+        if daily_rets and len(daily_rets) > 5:
+            avg_dr = sum(daily_rets) / len(daily_rets)
+            std_dr = (sum((r - avg_dr)**2 for r in daily_rets) / len(daily_rets)) ** 0.5
+            _sharpe = round((avg_dr / std_dr) * (252 ** 0.5), 2) if std_dr > 0 else 0
+
+    # Profit Factor
+    gross_wins = sum(t.pnl for t in closed if t.pnl > 0)
+    gross_losses = abs(sum(t.pnl for t in closed if t.pnl <= 0))
+    _pf = round(gross_wins / gross_losses, 2) if gross_losses > 0 else 0
+
+    # Avg hold days
+    if closed:
+        _avg_hold = round(sum(t.hold_days for t in closed) / len(closed), 1)
+
     result = PerformanceResponse(
         trades=sorted(trades, key=lambda t: t.entry_date, reverse=True),
         daily_pnl=daily_pnl,
-        # Tax: actual broker tax paid ($222), not theoretical 25%
         tax_rate=25.0,
         tax_amount=BROKER_TAX_FEES,
         net_realized=round(total_realized - BROKER_TAX_FEES, 2),
@@ -3688,6 +3734,12 @@ async def get_performance():
         avg_loss_pct=round(sum(t.pnl_pct for t in losses) / len(losses), 2) if losses else 0,
         best_trade=max(closed, key=lambda t: t.pnl_pct).ticker if closed else "",
         worst_trade=min(closed, key=lambda t: t.pnl_pct).ticker if closed else "",
+        cagr=_cagr,
+        max_drawdown=_max_dd,
+        sharpe_ratio=_sharpe,
+        profit_factor=_pf,
+        avg_hold_days=_avg_hold,
+        total_trades=len(closed),
     )
     _perf_cache = result
     _perf_cache_time = datetime.now()

@@ -298,6 +298,12 @@ class PerformanceResponse(BaseModel):
     avg_loss_pct: float
     best_trade: str
     worst_trade: str
+    cagr: float = 0.0
+    max_drawdown: float = 0.0
+    sharpe_ratio: float = 0.0
+    profit_factor: float = 0.0
+    avg_hold_days: float = 0.0
+    total_trades: int = 0
 
 
 class MomentumSignalResponse(BaseModel):

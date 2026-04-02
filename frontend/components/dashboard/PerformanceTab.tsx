@@ -11,12 +11,12 @@ const MILESTONES: { date: string; label: string; color: string }[] = [
   { date: "2026-01-07", label: "First Trades", color: "#737373" },
   { date: "2026-01-20", label: "Rotation #1", color: "#737373" },
   { date: "2026-02-04", label: "ATLAS V2.1", color: "#3b82f6" },
-  { date: "2026-02-06", label: "Sentiment Veto", color: "#8b5cf6" },
+  { date: "2026-02-06", label: "Golden Era Start", color: "#22c55e" },
   { date: "2026-02-12", label: "Earnings Veto", color: "#f59e0b" },
-  { date: "2026-02-18", label: "V2.3 14d Hold", color: "#06b6d4" },
-  { date: "2026-02-27", label: "$3.5K Deposit", color: "#22c55e" },
-  { date: "2026-02-28", label: "V2.4 + Iran War", color: "#ef4444" },
-  { date: "2026-03-02", label: "TradingDays Fix", color: "#a855f7" },
+  { date: "2026-02-24", label: "V2.4 Deploy", color: "#06b6d4" },
+  { date: "2026-02-28", label: "Iran War Crash", color: "#ef4444" },
+  { date: "2026-03-14", label: "V2.6 + Regime Gate", color: "#a855f7" },
+  { date: "2026-04-01", label: "10yr Backtest + Tiingo", color: "#3b82f6" },
 ];
 
 function linearRegression(points: { x: number; y: number }[]) {
@@ -147,9 +147,17 @@ export function PerformanceTab() {
         onRefresh={refresh}
       />
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 pb-20 md:pb-6">
-        {/* Summary cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-          {/* 1. Total P&L — the real number */}
+        {/* Summary cards — Row 1: Key metrics */}
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+          {/* CAGR */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+            <span className="text-xs text-neutral-500">CAGR</span>
+            <div className={cn("text-xl font-bold", pnlColor(data?.cagr ?? 0))}>
+              {(data?.cagr ?? 0) >= 0 ? "+" : ""}{(data?.cagr ?? 0).toFixed(1)}%
+            </div>
+            <span className="text-[10px] text-neutral-500">annualized</span>
+          </div>
+          {/* Total P&L */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Total P&L</span>
             {(() => {
@@ -168,68 +176,86 @@ export function PerformanceTab() {
               );
             })()}
           </div>
-          {/* 2. Unrealized — open positions */}
+          {/* Max Drawdown */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Unrealized</span>
-            <div className={cn("text-xl font-bold", pnlColor(data?.total_unrealized ?? 0))}>
-              {formatCurrency(data?.total_unrealized ?? 0)}
+            <span className="text-xs text-neutral-500">Max Drawdown</span>
+            <div className="text-xl font-bold text-signal-sell">
+              {(data?.max_drawdown ?? 0).toFixed(1)}%
             </div>
-            <span className="text-[10px] text-neutral-500">
-              open positions
-            </span>
+            <span className="text-[10px] text-neutral-500">worst peak-to-trough</span>
           </div>
-          {/* 3. Realized — closed trades */}
+          {/* Sharpe Ratio */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Realized</span>
-            <div className={cn("text-xl font-bold", pnlColor(data?.total_realized ?? 0))}>
-              {formatCurrency(data?.total_realized ?? 0)}
+            <span className="text-xs text-neutral-500">Sharpe Ratio</span>
+            <div className={cn("text-xl font-bold", (data?.sharpe_ratio ?? 0) >= 1 ? "text-signal-buy" : (data?.sharpe_ratio ?? 0) >= 0 ? "text-neutral-300" : "text-signal-sell")}>
+              {(data?.sharpe_ratio ?? 0).toFixed(2)}
             </div>
-            <span className="text-[10px] text-neutral-500">
-              closed trades
-            </span>
+            <span className="text-[10px] text-neutral-500">risk-adjusted</span>
           </div>
-          {/* 4. Net After Tax */}
+          {/* Profit Factor */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Net After Tax</span>
-            <div className={cn("text-xl font-bold", pnlColor(data?.net_realized ?? 0))}>
-              {formatCurrency(data?.net_realized ?? 0)}
+            <span className="text-xs text-neutral-500">Profit Factor</span>
+            <div className={cn("text-xl font-bold", (data?.profit_factor ?? 0) >= 1 ? "text-signal-buy" : "text-signal-sell")}>
+              {(data?.profit_factor ?? 0).toFixed(2)}
             </div>
-            <span className="text-[10px] text-neutral-500">
-              -{formatCurrency(data?.tax_amount ?? 0)} tax
-            </span>
+            <span className="text-[10px] text-neutral-500">wins / losses</span>
           </div>
-          {/* 5. Win Rate */}
+          {/* Win Rate */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Win Rate</span>
             <div className={cn("text-xl font-bold", (data?.win_rate ?? 0) >= 50 ? "text-signal-buy" : "text-signal-sell")}>
               {data?.win_rate?.toFixed(0) ?? 0}%
             </div>
             <span className="text-[10px] text-neutral-500">
-              {data?.win_count ?? 0}W / {data?.loss_count ?? 0}L
+              {data?.win_count ?? 0}W / {data?.loss_count ?? 0}L ({data?.total_trades ?? 0} trades)
             </span>
           </div>
-          {/* 6. Total Fees */}
+        </div>
+
+        {/* Row 2: Breakdown */}
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Total Fees</span>
+            <span className="text-xs text-neutral-500">Unrealized</span>
+            <div className={cn("text-xl font-bold", pnlColor(data?.total_unrealized ?? 0))}>
+              {formatCurrency(data?.total_unrealized ?? 0)}
+            </div>
+            <span className="text-[10px] text-neutral-500">open positions</span>
+          </div>
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+            <span className="text-xs text-neutral-500">Realized</span>
+            <div className={cn("text-xl font-bold", pnlColor(data?.total_realized ?? 0))}>
+              {formatCurrency(data?.total_realized ?? 0)}
+            </div>
+            <span className="text-[10px] text-neutral-500">closed trades</span>
+          </div>
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+            <span className="text-xs text-neutral-500">Fees + Tax</span>
             <div className="text-xl font-bold text-neutral-400">
               {formatCurrency(data?.total_fees ?? 0)}
             </div>
-            <span className="text-[10px] text-neutral-500">
-              on {formatCurrency(data?.total_deposited ?? 0)}
-            </span>
+            <span className="text-[10px] text-neutral-500">on {formatCurrency(data?.total_deposited ?? 0)}</span>
           </div>
-          {/* 7. Avg Win */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Avg Win</span>
-            <div className="text-xl font-bold text-signal-buy">
-              +{data?.avg_win_pct?.toFixed(1) ?? 0}%
+            <span className="text-xs text-neutral-500">Avg Win / Loss</span>
+            <div className="text-lg font-bold">
+              <span className="text-signal-buy">+{data?.avg_win_pct?.toFixed(1) ?? 0}%</span>
+              <span className="text-neutral-600 mx-1">/</span>
+              <span className="text-signal-sell">{data?.avg_loss_pct?.toFixed(1) ?? 0}%</span>
             </div>
           </div>
-          {/* 8. Avg Loss */}
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-            <span className="text-xs text-neutral-500">Avg Loss</span>
-            <div className="text-xl font-bold text-signal-sell">
-              {data?.avg_loss_pct?.toFixed(1) ?? 0}%
+            <span className="text-xs text-neutral-500">Avg Hold</span>
+            <div className="text-xl font-bold text-neutral-300">
+              {(data?.avg_hold_days ?? 0).toFixed(0)}d
+            </div>
+            <span className="text-[10px] text-neutral-500">trading days</span>
+          </div>
+          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+            <span className="text-xs text-neutral-500">Best / Worst</span>
+            <div className="text-sm font-bold">
+              <span className="text-signal-buy">{data?.best_trade ?? "–"}</span>
+              <span className="text-neutral-600 mx-1">/</span>
+              <span className="text-signal-sell">{data?.worst_trade ?? "–"}</span>
             </div>
           </div>
         </div>
