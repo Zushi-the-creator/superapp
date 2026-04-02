@@ -335,7 +335,8 @@ export function OpportunitiesTab() {
           </span>
         </div>
 
-        {displayStocks.length > 0 ? (
+        {/* Old scanner section — hide when combined data is loaded */}
+        {displayStocks.length > 0 && combined.length === 0 ? (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {displayStocks.map((opp) => (

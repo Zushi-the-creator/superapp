@@ -3628,8 +3628,15 @@ async def get_performance():
         for ticker in price_data:
             price_dates_sorted[ticker] = sorted(price_data[ticker].keys())
 
+        # Only include today if regular market is open (not pre-market/closed)
+        _perf_session = _get_market_session()
+        end_date = today if _perf_session == "REGULAR" else today - timedelta(days=1)
+        # Skip weekends for end_date
+        while end_date.weekday() >= 5:
+            end_date -= timedelta(days=1)
+
         current = start_date
-        while current <= today:
+        while current <= end_date:
             date_str = current.isoformat()
             if current.weekday() >= 5:
                 current += timedelta(days=1)
