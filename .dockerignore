@@ -12,7 +12,7 @@ ralph/
 client/
 data/
 claude-scientific-skills/
-backend/data/stock_cache.db
+# stock_cache.db included — seeds Fly.io volume with 10yr data on cold deploy
 backend/data/stock_cache.db-shm
 backend/data/stock_cache.db-wal
 backend/data/historical.db

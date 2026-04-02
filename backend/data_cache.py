@@ -181,7 +181,7 @@ class DataCache:
 
         try:
             async with session.get(url, params=params, headers=headers,
-                                   timeout=aiohttp.ClientTimeout(total=12)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 429:
                     await asyncio.sleep(2)
                     return None
