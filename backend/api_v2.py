@@ -1049,18 +1049,26 @@ async def get_portfolio():
         except Exception:
             pass
 
-        # Smart rotation: suggest swap when losing + below SMA50 + 7d held + much better entry exists
-        if pnl_pct < 0 and not above_sma50 and days_held >= 7:
+        # V3.0 Rotation: score gap > 2, min 10d held (backtested: +4.5% CAGR, halves drawdown)
+        ROTATION_SCORE_GAP = 2.0
+        ROTATION_MIN_DAYS = 10
+        _rot_target = None
+        _rot_gap = 0.0
+        if days_held >= ROTATION_MIN_DAYS and _regime_name not in ("DANGER", "CRISIS"):
             try:
                 from strategy_evaluator import load_cache as _load_entries
                 _entries = _load_entries()
                 if _entries:
-                    _valid_entries = [e for e in _entries if not e.get("vetoed")]
-                    if _valid_entries:
-                        _best = max(_valid_entries, key=lambda e: e.get("score", 0))
+                    _valid = [e for e in _entries if not e.get("vetoed") and e.get("ticker") != ticker]
+                    if _valid:
+                        _best = max(_valid, key=lambda e: e.get("score", 0))
                         h_score = tech.get("bayesian_wr", tech.get("win_rate", 0)) * tech.get("avg_return", 0) / 100 if tech else 0
-                        if _best.get("score", 0) > max(h_score * 2, 3):
-                            issues.append(f"ROTATE? {_best['ticker']} (score {_best['score']:.1f}) is much better")
+                        _gap = _best.get("score", 0) - h_score
+                        if _gap > ROTATION_SCORE_GAP:
+                            signal = "ROTATE"
+                            _rot_target = _best["ticker"]
+                            _rot_gap = round(_gap, 1)
+                            issues.append(f"ROTATE to {_best['ticker']} (score {_best['score']:.1f} vs {h_score:.1f}, gap {_rot_gap})")
             except Exception:
                 pass
 
@@ -1137,6 +1145,8 @@ async def get_portfolio():
             wr_2yr=tech.get("wr_2yr", 0) if tech else 0,
             avg_ret_2yr=tech.get("avg_ret_2yr", 0) if tech else 0,
             trades_2yr=tech.get("trades_2yr", 0) if tech else 0,
+            rotation_target=_rot_target,
+            rotation_score_gap=_rot_gap,
             signal=signal,
             issues=issues,
             stop_loss=stop_price,
@@ -1210,6 +1220,8 @@ async def get_portfolio():
         total_fees=_total_fees_all,
         total_deposited=_total_deposited,
         position_count=len(details),
+        max_positions=MAX_POSITIONS,
+        slots_available=max(0, MAX_POSITIONS - len(details)),
         avg_win_rate=round(sum(wr_list) / len(wr_list), 1) if wr_list else 0,
         cash=_cash,
         market_session=_get_market_session(),
@@ -1830,21 +1842,21 @@ def _check_market_regime() -> dict:
             result["reason"] = (f"Deep bear bounce — SPY {drawdown:+.1f}% from peak. "
                                 f"Backtest: 67% WR, +7.34% avg. FULL SIZE entries.")
 
-        # 6. BELOW SMA200 (>2% gap): Moderate (46% WR, -0.16%)
+        # 6. BELOW SMA200 (>2% gap): 10yr backtest 65% WR, +7.90% (6,056 trades)
         elif sma200_gap < -2:
-            result["regime"] = "CAUTION"
+            result["regime"] = "BELOW_SMA200"
             result["pause_entries"] = False
-            result["position_size_pct"] = 50
+            result["position_size_pct"] = 100
             result["reason"] = (f"SPY {sma200_gap:+.1f}% below SMA200. "
-                                f"Backtest: 46% WR, -0.16% avg. Half size.")
+                                f"Backtest: 65% WR, +7.90% avg. FULL SIZE (deep value).")
 
-        # 7. BELOW SMA50 but above SMA200: Mild edge (54% WR, +1.30% — 7yr, 4622 trades)
+        # 7. BELOW SMA50 but above SMA200: 10yr backtest 56% WR, +3.53% (9,816 trades)
         elif sma50_gap < 0:
             result["regime"] = "PULLBACK"
             result["pause_entries"] = False
-            result["position_size_pct"] = 50
+            result["position_size_pct"] = 100
             result["reason"] = (f"SPY below SMA50 ({sma50_gap:+.1f}%). "
-                                f"Backtest: 54% WR, +1.30% avg. Half size.")
+                                f"Backtest: 56% WR, +3.53% avg. FULL SIZE.")
 
         # 8. DIP BUY SWEET SPOT: -3% to -10% drawdown (60% WR, +4.09%)
         elif drawdown < -3:
@@ -1861,12 +1873,12 @@ def _check_market_regime() -> dict:
             result["position_size_pct"] = 50
             result["reason"] = f"VIX {vix:.0f} elevated — half size entries"
 
-        # 10. HEALTHY: All clear (54% WR, +1.68%)
+        # 10. HEALTHY: 10yr backtest 52% WR, +1.81% (42,929 trades) — reduced size
         else:
             result["regime"] = "HEALTHY"
             result["pause_entries"] = False
-            result["position_size_pct"] = 100
-            result["reason"] = f"Healthy — VIX {vix:.0f}, SPY {drawdown:+.1f}% from peak. Full size."
+            result["position_size_pct"] = 70
+            result["reason"] = f"Healthy — VIX {vix:.0f}, SPY {drawdown:+.1f}% from peak. 70% size."
 
     except Exception as e:
         result["reason"] = str(e)
@@ -2691,6 +2703,9 @@ def _calc_trade_fee(ticker: str) -> float:
     return 0.0 if count < 10 else 1.50
 
 
+MAX_POSITIONS = 5  # Kelly + walk-forward: optimal at 5, +28.2% CAGR, -16.4% MaxDD
+
+
 @router.post("/positions/buy", response_model=TradeResult)
 async def buy_position(req: BuyRequest):
     """Record a buy and create position + transaction."""
@@ -2698,6 +2713,15 @@ async def buy_position(req: BuyRequest):
     total = req.price * req.shares
     fee = _calc_trade_fee(ticker)
     currency = "ILS" if ticker.endswith(".TA") else "USD"
+
+    # Enforce max positions (backtested: 5 is optimal)
+    open_positions = _position_mgr._get_open_positions_sync(currency)
+    if len(open_positions) >= MAX_POSITIONS:
+        return TradeResult(
+            success=False,
+            message=f"Max {MAX_POSITIONS} positions reached. Sell or rotate before buying.",
+            ticker=ticker,
+        )
 
     # Add position
     result = _position_mgr._add_position_sync(

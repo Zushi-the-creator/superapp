@@ -92,6 +92,9 @@ class PositionDetail(BaseModel):
     ext_price: Optional[float] = None  # pre-market or after-hours price
     ext_change_pct: Optional[float] = None  # change % from close
     market_session: str = "CLOSED"  # PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
+    # Rotation (V3.0: score gap > 2, min 10d held)
+    rotation_target: Optional[str] = None
+    rotation_score_gap: float = 0
     # Signal
     signal: str = "HOLD"
     issues: List[str] = []
@@ -117,9 +120,11 @@ class PortfolioSummary(BaseModel):
     total_fees: float = 0  # Total trading fees paid
     total_deposited: float = 0  # Total capital deposited
     position_count: int
+    max_positions: int = 5
+    slots_available: int = 5
     avg_win_rate: float
     cash: float = 0
-    market_session: str = "CLOSED"  # PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
+    market_session: str = "CLOSED"
     timestamp: str
 
 
