@@ -3699,14 +3699,20 @@ async def get_performance():
     _avg_hold = 0.0
 
     if len(daily_pnl) >= 2:
-        first_val = daily_pnl[0].portfolio_value
-        last_val = daily_pnl[-1].portfolio_value
         days_span = (date.fromisoformat(daily_pnl[-1].date) - date.fromisoformat(daily_pnl[0].date)).days
         years_span = days_span / 365.25 if days_span > 0 else 1
 
-        # CAGR
-        if first_val > 0 and last_val > 0 and years_span > 0:
-            _cagr = round(((last_val / first_val) ** (1 / years_span) - 1) * 100, 2)
+        # CAGR: based on P&L % relative to deposited capital (not absolute portfolio value,
+        # which includes deposits and would give absurd numbers like +47,000%)
+        last_pnl_pct = daily_pnl[-1].pnl_pct  # total P&L as % of deposited
+        if years_span > 0.1:  # Need at least ~5 weeks for meaningful annualization
+            # Convert total return % to CAGR: (1 + total_return)^(1/years) - 1
+            total_return = last_pnl_pct / 100  # e.g. -2% = -0.02
+            if total_return > -1:  # Can't CAGR a >100% loss
+                _cagr = round(((1 + total_return) ** (1 / years_span) - 1) * 100, 1)
+        else:
+            # Too short to annualize — just show raw return
+            _cagr = round(last_pnl_pct, 1)
 
         # Max Drawdown from daily curve
         pv_vals = [d.portfolio_value for d in daily_pnl]
@@ -3719,11 +3725,11 @@ async def get_performance():
                 _max_dd = dd
         _max_dd = round(_max_dd, 2)
 
-        # Sharpe (daily returns annualized)
+        # Sharpe (daily P&L% changes, annualized)
+        pnl_pcts = [d.pnl_pct for d in daily_pnl]
         daily_rets = []
-        for i in range(1, len(pv_vals)):
-            if pv_vals[i-1] > 0:
-                daily_rets.append((pv_vals[i] - pv_vals[i-1]) / pv_vals[i-1])
+        for i in range(1, len(pnl_pcts)):
+            daily_rets.append(pnl_pcts[i] - pnl_pcts[i-1])  # Daily change in P&L%
         if daily_rets and len(daily_rets) > 5:
             avg_dr = sum(daily_rets) / len(daily_rets)
             std_dr = (sum((r - avg_dr)**2 for r in daily_rets) / len(daily_rets)) ** 0.5
