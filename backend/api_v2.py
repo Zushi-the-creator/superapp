@@ -3220,6 +3220,24 @@ async def get_data_status():
     }
 
 
+@router.post("/backtest/refresh")
+async def refresh_backtest_cache():
+    """Re-run backtest precompute + evaluator. ~20s total."""
+    from backtest_precompute import precompute_all
+    _system_status.update({"stage": "precomputing", "message": "Pre-computing backtests...", "progress": 50})
+    result = await asyncio.to_thread(precompute_all, force=True)
+    _system_status.update({"stage": "evaluating", "message": "Fast scan...", "progress": 90})
+    from strategy_evaluator import evaluate_all, save_cache
+    positions = _position_mgr._get_open_positions_sync()
+    held = set(p["ticker"] for p in positions) if positions else set()
+    live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+    signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
+    save_cache(signals)
+    valid = sum(1 for s in signals if not s.vetoed)
+    _system_status.update({"stage": "ready", "message": f"{valid} entries ready", "progress": 100})
+    return {"status": "ok", "precompute": result, "entries": valid}
+
+
 @router.post("/cache/populate")
 async def populate_cache(days: int = 10):
     """Fetch historical data via Tiingo. days=10 for daily refresh, days=2600 for 10yr backfill."""
@@ -5018,15 +5036,20 @@ async def cache_refresh_loop():
                         _upd = 0
                         print(f"[CacheRefresh] All stocks already fresh")
 
-                    # Re-run evaluator with fresh prices
-                    _system_status.update({"stage": "evaluating", "message": f"Evaluating strategies on {_upd} stocks...", "progress": 80})
+                    # Pre-compute backtests (17s for 3K stocks) then run fast evaluator (<5s)
+                    _system_status.update({"stage": "precomputing", "message": "Pre-computing backtests for 3000+ stocks...", "progress": 70})
+                    from backtest_precompute import precompute_all as _precompute
+                    await asyncio.to_thread(_precompute)
+                    print(f"[CacheRefresh] Backtest cache updated")
+
+                    _system_status.update({"stage": "evaluating", "message": "Fast scan with cached backtests...", "progress": 90})
                     from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
                     _held = set(p["ticker"] for p in positions) if positions else set()
                     _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
                     _signals = await asyncio.to_thread(_eval_all, 10.0, _held, _live_px)
                     _save_eval(_signals)
                     _valid = sum(1 for s in _signals if not s.vetoed)
-                    print(f"[CacheRefresh] Evaluator re-run: {_valid} valid entries with fresh prices")
+                    print(f"[CacheRefresh] Evaluator: {_valid} valid entries (fast scan)")
                     _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
                 except (asyncio.TimeoutError, Exception) as _e:
                     import traceback; traceback.print_exc()

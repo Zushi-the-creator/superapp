@@ -4,15 +4,14 @@ Strategy Evaluator — Fast entry signal detection against cached prices.
 Runs BOTH mean reversion + momentum strategies on all cached stocks.
 No API calls, no network — pure CPU against SQLite cache.
 
-Architecture:
-  1. Read all stock prices from stock_cache.db (bulk SQL, ~2s)
-  2. Evaluate MR signals: RSI(2) < 10, above SMA50, ATR >= 3%
-  3. Evaluate Momentum signals: Trend Template + acceleration
-  4. Score each with expected_value = backtest_WR × backtest_avg_return
-  5. Rank by combined score, tag with strategy type
-  6. Return top 50 for Phase 3 validation (analyst/sentiment)
+Architecture (V2 — backtest_cache accelerated):
+  1. Load pre-computed backtest stats from backtest_cache table (instant)
+  2. For each stock, check CURRENT RSI < 10 / momentum conditions (from last few bars)
+  3. Look up pre-computed WR/return from backtest_cache (no inline backtest!)
+  4. Apply VETO filters (WR < 55%, return < 3%, trades < 5)
+  5. Return sorted signals
 
-Speed target: < 5 seconds for 3000 stocks.
+Speed target: < 5 seconds for 3000 stocks (was 10+ minutes with inline backtests).
 """
 
 import sqlite3
@@ -271,9 +270,9 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         atr_squeeze = (sum(atr_vals)/len(atr_vals))/atr_50_avg if atr_50_avg > 0 and atr_vals else 1
 
         # ═══════════════════════════════════════════
-        # MEAN REVERSION CHECK
+        # MEAN REVERSION CHECK (V3.0 — cache-accelerated)
         # ═══════════════════════════════════════════
-        # V3.0: No SMA50 filter (backtested: removing it adds +0.96%/trade on 58K trades)
+        cache_row = None  # Will be loaded from backtest_cache if needed
         is_mr = (current_rsi < 10 and atr_pct >= 3 and price >= 10)
 
         mr_score = 0
@@ -282,27 +281,16 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         mr_trades = 0
 
         if is_mr:
-            # V3.0 Backtest: RSI<10 + ATR>=3% + 45d hold (no SMA50 filter)
-            trades = []; le = -1
-            for i in range(50, n - 47):
-                if i <= le: continue
-                if rsi2[i] < 10 and closes[i] >= 10:
-                    _atr_vals = [max(highs[j]-lows[j], abs(highs[j]-closes[j-1]), abs(lows[j]-closes[j-1])) for j in range(max(1,i-13),i+1)]
-                    _atr_pct = (sum(_atr_vals)/len(_atr_vals)/closes[i]*100) if _atr_vals and closes[i]>0 else 0
-                    if _atr_pct < 3:
-                        continue
-                    ep = opens[i+1] if i+1 < len(opens) and opens[i+1] > 0 else closes[i]
-                    ret = ((closes[i+1+45] - ep) / ep) * 100 - 0.30
-                    trades.append(ret > 0)
-                    mr_ret += ret
-                    le = i + 46
-
-            mr_trades = len(trades)
-            if mr_trades >= 5:
-                wins = sum(trades)
-                mr_wr = _bayesian_wr(wins, mr_trades)
-                mr_ret = mr_ret / mr_trades
-                mr_score = mr_wr * mr_ret / 100  # Expected value
+            # Look up pre-computed backtest stats from backtest_cache (instant)
+            cache_row = c.execute(
+                "SELECT mr_wr, mr_avg_return, mr_trades, mr_score FROM backtest_cache WHERE ticker=?",
+                (ticker,)
+            ).fetchone()
+            if cache_row and cache_row[2] >= 5:
+                mr_wr = cache_row[0]
+                mr_ret = cache_row[1]
+                mr_trades = cache_row[2]
+                mr_score = cache_row[3]
 
         # ═══════════════════════════════════════════
         # MOMENTUM CHECK (Minervini Trend Template)
@@ -329,16 +317,21 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         mom_zone_ret = 0
 
         if is_mom:
-            # Backtest momentum: Minervini 6/6 + Fixed60d exit
-            _mt, _mwr, _mret, _mzones = _backtest_momentum(
-                closes, opens, highs, lows, sma50, sma150, sma200, n
-            )
-            mom_trades = _mt
-            if _mt >= 5:
-                mom_wr = _mwr
-                mom_ret = _mret
-                mom_score = mom_wr * mom_ret / 100  # Expected value
-                mom_zone_label, mom_zone_wr, mom_zone_ret, _ = _get_mom_zone(ret_20d, _mzones)
+            # Look up pre-computed momentum stats from backtest_cache (instant)
+            if not cache_row:
+                cache_row = c.execute(
+                    "SELECT mr_wr, mr_avg_return, mr_trades, mr_score, mom_wr, mom_avg_return, mom_trades, mom_score FROM backtest_cache WHERE ticker=?",
+                    (ticker,)
+                ).fetchone()
+            mom_cache = c.execute(
+                "SELECT mom_wr, mom_avg_return, mom_trades, mom_score FROM backtest_cache WHERE ticker=?",
+                (ticker,)
+            ).fetchone()
+            if mom_cache and mom_cache[2] >= 5:
+                mom_wr = mom_cache[0]
+                mom_ret = mom_cache[1]
+                mom_trades = mom_cache[2]
+                mom_score = mom_cache[3]
 
         # ═══════════════════════════════════════════
         # DETERMINE BEST STRATEGY + COMBINED SCORE
