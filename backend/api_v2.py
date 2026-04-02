@@ -3336,23 +3336,42 @@ async def get_combined_opportunities():
     if cached:
         valid = [s for s in cached if not s.get("vetoed")]
 
-        # Overlay live prices from Finnhub _price_cache (already refreshed every 60s)
-        # Fetch quotes for top 20 entries that don't have live prices yet
-        tickers_need = [s["ticker"] for s in valid[:20] if s["ticker"] not in _price_cache]
-        if tickers_need:
-            try:
-                async with aiohttp.ClientSession() as _sess:
-                    for _t in tickers_need[:15]:
-                        if not _check_finnhub_rate(): break
-                        await _get_finnhub_quote(_sess, _t)
-                        await asyncio.sleep(0.3)
-            except Exception:
-                pass
-
-        # Price: always live from Finnhub. data_date: when backtest scores were computed.
+        # LIVE price overlay via Tiingo IEX batch — ALL entries, not just top 20
+        # HARD RULE: Never show stale prices during market hours
+        _tiingo_key = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
+        session_now = _get_market_session()
         live_count = 0
+
+        if session_now in ("REGULAR", "PRE_MARKET", "AFTER_HOURS"):
+            # Fetch ALL entry tickers in one batch call (Tiingo IEX supports this)
+            all_entry_tickers = list(set(s["ticker"] for s in valid))
+            # Tiingo IEX batch: max ~100 tickers per request
+            for batch_start in range(0, len(all_entry_tickers), 100):
+                batch = all_entry_tickers[batch_start:batch_start + 100]
+                try:
+                    async with aiohttp.ClientSession() as _iex_sess:
+                        _iex_url = f"https://api.tiingo.com/iex/?tickers={','.join(batch)}"
+                        _iex_headers = {"Authorization": f"Token {_tiingo_key}", "Content-Type": "application/json"}
+                        async with _iex_sess.get(_iex_url, headers=_iex_headers,
+                                                 timeout=aiohttp.ClientTimeout(total=10)) as _iex_resp:
+                            if _iex_resp.status == 200:
+                                _iex_data = await _iex_resp.json()
+                                for d in _iex_data:
+                                    t = d.get("ticker", "").upper()
+                                    last = d.get("last") or d.get("tngoLast") or d.get("prevClose") or 0
+                                    prev = d.get("prevClose") or last
+                                    if last and last > 0:
+                                        _price_cache[t] = {
+                                            "price": round(float(last), 2),
+                                            "prev_close": round(float(prev), 2),
+                                            "day_chg": round(((last - prev) / prev) * 100, 2) if prev > 0 else 0,
+                                            "ts": datetime.now(),
+                                        }
+                except Exception:
+                    pass
+
         for s in valid:
-            s["scan_price"] = s["price"]  # Original evaluation price
+            s["scan_price"] = s["price"]
             live = _price_cache.get(s["ticker"])
             if live and live.get("price", 0) > 0:
                 s["price"] = round(live["price"], 2)
