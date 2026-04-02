@@ -1178,15 +1178,9 @@ async def get_portfolio():
 
         details.append(detail)
 
-    # Calculate total value using ext_price when available (pre-market/after-hours)
-    total_value = 0
-    for d in details:
-        if d.ext_price and d.ext_price > 0 and d.market_session in ("PRE_MARKET", "AFTER_HOURS"):
-            # Use ext_price for accurate pre/after-hours valuation
-            ext_val = round(d.ext_price * d.shares, 2)
-            total_value += ext_val
-        else:
-            total_value += d.current_value
+    # Portfolio value = sum of current_value (based on last regular close)
+    # ext_price shown separately per position — NOT mixed into total
+    total_value = sum(d.current_value for d in details)
 
     for d in details:
         d.weight = round(d.current_value / total_value * 100, 1) if total_value else 0
@@ -1195,15 +1189,15 @@ async def get_portfolio():
     total_pnl = total_value - total_cost
     wr_list = [d.win_rate for d in details if d.win_rate > 0]
 
-    # Daily P&L using ext prices when available
+    # Daily P&L: only during REGULAR session (actual trading day)
+    # Pre-market/after-hours moves show via ext_price on each position, NOT as day P&L
+    session = _get_market_session()
     day_pnl = 0
-    for d in details:
-        if d.ext_price and d.ext_price > 0 and d.market_session in ("PRE_MARKET", "AFTER_HOURS"):
-            # Pre-market/AH: change from previous close to ext_price
-            prev_close = d.current_price  # current_price = yesterday's regular close
-            day_pnl += (d.ext_price - prev_close) * d.shares
-        elif d.day_change_pct != -100 and d.current_value > 0:
-            day_pnl += d.current_value * d.day_change_pct / (100 + d.day_change_pct)
+    if session == "REGULAR":
+        for d in details:
+            if d.day_change_pct != -100 and d.current_value > 0:
+                day_pnl += d.current_value * d.day_change_pct / (100 + d.day_change_pct)
+    # Outside regular hours: day P&L = 0 (trading hasn't happened yet)
     day_pnl_pct = (day_pnl / total_value * 100) if total_value > 0 else 0
 
     # Realized P&L from closed positions
