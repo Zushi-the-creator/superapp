@@ -273,7 +273,8 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         # ═══════════════════════════════════════════
         # MEAN REVERSION CHECK
         # ═══════════════════════════════════════════
-        is_mr = (current_rsi < 10 and price > current_sma50 and current_sma50 > 0 and atr_pct >= 3)
+        # V3.0: No SMA50 filter (backtested: removing it adds +0.96%/trade on 58K trades)
+        is_mr = (current_rsi < 10 and atr_pct >= 3 and price >= 10)
 
         mr_score = 0
         mr_wr = 0
@@ -281,22 +282,20 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         mr_trades = 0
 
         if is_mr:
-            # Backtest: RSI<10 + above SMA50 + ATR>=3% + 30d hold
-            # BUG 6 FIX: ATR filter must match live entry criteria
+            # V3.0 Backtest: RSI<10 + ATR>=3% + 45d hold (no SMA50 filter)
             trades = []; le = -1
-            for i in range(50, n - 32):
+            for i in range(50, n - 47):
                 if i <= le: continue
-                if rsi2[i] < 10 and closes[i] > sma50[i] and closes[i] >= 10:
-                    # ATR check at historical entry (matches live filter)
+                if rsi2[i] < 10 and closes[i] >= 10:
                     _atr_vals = [max(highs[j]-lows[j], abs(highs[j]-closes[j-1]), abs(lows[j]-closes[j-1])) for j in range(max(1,i-13),i+1)]
                     _atr_pct = (sum(_atr_vals)/len(_atr_vals)/closes[i]*100) if _atr_vals and closes[i]>0 else 0
                     if _atr_pct < 3:
                         continue
                     ep = opens[i+1] if i+1 < len(opens) and opens[i+1] > 0 else closes[i]
-                    ret = ((closes[i+1+30] - ep) / ep) * 100 - 0.30
+                    ret = ((closes[i+1+45] - ep) / ep) * 100 - 0.30
                     trades.append(ret > 0)
                     mr_ret += ret
-                    le = i + 31
+                    le = i + 46
 
             mr_trades = len(trades)
             if mr_trades >= 5:

@@ -60,7 +60,13 @@ class PositionManager:
             try:
                 cursor.execute("ALTER TABLE positions ADD COLUMN currency TEXT DEFAULT 'USD'")
             except sqlite3.OperationalError:
-                pass  # Column already exists
+                pass
+
+            # Add strategy column (V3.0: MR=45d hold, MOMENTUM=60d hold)
+            try:
+                cursor.execute("ALTER TABLE positions ADD COLUMN strategy TEXT DEFAULT 'MEAN_REVERSION'")
+            except sqlite3.OperationalError:
+                pass
 
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_ticker ON positions(ticker)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status)")

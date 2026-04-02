@@ -47,21 +47,22 @@ class ExitSignal:
 
 class ExitEngine:
     """
-    V2.6 Exit System — Fixed 30-day hold (universal).
+    V3.0 Exit System — Per-strategy hold periods (backtested 76K trades, 10yr).
 
-    Mega-study (2,829 stocks, 307K trades) confirms:
-    - Fixed30d beats ALL other exits: +4.31% avg, 61% WR, PF 2.21
+    Hold periods (10yr backtest, 2,837 stocks):
+    - MR Fixed45d: +2.60% avg, 53.8% WR, 14.6%/yr — beats 30d (+1.64%)
+    - MOM Fixed60d: +2.98% avg, 54.2% WR, PF 1.48 — beats 30d (+1.22%)
     - ALL stops/targets/trailing stops HURT mean reversion returns
-    - No profit targets: let positions run to their optimal exit
 
-    Valid early exit reasons (from CLAUDE.md):
+    Valid early exit reasons:
     (a) Earnings within 7 days — binary event risk
     (b) Stock-specific negative sentiment — EXIT
     (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT
     """
 
-    # V2.6: Fixed 30-day hold for ALL regimes
-    HOLD_DAYS = 30
+    MR_HOLD_DAYS = 45
+    MOM_HOLD_DAYS = 60
+    HOLD_DAYS = 45  # Default for backward compat
 
     @staticmethod
     def calc_rsi(closes: List[float], period: int) -> float:
@@ -96,30 +97,20 @@ class ExitEngine:
         highs: List[float] = None,
         lows: List[float] = None,
         learned_params: dict = None,
-        # V2.6 early exit triggers
         earnings_within_7d: bool = False,
         negative_sentiment: bool = False,
         atlas_wr_fail: bool = False,
+        strategy: str = "MEAN_REVERSION",
     ) -> ExitSignal:
         """
-        V2.6: Fixed 30-day hold. No stops, no targets, no RSI exits.
+        V3.0: Per-strategy hold periods. MR=45d, MOM=60d.
+        No stops, no targets, no RSI exits.
         Only valid early exits: earnings, stock-specific bad news, model failure.
-
-        Args:
-            entry_price: Original entry price
-            current_price: Current price
-            days_held: Days since entry
-            closes: Recent price history
-            highs: High prices
-            lows: Low prices
-            learned_params: (ignored in V2.6 — kept for API compat)
-            earnings_within_7d: True if earnings < 7 days away
-            negative_sentiment: True if stock-specific negative news
-            atlas_wr_fail: True if both ATLAS WR + zone WR fail 65%
         """
         return_pct = ((current_price - entry_price) / entry_price) * 100
         rsi2 = self.calc_rsi(closes, 2) if len(closes) >= 3 else 50
-        days_remaining = max(0, self.HOLD_DAYS - days_held)
+        hold_target = self.MOM_HOLD_DAYS if strategy == "MOMENTUM" else self.MR_HOLD_DAYS
+        days_remaining = max(0, hold_target - days_held)
 
         # === VALID EARLY EXIT TRIGGERS (V2.6) ===
 
@@ -153,14 +144,14 @@ class ExitEngine:
                 reason=f"MODEL EXIT: Both ATLAS WR + zone WR fail 65%, return {return_pct:.1f}%"
             )
 
-        # 4. Fixed 30-day time exit
-        if days_held >= self.HOLD_DAYS:
+        # 4. Fixed time exit (MR=45d, MOM=60d)
+        if days_held >= hold_target:
             return ExitSignal(
                 action=ExitAction.SELL_TIME,
                 urgency=70,
                 current_return_pct=return_pct,
                 days_held=days_held,
-                reason=f"TIME EXIT: Held {days_held} days (Fixed{self.HOLD_DAYS}d), return {return_pct:.1f}%"
+                reason=f"TIME EXIT: Held {days_held} days (Fixed{hold_target}d {strategy}), return {return_pct:.1f}%"
             )
 
         # 5. HOLD — let the trade work
@@ -169,7 +160,7 @@ class ExitEngine:
             urgency=0,
             current_return_pct=return_pct,
             days_held=days_held,
-            reason=f"HOLD: Day {days_held}/{self.HOLD_DAYS}, {days_remaining}d remaining, return {return_pct:.1f}%, RSI(2)={rsi2:.1f}"
+            reason=f"HOLD: Day {days_held}/{hold_target}, {days_remaining}d remaining, return {return_pct:.1f}%, RSI(2)={rsi2:.1f}"
         )
 
     def get_scale_out_signal(

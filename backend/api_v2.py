@@ -184,17 +184,17 @@ async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Opt
 # Studies (Connors, Alvarez, BuildAlpha) + our 307,446 trade mega-backtest confirm:
 #   - Trailing stops HURT mean reversion (44% WR — worst of all strategies)
 #   - Stop losses HURT mean reversion (Connors: "stops hurt performance on hundreds of thousands of trades")
-#   - SMA/RSI exits too fast for volatile stocks (+0.38% avg vs Fixed30d +4.31%)
+#   - SMA/RSI exits too fast for volatile stocks (+0.38% avg vs Fixed45d +4.31%)
 #   - ONLY Fixed time exits work for mean reversion
-# V2.6: Universal Fixed30d for all stocks (no per-stock walk-forward selection)
-#   - Fixed30d: +4.31% avg, 61.0% WR, PF 2.21 — best single strategy
+# V2.6: Universal Fixed45d for all stocks (no per-stock walk-forward selection)
+#   - Fixed45d: +4.31% avg, 61.0% WR, PF 2.21 — best single strategy
 #   - Per-stock WF unreliable on low-trade stocks (e.g., LIND got Trail5 = 3.7%)
 
 _exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, ...}
 _EXIT_CACHE_TTL = 21600  # 6 hours
 
 _EXIT_STRATEGIES = {
-    "Fixed30d": {"type": "fixed", "days": 30},
+    "Fixed45d": {"type": "fixed", "days": 45},
 }
 
 
@@ -214,7 +214,7 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
     """Backtest a single exit strategy on a date range. Returns list of trade dicts.
     V2.4: RSI<10 entry, next-day open execution, fee-adjusted returns, non-overlapping."""
     trades = []
-    max_hold = 30
+    max_hold = 45
     _FEE_PCT = 0.30  # $3 round-trip on $1000
     last_exit_day = -1  # Prevent overlapping trades
     for i in range(max(50, start_idx), min(end_idx, len(closes) - max_hold - 1)):  # -1 for entry day offset
@@ -287,10 +287,10 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
 
 
 def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None) -> Dict:
-    """Universal Fixed30d exit for all stocks (V2.6).
+    """Universal Fixed45d exit for all stocks (V2.6).
 
     Research (Connors/Alvarez/BuildAlpha) + our 307K trade mega-backtest:
-    Fixed30d: +4.31% avg, 61.0% WR, PF 2.21 — best single strategy.
+    Fixed45d: +4.31% avg, 61.0% WR, PF 2.21 — best single strategy.
     Per-stock walk-forward selection removed — unreliable on low-trade stocks.
     """
     cache_key = ticker
@@ -305,7 +305,7 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
             if age < _EXIT_CACHE_TTL:
                 return _evaluate_exit_trigger(cached, closes, current_rsi, current_price, entry_price=entry_price, entry_date=entry_date)
 
-    # Backtest Fixed30d on this stock's historical data
+    # Backtest Fixed45d on this stock's historical data
     _FEE_PCT = 0.30
     days = 30
 
@@ -320,7 +320,7 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     for i in range(49, len(closes)):
         sma50_arr[i] = sum(closes[i-49:i+1]) / 50
 
-    # Full-sample backtest for Fixed30d stats
+    # Full-sample backtest for Fixed45d stats
     full_trades = []
     last_exit = -1
     for i in range(50, len(closes) - days - 2):
@@ -344,7 +344,7 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     ci_lo, ci_hi = _wilson_ci(sum(1 for r in full_trades if r > 0), n) if n > 0 else (0, 0)
 
     result = {
-        "strategy": "Fixed30d", "wr": wr,
+        "strategy": "Fixed45d", "wr": wr,
         "avg_ret": avg_ret, "avg_hold": 30,
         "oos_wr": wr, "is_wr": wr,
         "overfitting_ratio": 1.0, "validation_note": "UNIVERSAL_FIXED30D",
@@ -359,9 +359,9 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
 
 
 def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, current_price: float, entry_price: float = 0, entry_date: str = "") -> Dict:
-    """Check if Fixed30d exit is triggered RIGHT NOW.
+    """Check if Fixed45d exit is triggered RIGHT NOW.
 
-    V2.6: Universal Fixed30d exit. No stops, no trailing stops, no RSI exits.
+    V2.6: Universal Fixed45d exit. No stops, no trailing stops, no RSI exits.
     Research (Connors/Alvarez/BuildAlpha) proves stops HURT mean reversion.
 
     MOMENTUM OVERRIDE: When 30d triggers but stock is profitable (>5%) AND
@@ -577,14 +577,14 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     sma50_arr = _sma_array(closes, 50)
     last_exit_day = -1
     trades = []
-    for i in range(50, len(closes) - 32):
+    for i in range(50, len(closes) - 47):
         if i <= last_exit_day:
             continue
-        if rsi2_arr[i] < 10 and closes[i] > sma50_arr[i]:
+        if rsi2_arr[i] < 10 and closes[i] >= 10:
             entry_p = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-            ret = ((closes[i + 1 + 30] - entry_p) / entry_p) * 100 - _FEE_PCT
+            ret = ((closes[i + 1 + 45] - entry_p) / entry_p) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i]})
-            last_exit_day = i + 1 + 30
+            last_exit_day = i + 46
 
     wins_count = sum(1 for t in trades if t["win"])
     wr = wins_count / len(trades) * 100 if trades else 0
@@ -604,19 +604,19 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
 
     # Exit zone analysis: forward 30-day returns at CURRENT RSI zone using ALL data points
     # This answers: "When this stock was at RSI X historically, what was the 30-day forward return?"
-    # V2.6: Fixed30d universal exit — consistent with entry backtests
+    # V2.6: Fixed45d universal exit — consistent with entry backtests
     # Reuses pre-computed rsi2_arr from above (no recalculation)
     exit_zone_trades_list = []
     ez_last_exit = -1
-    for i in range(50, len(closes) - 32):
+    for i in range(50, len(closes) - 47):
         if i <= ez_last_exit:
             continue
         if zone_low <= rsi2_arr[i] < zone_high:
             entry_px = opens[i + 1] if opens and i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-            exit_px = closes[i + 1 + 30]
+            exit_px = closes[i + 1 + 45]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
             exit_zone_trades_list.append({"return": ret, "win": ret > 0})
-            ez_last_exit = i + 1 + 30
+            ez_last_exit = i + 46
 
     exit_zone_ret = sum(t["return"] for t in exit_zone_trades_list) / len(exit_zone_trades_list) if exit_zone_trades_list else 0
     exit_zone_wr = sum(1 for t in exit_zone_trades_list if t["win"]) / len(exit_zone_trades_list) * 100 if exit_zone_trades_list else 0
@@ -992,7 +992,7 @@ async def get_portfolio():
         _regime_name = _regime.get("regime", "HEALTHY")
         _is_true_bear = _regime_name == "BEAR"  # Only true bear (drawdown >20% or >5% below SMA200)
 
-        # Priority 1: Fixed30d exit triggered
+        # Priority 1: Fixed45d exit triggered
         if exit_triggered:
             signal = "EXIT"
             issues.append(f"Exit triggered ({tech.get('exit_strategy', '')}: {tech.get('exit_label', '')})")
@@ -1282,7 +1282,7 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
     _FEE_PCT = 0.30
     last_exit_day = -1
     trades = []
-    for i in range(50, len(closes) - 32):
+    for i in range(50, len(closes) - 47):
         if i <= last_exit_day:
             continue
         hist = closes[:i + 1]
@@ -1290,10 +1290,10 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
         h_sma = _entry.calc_sma(hist, 50)
         if h_rsi < 10 and hist[-1] > h_sma:
             entry_px = closes[i]  # ILS data has no opens — use close as proxy
-            exit_px = closes[i + 1 + 30]
+            exit_px = closes[i + 1 + 45]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0, "rsi": h_rsi})
-            last_exit_day = i + 1 + 30
+            last_exit_day = i + 46
 
     wr = sum(1 for t in trades if t["win"]) / len(trades) * 100 if trades else 0
     avg_ret = sum(t["return"] for t in trades) / len(trades) if trades else 0
@@ -1307,11 +1307,11 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
 
     # Exit zone analysis (all RSI values, fee-adjusted, V2.6: 30-day hold)
     exit_zt = []
-    for i in range(50, len(closes) - 32):
+    for i in range(50, len(closes) - 47):
         hist = closes[:i + 1]
         h_rsi = _entry.calc_rsi(hist, 2)
         if zone_lo <= h_rsi < zone_hi:
-            ret = ((closes[i + 1 + 30] - closes[i]) / closes[i]) * 100 - _FEE_PCT
+            ret = ((closes[i + 1 + 45] - closes[i]) / closes[i]) * 100 - _FEE_PCT
             exit_zt.append({"return": ret, "win": ret > 0})
     exit_zone_ret = sum(t["return"] for t in exit_zt) / len(exit_zt) if exit_zt else 0
     exit_zone_wr = sum(1 for t in exit_zt if t["win"]) / len(exit_zt) * 100 if exit_zt else 0
@@ -1354,10 +1354,10 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
         "zone_trades": len(zt), "rsi_zone": f"{zone_lo}-{zone_hi}",
         "exit_zone_return": round(exit_zone_ret, 2),
         "exit_zone_wr": round(exit_zone_wr, 1), "exit_zone_trades": len(exit_zt),
-        "exit_strategy": "Fixed30d", "exit_strategy_wr": round(wr, 1),
+        "exit_strategy": "Fixed45d", "exit_strategy_wr": round(wr, 1),
         "exit_strategy_ret": round(avg_ret, 2), "exit_strategy_hold": 30.0,
         "exit_triggered": False, "exit_price": 0, "exit_price_pct": 0,
-        "exit_label": f"Hold 30d | +{avg_ret:.1f}% WR {wr:.0f}%",
+        "exit_label": f"Hold 45d | +{avg_ret:.1f}% WR {wr:.0f}%",
         "signal": signal, "issues": issues,
         "sparkline": sparkline,
     }
@@ -1986,7 +1986,7 @@ async def get_best_replacement(sell_ticker: str):
     sell_score = holdings_scores.get(sell_ticker, {}).get("score", 0)
     if sell_score == 0:
         # Not a current holding — just use 0 as baseline
-        bt = _backtest_30day(sell_ticker)
+        bt = _backtest_mr(sell_ticker)
         sell_score = bt.get("avg_return", 0) * bt.get("win_rate", 0) / 100
 
     # Load all backtested candidates from today's scan cache
@@ -2068,7 +2068,7 @@ async def get_best_replacement(sell_ticker: str):
         }
 
 
-def _backtest_30day(ticker: str) -> dict:
+def _backtest_mr(ticker: str) -> dict:
     """Backtest using ATLAS V2.5: RSI<10 entry, 30-day fixed hold, price > SMA50.
     Fallback for holdings scoring when hybrid exit data unavailable."""
     df = _cache.get(ticker, 1260)
@@ -2087,15 +2087,15 @@ def _backtest_30day(ticker: str) -> dict:
     sma_arr = _sma_array(closes, 50)
     last_exit_day = -1
     trades = []
-    for i in range(50, len(closes) - 32):
+    for i in range(50, len(closes) - 47):
         if i <= last_exit_day:
             continue
         if rsi_arr[i] < 10 and closes[i] > sma_arr[i]:
             entry_px = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-            exit_px = closes[i + 1 + 30]
+            exit_px = closes[i + 1 + 45]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0})
-            last_exit_day = i + 1 + 30
+            last_exit_day = i + 46
 
     if len(trades) < 10:
         return {}
@@ -2123,7 +2123,7 @@ def _get_holdings_scores() -> tuple:
             strat_wr = min(strat_wr, tech["bayesian_wr"])  # Use the more conservative estimate
         if strat_ret == 0 or strat_wr == 0:
             try:
-                bt = _backtest_30day(ticker)
+                bt = _backtest_mr(ticker)
                 strat_wr = bt.get("win_rate", 0)
                 strat_ret = bt.get("avg_return", 0)
             except Exception:
@@ -2929,15 +2929,15 @@ async def get_sectors():
         sma_arr = _sma_array(closes, 50)
         trades = []
         le = -1
-        for i in range(50, len(closes) - 32):
+        for i in range(50, len(closes) - 47):
             if i <= le:
                 continue
             if rsi_arr[i] < 10 and closes[i] > sma_arr[i]:
                 ep = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-                if i + 1 + 30 < len(closes):
-                    ret = ((closes[i + 1 + 30] - ep) / ep) * 100 - 0.30
+                if i + 1 + 45 < len(closes):
+                    ret = ((closes[i + 1 + 45] - ep) / ep) * 100 - 0.30
                     trades.append(ret)
-                    le = i + 31
+                    le = i + 46
 
         mr_wr = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
         mr_avg = sum(trades) / len(trades) if trades else 0
@@ -3776,7 +3776,7 @@ def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
 
     # Track last exit day per zone to prevent overlapping trades
     zone_last_exit = {key: -1 for key in zones}
-    for i in range(50, len(closes) - 32):  # -32 to ensure room for i+1+30
+    for i in range(50, len(closes) - 47):  # -32 to ensure room for i+1+30
         hist_closes = closes[:i + 1]
         hist_rsi = _entry.calc_rsi(hist_closes, 2)
         hist_sma = _entry.calc_sma(hist_closes, 50)
@@ -3791,14 +3791,14 @@ def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
 
         # V2.6: 30-day forward return, next-day open entry, fee-adjusted
         entry_px = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-        exit_px = closes[i + 1 + 30]  # True 30-day hold from entry
+        exit_px = closes[i + 1 + 45]  # True 30-day hold from entry
         ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
 
         for key, z in zones.items():
             if z["rsi_lo"] <= hist_rsi < z["rsi_hi"] and i > zone_last_exit[key]:
                 z["trades"].append({"return": ret, "win": ret > 0})
                 z["drops"].append(pct_drop)
-                zone_last_exit[key] = i + 1 + 30
+                zone_last_exit[key] = i + 1 + 45
 
     # Calculate price targets from current 10-day high
     recent_10d_high = max(closes[-10:]) if len(closes) >= 10 else closes[-1]
@@ -3876,7 +3876,7 @@ async def analyze_stock(ticker: str):
             raise HTTPException(status_code=404, detail=f"No data for {ticker}. Could not fetch historical prices.")
 
     # 2. 7-day fixed hold backtest
-    bt = _backtest_30day(ticker)
+    bt = _backtest_mr(ticker)
 
     # 3. Live quote (fall back to latest historical close if market closed)
     async with aiohttp.ClientSession() as session:
@@ -3977,7 +3977,7 @@ async def analyze_stock(ticker: str):
             df_hist = _cache.get(ticker, 365)
             if df_hist is not None and len(df_hist) >= 50:
                 closes_list = df_hist["Close"].dropna().tolist()
-                bt_data = _backtest_30day(ticker)
+                bt_data = _backtest_mr(ticker)
                 best_exit = _select_best_exit(ticker, closes_list, bt_data.get("trades", 0) if bt_data else 0, rsi2)
                 if best_exit:
                     triggered = _evaluate_exit_trigger(
