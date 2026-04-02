@@ -257,12 +257,10 @@ export function OpportunitiesTab() {
                         sig.score >= 40 ? "text-blue-400" : "text-neutral-300"
                       )}>{sig.score.toFixed(0)}</div>
                     </div>
-                    {sig.strategy !== "MOMENTUM" && (
-                      <div>
-                        <span className="text-neutral-500">WR</span>
-                        <div className="text-neutral-200">{sig.confidence.toFixed(0)}% <span className="text-neutral-600">({sig.trades}t)</span></div>
-                      </div>
-                    )}
+                    <div>
+                      <span className="text-neutral-500">WR</span>
+                      <div className="text-neutral-200">{sig.confidence.toFixed(0)}% <span className="text-neutral-600">({sig.trades}t)</span></div>
+                    </div>
                     {sig.strategy !== "MEAN_REVERSION" && (
                       <div>
                         <span className="text-neutral-500">20d Ret</span>
