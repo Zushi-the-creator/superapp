@@ -20,11 +20,16 @@ def seed_if_needed():
             count = conn.execute(
                 "SELECT COUNT(DISTINCT ticker) FROM cache_meta"
             ).fetchone()[0]
+            # Check data depth — need 1000+ bars for 10yr backtests
+            avg_bars = conn.execute(
+                "SELECT AVG(cnt) FROM (SELECT COUNT(*) as cnt FROM daily_prices GROUP BY ticker LIMIT 100)"
+            ).fetchone()[0] or 0
             conn.close()
-            print(f"[Seed] Volume DB OK ({count} tickers)")
-            if count >= MIN_TICKERS:
-                return  # DB is good
-            print(f"[Seed] Only {count} tickers (< {MIN_TICKERS})")
+            print(f"[Seed] Volume DB: {count} tickers, ~{avg_bars:.0f} avg bars")
+            if count >= MIN_TICKERS and avg_bars >= 1000:
+                return  # DB has enough tickers AND depth
+            if count >= MIN_TICKERS and avg_bars < 1000:
+                print(f"[Seed] Data too shallow ({avg_bars:.0f} bars < 1000). Re-seeding with 10yr data...")
         except Exception as e:
             print(f"[Seed] Volume DB corrupted ({e}), removing...")
             try:
