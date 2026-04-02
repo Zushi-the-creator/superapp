@@ -311,19 +311,34 @@ def precompute_all(db_path=DB_PATH, force=False):
         ))
 
         processed += 1
+
+        # Batch commit every 100 stocks (saves partial progress + releases GIL)
+        if processed % 100 == 0:
+            conn.executemany(
+                "INSERT OR REPLACE INTO backtest_cache "
+                "(ticker, mr_wr, mr_avg_return, mr_trades, mr_score, "
+                " mom_wr, mom_avg_return, mom_trades, mom_score, last_computed) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                results[-100:]
+            )
+            conn.commit()
+            # Brief sleep to yield CPU to other threads (HTTP handlers)
+            time.sleep(0.01)
+
         if processed % 500 == 0:
             elapsed = time.time() - t0
             rate = processed / elapsed if elapsed > 0 else 0
             print(f"  [{processed}/{len(to_compute)}] {elapsed:.1f}s ({rate:.0f} stocks/s)")
 
-    # Bulk insert
-    if results:
+    # Final commit for remaining
+    remainder = processed % 100
+    if remainder > 0 and results:
         conn.executemany(
             "INSERT OR REPLACE INTO backtest_cache "
             "(ticker, mr_wr, mr_avg_return, mr_trades, mr_score, "
             " mom_wr, mom_avg_return, mom_trades, mom_score, last_computed) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            results
+            results[-remainder:]
         )
         conn.commit()
 
