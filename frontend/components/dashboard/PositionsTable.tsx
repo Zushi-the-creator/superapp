@@ -405,45 +405,66 @@ const PositionRow = memo(function PositionRow({
               <div className="col-span-2 md:col-span-4 mt-1 pt-2 border-t border-neutral-800/50">
                 <div className="grid grid-cols-3 gap-3">
                   <div>
-                    <span className="text-neutral-500">Exit Strategy</span>
+                    <span className="text-neutral-500">Strategy</span>
                     <div className="font-medium text-amber-400">
-                      Fixed 30d
+                      {pos.strategy === "MOMENTUM" ? "MOM 60d" : "MR 45d"}
                     </div>
                   </div>
                   <div>
                     <span className="text-neutral-500">Days Held</span>
-                    <div className={cn(
-                      "font-medium",
-                      pos.days_held >= 30 ? "text-signal-sell animate-pulse" :
-                      pos.days_held >= 25 ? "text-amber-400" : "text-neutral-200"
-                    )}>
-                      {pos.days_held} / 30d
-                      {pos.days_held >= 30 && <span className="text-xs ml-1">(EXIT DUE)</span>}
-                    </div>
+                    {(() => {
+                      const target = pos.strategy === "MOMENTUM" ? 60 : 45;
+                      const warn = target - 5;
+                      return (
+                        <div className={cn(
+                          "font-medium",
+                          pos.days_held >= target ? "text-signal-sell animate-pulse" :
+                          pos.days_held >= warn ? "text-amber-400" : "text-neutral-200"
+                        )}>
+                          {pos.days_held} / {target}d
+                          {pos.days_held >= target && <span className="text-xs ml-1">(EXIT DUE)</span>}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div>
-                    <span className="text-neutral-500">P&L at Exit</span>
+                    <span className="text-neutral-500">P&L</span>
                     <div className={cn("font-medium", pnlColor(pos.pnl_pct))}>
                       {formatPercent(pos.pnl_pct)}
                     </div>
                   </div>
                 </div>
+                {/* Rotation signal */}
+                {pos.rotation_target && (
+                  <div className="mt-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs">
+                    <span className="text-amber-400 font-medium">ROTATE to {pos.rotation_target}</span>
+                    <span className="text-neutral-500 ml-2">score gap: +{pos.rotation_score_gap}</span>
+                  </div>
+                )}
                 {/* Visual hold progress bar */}
-                <div className="mt-2 relative h-2 bg-neutral-800 rounded-full overflow-hidden">
-                  <div
-                    className={cn(
-                      "absolute top-0 left-0 h-full rounded-full transition-all",
-                      pos.days_held >= 30 ? "bg-signal-sell" :
-                      pos.days_held >= 25 ? "bg-amber-500" : "bg-blue-500"
-                    )}
-                    style={{ width: `${Math.min(100, (pos.days_held / 30) * 100)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-[10px] text-neutral-600 mt-0.5">
-                  <span>Entry</span>
-                  <span>{Math.max(0, 30 - pos.days_held)}d remaining</span>
-                  <span>30d Exit</span>
-                </div>
+                {(() => {
+                  const target = pos.strategy === "MOMENTUM" ? 60 : 45;
+                  const warn = target - 5;
+                  return (
+                    <>
+                      <div className="mt-2 relative h-2 bg-neutral-800 rounded-full overflow-hidden">
+                        <div
+                          className={cn(
+                            "absolute top-0 left-0 h-full rounded-full transition-all",
+                            pos.days_held >= target ? "bg-signal-sell" :
+                            pos.days_held >= warn ? "bg-amber-500" : "bg-blue-500"
+                          )}
+                          style={{ width: `${Math.min(100, (pos.days_held / target) * 100)}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] text-neutral-600 mt-0.5">
+                        <span>Entry</span>
+                        <span>{Math.max(0, target - pos.days_held)}d remaining</span>
+                        <span>{target}d Exit</span>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
               {pos.issues.length > 0 && (
                 <div className="col-span-2 md:col-span-4">

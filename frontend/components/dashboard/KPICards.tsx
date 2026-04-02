@@ -64,8 +64,8 @@ export function KPICards({
       bg: (summary.realized_pnl ?? 0) >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
     {
-      label: `${summary.position_count} Positions`,
-      value: `Adj. WR ${summary.avg_win_rate.toFixed(0)}%`,
+      label: `${summary.position_count}/${summary.max_positions ?? 5} Positions`,
+      value: `WR ${summary.avg_win_rate.toFixed(0)}% · ${summary.slots_available ?? 0} slots`,
       icon: Target,
       color: summary.avg_win_rate >= 80 ? "text-signal-buy" : summary.avg_win_rate >= 65 ? "text-amber-400" : "text-signal-sell",
       bg: summary.avg_win_rate >= 80 ? "bg-signal-buy/10" : summary.avg_win_rate >= 65 ? "bg-amber-500/10" : "bg-signal-sell/10",

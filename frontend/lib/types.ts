@@ -63,6 +63,11 @@ export interface PositionDetail {
   bayesian_wr?: number;
   wilson_lower?: number;
   trades_per_year?: number;
+  // Strategy (V3.0: MR=45d, MOM=60d hold)
+  strategy: string; // "MEAN_REVERSION" | "MOMENTUM" | "BOTH"
+  // Rotation (V3.0: score gap > 2, min 10d held)
+  rotation_target: string | null;
+  rotation_score_gap: number;
   // Signal
   signal: string;
   issues: string[];
@@ -88,9 +93,11 @@ export interface PortfolioSummary {
   total_fees: number;
   total_deposited: number;
   position_count: number;
+  max_positions: number;
+  slots_available: number;
   avg_win_rate: number;
   cash: number;
-  market_session: string; // PRE_MARKET / REGULAR / AFTER_HOURS / CLOSED
+  market_session: string;
   timestamp: string;
 }
 
@@ -99,8 +106,13 @@ export interface MarketRegime {
   vix: number;
   vix_regime: string;
   spy_5d_return: number;
+  spy_price?: number;
+  spy_sma200?: number;
+  sma200_gap_pct?: number;
+  drawdown_pct?: number;
   position_size_pct: number;
   pause_entries: boolean;
+  pause_mr?: boolean;
   reason: string;
 }
 
@@ -359,6 +371,13 @@ export interface PerformanceResponse {
   avg_loss_pct: number;
   best_trade: string;
   worst_trade: string;
+  // Advanced metrics (V3.0)
+  cagr: number;
+  max_drawdown: number;
+  sharpe_ratio: number;
+  profit_factor: number;
+  avg_hold_days: number;
+  total_trades: number;
 }
 
 export interface MomentumSignal {
