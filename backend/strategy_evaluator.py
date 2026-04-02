@@ -194,9 +194,10 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         if ticker in held:
             continue
 
-        # Load price data
-        c.execute("SELECT date, open, high, low, close, volume FROM daily_prices WHERE ticker=? ORDER BY date", (ticker,))
-        rows = c.fetchall()
+        # Load ONLY last 260 bars (enough for SMA200 + momentum checks)
+        # NOT all 2500 bars — that's what made the evaluator take 10+ min
+        c.execute("SELECT date, open, high, low, close, volume FROM daily_prices WHERE ticker=? ORDER BY date DESC LIMIT 260", (ticker,))
+        rows = list(reversed(c.fetchall()))
         if len(rows) < 80:
             continue
 
