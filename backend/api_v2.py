@@ -1110,12 +1110,21 @@ async def get_portfolio():
             above_sma10=live_price > tech.get("sma10", 0) if tech and tech.get("sma10", 0) > 0 else False,
             regime=regime,
             tier="NONE" if (tech and tech.get("exit_triggered", False)) else (tech.get("tier", "NONE") if tech else "NONE"),
-            win_rate=tech.get("win_rate", 0) if tech else 0,
-            bayesian_wr=tech.get("bayesian_wr", tech.get("win_rate", 0)) if tech else 0,
+            # For MOMENTUM positions, use momentum backtest stats (not MR)
+            win_rate=(lambda: (
+                _cache.conn.execute("SELECT mom_wr FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
+            )[0] if pos_strategy == "MOMENTUM" else tech.get("win_rate", 0) if tech else 0)(),
+            bayesian_wr=(lambda: (
+                _cache.conn.execute("SELECT mom_wr FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
+            )[0] if pos_strategy == "MOMENTUM" else tech.get("bayesian_wr", tech.get("win_rate", 0)) if tech else 0)(),
             wilson_lower=tech.get("wilson_lower", 0) if tech else 0,
             trades_per_year=tech.get("trades_per_year", 0) if tech else 0,
-            total_trades=tech.get("total_trades", 0) if tech else 0,
-            avg_return=tech.get("avg_return", 0) if tech else 0,
+            total_trades=(lambda: (
+                _cache.conn.execute("SELECT mom_trades FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
+            )[0] if pos_strategy == "MOMENTUM" else tech.get("total_trades", 0) if tech else 0)(),
+            avg_return=(lambda: (
+                _cache.conn.execute("SELECT mom_avg_return FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
+            )[0] if pos_strategy == "MOMENTUM" else tech.get("avg_return", 0) if tech else 0)(),
             zone_return=tech.get("zone_return", 0) if tech else 0,
             zone_wr=tech.get("zone_wr", 0) if tech else 0,
             zone_trades=tech.get("zone_trades", 0) if tech else 0,

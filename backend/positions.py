@@ -194,7 +194,7 @@ class PositionManager:
                 return {"error": "Position not found"}
 
             columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency', 'strategy']
             position = dict(zip(columns, row))
 
             # Update position
@@ -255,7 +255,7 @@ class PositionManager:
                 """)
 
             columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency', 'strategy']
 
             positions = []
             for row in cursor.fetchall():
@@ -302,7 +302,7 @@ class PositionManager:
                 return {"error": "Position not found"}
 
             columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency', 'strategy']
             position = dict(zip(columns, row))
 
             # Calculate P&L
@@ -488,7 +488,7 @@ class PositionManager:
                 """)
 
             columns = ['id', 'ticker', 'entry_date', 'entry_price', 'shares', 'position_type',
-                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency']
+                       'status', 'exit_date', 'exit_price', 'notes', 'created_at', 'currency', 'strategy']
 
             positions = []
             for row in cursor.fetchall():
