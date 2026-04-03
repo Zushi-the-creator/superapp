@@ -401,7 +401,7 @@ const PositionRow = memo(function PositionRow({
                   Open Full Chart
                 </button>
               </div>
-              {/* V2.6: Fixed 30-day exit countdown */}
+              {/* V3.0: Per-strategy exit countdown (MR 45d, MOM 60d) */}
               <div className="col-span-2 md:col-span-4 mt-1 pt-2 border-t border-neutral-800/50">
                 <div className="grid grid-cols-3 gap-3">
                   <div>

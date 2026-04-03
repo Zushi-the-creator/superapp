@@ -195,6 +195,7 @@ _EXIT_CACHE_TTL = 21600  # 6 hours
 
 _EXIT_STRATEGIES = {
     "Fixed45d": {"type": "fixed", "days": 45},
+    "Fixed60d": {"type": "fixed", "days": 60},
 }
 
 
@@ -1072,14 +1073,14 @@ async def get_portfolio():
             except Exception:
                 pass
 
-        # Exit strategy target days — only for fixed-period exits (they have a real target)
-        # RSI/SMA/trailing exits have no fixed target — showing avg hold as "target" is misleading
-        exit_strat_name = tech.get("exit_strategy", "") if tech else ""
-        exit_target_days = 0
-        if exit_strat_name:
-            strat_def = _EXIT_STRATEGIES.get(exit_strat_name, {})
-            if strat_def.get("type") == "fixed":
-                exit_target_days = strat_def.get("days", 0)
+        # Exit strategy: MR=Fixed45d, Momentum=Fixed60d (per position strategy column)
+        pos_strategy = pos.get("strategy", "MEAN_REVERSION")
+        if pos_strategy == "MOMENTUM":
+            exit_strat_name = "Fixed60d"
+            exit_target_days = 60
+        else:
+            exit_strat_name = "Fixed45d"
+            exit_target_days = 45
 
         # Exit targets based on regime
         regime = tech.get("regime", "BULL") if tech else "BULL"
@@ -2707,7 +2708,7 @@ def _calc_trade_fee(ticker: str) -> float:
     return 0.0 if count < 10 else 1.50
 
 
-MAX_POSITIONS = 5  # Kelly + walk-forward: optimal at 5, +28.2% CAGR, -16.4% MaxDD
+MAX_POSITIONS = 6  # 5-6 optimal. 2 keepers + 4 momentum = 6 current
 
 
 @router.post("/positions/buy", response_model=TradeResult)
