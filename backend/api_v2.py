@@ -345,10 +345,10 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
 
     result = {
         "strategy": "Fixed60d", "wr": wr,
-        "avg_ret": avg_ret, "avg_hold": 30,
+        "avg_ret": avg_ret, "avg_hold": 60,
         "oos_wr": wr, "is_wr": wr,
-        "overfitting_ratio": 1.0, "validation_note": "UNIVERSAL_FIXED30D",
-        "overfit": 1.0, "validation": "UNIVERSAL_FIXED30D",
+        "overfitting_ratio": 1.0, "validation_note": "UNIVERSAL_FIXED60D",
+        "overfit": 1.0, "validation": "UNIVERSAL_FIXED60D",
         "ci_lo": ci_lo, "ci_hi": ci_hi,
         "oos_ci_lo": ci_lo, "oos_ci_hi": ci_hi,
         "_cached_at": datetime.now().timestamp(),
@@ -394,7 +394,7 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
     # Connors/Alvarez/BuildAlpha research + our data all confirm
 
     # Fixed exit: exit after N TRADING days from entry
-    hold_target = _EXIT_STRATEGIES.get(strategy, {}).get("days", 30)
+    hold_target = _EXIT_STRATEGIES.get(strategy, {}).get("days", 60)
     exit_price = round(current_price * (1 + cached.get("avg_ret", 0) / 100), 2)
     if entry_date:
         try:
@@ -439,7 +439,7 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
         label = "EXIT NOW: " + label
 
     result = {
-        "strategy": strategy, "wr": wr, "avg_ret": avg_ret, "avg_hold": 30,
+        "strategy": strategy, "wr": wr, "avg_ret": avg_ret, "avg_hold": hold_target,
         "triggered": triggered, "exit_price": exit_price, "exit_price_pct": exit_price_pct,
         "label": label,
         "momentum_override": momentum_override,
@@ -1381,9 +1381,9 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
         "exit_zone_return": round(exit_zone_ret, 2),
         "exit_zone_wr": round(exit_zone_wr, 1), "exit_zone_trades": len(exit_zt),
         "exit_strategy": "Fixed60d", "exit_strategy_wr": round(wr, 1),
-        "exit_strategy_ret": round(avg_ret, 2), "exit_strategy_hold": 30.0,
+        "exit_strategy_ret": round(avg_ret, 2), "exit_strategy_hold": 60.0,
         "exit_triggered": False, "exit_price": 0, "exit_price_pct": 0,
-        "exit_label": f"Hold 45d | +{avg_ret:.1f}% WR {wr:.0f}%",
+        "exit_label": f"Hold 60d | +{avg_ret:.1f}% WR {wr:.0f}%",
         "signal": signal, "issues": issues,
         "sparkline": sparkline,
     }
@@ -2499,7 +2499,7 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
         zone_trades=r.get("zone_trades", 0),
         zone_win_rate=r.get("zone_win_rate", 0),
         volume_ratio=vol_ratio,
-        hold_days=r.get("hold_days", 30),
+        hold_days=r.get("hold_days", 60),
         low52_dist=r.get("low52_dist", 0),
         atr_pct=r.get("atr_pct", 0),
         sma50_buffer=r.get("sma50_buffer", 0),
@@ -4103,7 +4103,7 @@ async def analyze_stock(ticker: str):
                         "exit_strategy": best_exit.get("strategy", ""),
                         "exit_strategy_wr": best_exit.get("wr", 0),
                         "exit_strategy_ret": best_exit.get("avg_ret", 0),
-                        "exit_strategy_hold": best_exit.get("avg_hold", 30),
+                        "exit_strategy_hold": best_exit.get("avg_hold", 60),
                         "exit_triggered": triggered.get("triggered", False),
                         "exit_price": triggered.get("exit_price", 0),
                         "exit_label": triggered.get("label", ""),
@@ -4112,8 +4112,8 @@ async def analyze_stock(ticker: str):
                     }
                     held_position_info["exit_triggered"] = triggered.get("triggered", False)
                     held_position_info["exit_label"] = triggered.get("label", "")
-                    held_position_info["target_hold_days"] = 30  # Fixed30d
-                    held_position_info["days_remaining"] = max(0, 30 - days_held) if days_held < 30 else 0
+                    held_position_info["target_hold_days"] = 60  # Fixed60d
+                    held_position_info["days_remaining"] = max(0, 60 - days_held) if days_held < 60 else 0
                     if triggered.get("triggered", False):
                         issues.append(f"Exit triggered ({best_exit.get('strategy', '')}: {triggered.get('label', '')})")
         else:
@@ -4222,10 +4222,10 @@ async def analyze_stock(ticker: str):
                 best_exit = _select_best_exit(ticker, closes_list, None, rsi2, opens=opens_list)
                 if best_exit:
                     proposed_strategy = {
-                        "exit_strategy": best_exit.get("strategy", "Fixed30d"),
+                        "exit_strategy": best_exit.get("strategy", "Fixed60d"),
                         "exit_strategy_wr": round(best_exit.get("wr", 0), 1),
                         "exit_strategy_ret": round(best_exit.get("avg_ret", 0), 2),
-                        "exit_strategy_hold": best_exit.get("avg_hold", 30),
+                        "exit_strategy_hold": best_exit.get("avg_hold", 60),
                         "validation": best_exit.get("validation", ""),
                     }
         except Exception as e:
@@ -4235,7 +4235,7 @@ async def analyze_stock(ticker: str):
             "exit_strategy": exit_strategy_info.get("exit_strategy", ""),
             "exit_strategy_wr": round(exit_strategy_info.get("exit_strategy_wr", 0), 1),
             "exit_strategy_ret": round(exit_strategy_info.get("exit_strategy_ret", 0), 2),
-            "exit_strategy_hold": exit_strategy_info.get("exit_strategy_hold", 30),
+            "exit_strategy_hold": exit_strategy_info.get("exit_strategy_hold", 60),
             "validation": "HELD_POSITION",
         }
 
