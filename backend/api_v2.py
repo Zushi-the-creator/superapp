@@ -1147,7 +1147,7 @@ async def get_portfolio():
             exit_strategy_oos_wr=tech.get("exit_strategy_oos_wr", 0) if tech else 0,
             exit_strategy_is_wr=tech.get("exit_strategy_is_wr", 0) if tech else 0,
             exit_strategy_overfitting=tech.get("exit_strategy_overfitting", 0) if tech else 0,
-            exit_strategy_validation=tech.get("exit_strategy_validation", "") if tech else "",
+            exit_strategy_validation=f"UNIVERSAL_FIXED{exit_target_days}D",
             exit_strategy_oos_ci_lo=tech.get("exit_strategy_oos_ci_lo", 0) if tech else 0,
             exit_strategy_oos_ci_hi=tech.get("exit_strategy_oos_ci_hi", 0) if tech else 0,
             sparkline=tech.get("sparkline", []) if tech else [],
