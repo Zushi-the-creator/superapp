@@ -205,17 +205,6 @@ const PositionRow = memo(function PositionRow({
                     RIDING
                   </span>
                 )}
-                {!pos.exit_momentum_override && pos.exit_strategy_validation && (
-                  <span className={cn(
-                    "text-[9px] px-1 rounded font-medium",
-                    pos.exit_strategy_validation === "VALID" ? "bg-signal-buy/20 text-signal-buy" :
-                    pos.exit_strategy_validation === "CAUTION" ? "bg-amber-500/20 text-amber-400" :
-                    pos.exit_strategy_validation === "REJECTED" ? "bg-signal-sell/20 text-signal-sell" :
-                    "bg-neutral-700 text-neutral-400"
-                  )}>
-                    {pos.exit_strategy_validation}
-                  </span>
-                )}
               </div>
               {/* Days progress: held / target */}
               <div className="text-[10px] text-neutral-500">
@@ -333,17 +322,6 @@ const PositionRow = memo(function PositionRow({
                       pos.days_held >= pos.exit_strategy_target_days ? "text-amber-400" : "text-neutral-400"
                     )}>
                       ({pos.days_held}/{pos.exit_strategy_target_days}d)
-                    </span>
-                  )}
-                  {pos.exit_strategy_validation && (
-                    <span className={cn(
-                      "text-[9px] px-1 rounded font-medium",
-                      pos.exit_strategy_validation === "VALID" ? "bg-signal-buy/20 text-signal-buy" :
-                      pos.exit_strategy_validation === "CAUTION" ? "bg-amber-500/20 text-amber-400" :
-                      pos.exit_strategy_validation === "REJECTED" ? "bg-signal-sell/20 text-signal-sell" :
-                      "bg-neutral-700 text-neutral-400"
-                    )}>
-                      {pos.exit_strategy_validation}
                     </span>
                   )}
                 </div>
