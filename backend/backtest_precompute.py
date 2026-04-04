@@ -28,8 +28,8 @@ _UNIVERSE_WR = 53.5
 _PRIOR_WEIGHT = 10
 
 # Hold periods
-MR_HOLD_DAYS = 45
-MOM_HOLD_DAYS = 60
+MR_HOLD_DAYS = 60
+MOM_HOLD_DAYS = 90
 
 # Fee per trade (round-trip)
 FEE_PCT = 0.30

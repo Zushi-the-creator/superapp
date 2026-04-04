@@ -49,9 +49,9 @@ class ExitEngine:
     """
     V3.0 Exit System — Per-strategy hold periods (backtested 76K trades, 10yr).
 
-    Hold periods (10yr backtest, 2,837 stocks):
-    - MR Fixed45d: +2.60% avg, 53.8% WR, 14.6%/yr — beats 30d (+1.64%)
-    - MOM Fixed60d: +2.98% avg, 54.2% WR, PF 1.48 — beats 30d (+1.22%)
+    Hold periods (10yr backtest, 48,849 trades):
+    - MR Fixed60d: +3.48% avg, 54.8% WR, PF 1.51 — beats 45d (+2.34%)
+    - MOM Fixed90d: best momentum hold period
     - ALL stops/targets/trailing stops HURT mean reversion returns
 
     Valid early exit reasons:
@@ -60,9 +60,9 @@ class ExitEngine:
     (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT
     """
 
-    MR_HOLD_DAYS = 45
-    MOM_HOLD_DAYS = 60
-    HOLD_DAYS = 45  # Default for backward compat
+    MR_HOLD_DAYS = 60
+    MOM_HOLD_DAYS = 90
+    HOLD_DAYS = 60  # Default for backward compat
 
     @staticmethod
     def calc_rsi(closes: List[float], period: int) -> float:

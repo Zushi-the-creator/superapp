@@ -12,7 +12,7 @@ from atlas_v2.entry import EntryEngine
 _cache = DataCache()
 _entry = EntryEngine()
 
-HOLD_DAYS = 45
+HOLD_DAYS = 60
 FEE = 1.50
 FEE_PCT = 0.30  # 0.30% fee deducted from backtest returns
 

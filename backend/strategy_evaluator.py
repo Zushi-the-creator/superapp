@@ -87,13 +87,13 @@ def _bayesian_wr(wins, total):
 # Momentum ret_20d zones
 _MOM_ZONES = [(5, 10), (10, 20), (20, 30), (30, 999)]
 _MOM_ZONE_LABELS = ["5-10%", "10-20%", "20-30%", "30%+"]
-_MOM_HOLD_DAYS = 60  # Best exit from exit study: Fixed60d
+_MOM_HOLD_DAYS = 90  # Best exit from exit study: Fixed90d
 
 
 def _backtest_momentum(closes, opens, highs, lows, sma50, sma150, sma200, n):
-    """Backtest Minervini 6/6 momentum entries with Fixed60d exit.
+    """Backtest Minervini 6/6 momentum entries with Fixed90d exit.
     Returns: (trades, bayesian_wr, avg_return, zone_label, zone_wr, zone_ret, zone_trades)"""
-    if n < 320:  # Need 252 lookback + 60 forward + buffer
+    if n < 350:  # Need 252 lookback + 90 forward + buffer
         return 0, 50.0, 0.0, {}
 
     trades = []

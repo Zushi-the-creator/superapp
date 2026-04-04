@@ -172,7 +172,7 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
 
         # Full backtest — V2.6: RSI<10, next-day open, 30d hold, fee-adjusted, non-overlapping
         _FEE_PCT = 0.30
-        _HOLD = 45
+        _HOLD = 60
         opens = df["Open"].tolist() if "Open" in df.columns else closes
         trades = []
         last_exit_day = -1
