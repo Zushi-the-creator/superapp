@@ -151,20 +151,31 @@ const PositionRow = memo(function PositionRow({
           {pos.weight.toFixed(1)}%
         </td>
         <td className="text-right px-3 py-3 hidden md:table-cell">
-          <div className={cn("font-medium text-xs", pnlColor(pos.exit_zone_return))}>
-            {pos.exit_zone_return !== 0
-              ? `${pos.exit_zone_return > 0 ? "+" : ""}${pos.exit_zone_return.toFixed(1)}%`
-              : "—"}
-          </div>
-          <div className={cn(
-            "text-[10px]",
-            pos.exit_zone_wr >= 80 ? "text-signal-buy" :
-            pos.exit_zone_wr >= 65 ? "text-amber-400" :
-            pos.exit_zone_wr > 0 ? "text-signal-sell" :
-            "text-neutral-600"
-          )}>
-            {pos.exit_zone_wr > 0 ? `${pos.exit_zone_wr.toFixed(0)}% WR` : "—"}
-          </div>
+          {(() => {
+            const isMom = pos.strategy === "MOMENTUM";
+            const expRet = isMom ? pos.avg_return : pos.exit_zone_return;
+            const expWr = isMom ? pos.win_rate : pos.exit_zone_wr;
+            const expTrades = isMom ? pos.total_trades : pos.exit_zone_trades;
+            return (
+              <>
+                <div className={cn("font-medium text-xs", pnlColor(expRet))}>
+                  {expRet !== 0
+                    ? `${expRet > 0 ? "+" : ""}${expRet.toFixed(1)}%`
+                    : "—"}
+                </div>
+                <div className={cn(
+                  "text-[10px]",
+                  expWr >= 80 ? "text-signal-buy" :
+                  expWr >= 65 ? "text-amber-400" :
+                  expWr > 0 ? "text-signal-sell" :
+                  "text-neutral-600"
+                )}>
+                  {expWr > 0 ? `${expWr.toFixed(0)}% WR` : "—"}
+                  {isMom && <span className="text-neutral-600 ml-1">MOM</span>}
+                </div>
+              </>
+            );
+          })()}
           {pos.exit_zone_trades > 0 && (
             <div className="text-[9px] text-neutral-600">{pos.exit_zone_trades}t</div>
           )}
@@ -347,9 +358,16 @@ const PositionRow = memo(function PositionRow({
                 )}
               </div>
               <div>
-                <span className="text-neutral-500">Zone Return (RSI {pos.rsi_zone})</span>
-                <div className={cn("font-medium", pnlColor(pos.exit_zone_return))}>
-                  {formatPercent(pos.exit_zone_return)} ({pos.exit_zone_wr?.toFixed(0)}% WR, {pos.exit_zone_trades} trades)
+                <span className="text-neutral-500">
+                  {pos.strategy === "MOMENTUM" ? "Momentum Expected" : `Zone Return (RSI ${pos.rsi_zone})`}
+                </span>
+                <div className={cn("font-medium", pnlColor(
+                  pos.strategy === "MOMENTUM" ? pos.avg_return : pos.exit_zone_return
+                ))}>
+                  {pos.strategy === "MOMENTUM"
+                    ? `${formatPercent(pos.avg_return)} (${pos.win_rate?.toFixed(0)}% WR, ${pos.total_trades} trades)`
+                    : `${formatPercent(pos.exit_zone_return)} (${pos.exit_zone_wr?.toFixed(0)}% WR, ${pos.exit_zone_trades} trades)`
+                  }
                 </div>
               </div>
               <div>
