@@ -60,6 +60,8 @@ class PositionDetail(BaseModel):
     exit_zone_return: float = 0
     exit_zone_wr: float = 0
     exit_zone_trades: int = 0
+    # Strategy type
+    strategy: str = "MEAN_REVERSION"  # MEAN_REVERSION or MOMENTUM
     # Hybrid exit strategy (per-stock optimal, backtested)
     days_held: int = 0  # days since entry
     exit_strategy: str = ""  # e.g. "SMA10", "RSI65", "Fixed14d"

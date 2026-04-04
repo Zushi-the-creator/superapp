@@ -1128,6 +1128,7 @@ async def get_portfolio():
             zone_wr=tech.get("zone_wr", 0) if tech else 0,
             zone_trades=tech.get("zone_trades", 0) if tech else 0,
             rsi_zone=tech.get("rsi_zone", "") if tech else "",
+            strategy=pos_strategy,
             days_held=days_held,
             exit_zone_return=tech.get("exit_zone_return", 0) if tech else 0,
             exit_zone_wr=tech.get("exit_zone_wr", 0) if tech else 0,
@@ -4054,16 +4055,40 @@ async def analyze_stock(ticker: str):
     # Check if this ticker is a current holding → apply hybrid exit strategy
     exit_strategy_info = {}
     former_holding_info = {}
+    held_position_info = None
     try:
         import sqlite3
         _pos_db = os.path.join(os.path.dirname(__file__), "data", "positions.db")
         conn = sqlite3.connect(_pos_db)
 
         # Check current open position
-        row = conn.execute("SELECT shares, entry_price, entry_date FROM positions WHERE ticker=? AND status='OPEN'", (ticker,)).fetchone()
+        row = conn.execute("SELECT shares, entry_price, entry_date, strategy FROM positions WHERE ticker=? AND status='OPEN'", (ticker,)).fetchone()
         if row:
             # Held position: check hybrid exit
             pos_shares, pos_entry_price, pos_entry_date = row[0], row[1], row[2] or ""
+            pos_strategy = row[3] if len(row) > 3 else "MR"
+            # Calculate P&L and days held
+            pnl = round((live_price - pos_entry_price) * pos_shares, 2) if live_price > 0 and pos_entry_price > 0 else 0
+            pnl_pct = round(((live_price - pos_entry_price) / pos_entry_price) * 100, 2) if pos_entry_price > 0 else 0
+            from datetime import date as _date
+            try:
+                days_held = (_date.today() - _date.fromisoformat(pos_entry_date)).days if pos_entry_date else 0
+            except Exception:
+                days_held = 0
+
+            held_position_info = {
+                "is_held": True,
+                "entry_price": pos_entry_price,
+                "entry_date": pos_entry_date,
+                "shares": pos_shares,
+                "cost_basis": round(pos_entry_price * pos_shares, 2),
+                "current_value": round(live_price * pos_shares, 2) if live_price > 0 else 0,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "days_held": days_held,
+                "strategy": pos_strategy,
+            }
+
             df_hist = _cache.get(ticker, 365)
             if df_hist is not None and len(df_hist) >= 50:
                 closes_list = df_hist["Close"].dropna().tolist()
@@ -4085,6 +4110,10 @@ async def analyze_stock(ticker: str):
                         "entry_price": pos_entry_price,
                         "shares": pos_shares,
                     }
+                    held_position_info["exit_triggered"] = triggered.get("triggered", False)
+                    held_position_info["exit_label"] = triggered.get("label", "")
+                    held_position_info["target_hold_days"] = 30  # Fixed30d
+                    held_position_info["days_remaining"] = max(0, 30 - days_held) if days_held < 30 else 0
                     if triggered.get("triggered", False):
                         issues.append(f"Exit triggered ({best_exit.get('strategy', '')}: {triggered.get('label', '')})")
         else:
@@ -4124,32 +4153,42 @@ async def analyze_stock(ticker: str):
     except Exception as e:
         print(f"[Analyze] Position check error for {ticker}: {e}")
 
-    # Determine action
-    has_critical = any(k in str(issues) for k in ["Below SMA50", "BEAR", "Low WR"])
-    if has_critical and not above_sma50 and regime == "BEAR":
-        signal = "AVOID"
-    elif has_critical:
-        signal = "CAUTION"
-    elif earnings_date:
-        signal = "WAIT"
-    elif sentiment_label == "NEGATIVE":
-        signal = "WAIT"
-    elif exit_strategy_info.get("exit_triggered", False):
-        # Held position with exit triggered — check RSI override
-        exit_strat_ret = exit_strategy_info.get("exit_strategy_ret", 0)
-        zone_ret = tech.get("zone_return", 0)
-        zone_trades = tech.get("zone_trades", 0)
-        if rsi2 < 10 and zone_trades >= 5 and zone_ret > exit_strat_ret:
-            signal = "HOLD"
-            issues.append(f"Exit suppressed: RSI oversold ({rsi2:.0f}), zone +{zone_ret:.1f}% > exit +{exit_strat_ret:.1f}%")
-        else:
+    # Determine action — HELD positions use exit strategy logic, not entry analysis
+    if held_position_info:
+        # HELD: only valid exits are exit_triggered, earnings, stock-specific negative sentiment
+        if exit_strategy_info.get("exit_triggered", False):
+            exit_strat_ret = exit_strategy_info.get("exit_strategy_ret", 0)
+            zone_ret = tech.get("zone_return", 0)
+            zone_trades = tech.get("zone_trades", 0)
+            if rsi2 < 10 and zone_trades >= 5 and zone_ret > exit_strat_ret:
+                signal = "HOLD"
+                issues.append(f"Exit suppressed: RSI oversold ({rsi2:.0f}), zone +{zone_ret:.1f}% > exit +{exit_strat_ret:.1f}%")
+            else:
+                signal = "EXIT"
+        elif earnings_date:
             signal = "EXIT"
-    elif rsi2 < 10 and above_sma50 and regime != "BEAR" and wr >= MIN_WR:
-        signal = "BUY"
-    elif exit_zt >= 5 and exit_zr < 1.0 and exit_zwr < MIN_WR:
-        signal = "ROTATION"
+            issues.insert(0, f"EXIT: Earnings on {earnings_date} — binary event risk")
+        else:
+            signal = "HOLD"
+            # Clear misleading issues for held positions (current RSI zone WR is irrelevant)
+            issues = [i for i in issues if "Low WR" not in i and "Weak zone" not in i]
     else:
-        signal = "HOLD"
+        # NEW entry analysis
+        has_critical = any(k in str(issues) for k in ["Below SMA50", "BEAR", "Low WR"])
+        if has_critical and not above_sma50 and regime == "BEAR":
+            signal = "AVOID"
+        elif has_critical:
+            signal = "CAUTION"
+        elif earnings_date:
+            signal = "WAIT"
+        elif sentiment_label == "NEGATIVE":
+            signal = "WAIT"
+        elif rsi2 < 10 and above_sma50 and regime != "BEAR" and wr >= MIN_WR:
+            signal = "BUY"
+        elif exit_zt >= 5 and exit_zr < 1.0 and exit_zwr < MIN_WR:
+            signal = "ROTATION"
+        else:
+            signal = "HOLD"
 
     # V2.4: Use regime-based exit targets
     entry_est = live_price  # Use live as reference
@@ -4234,6 +4273,7 @@ async def analyze_stock(ticker: str):
         "optimal_entries": optimal_entries,
         "former_holding": former_holding_info if former_holding_info else None,
         "proposed_strategy": proposed_strategy,
+        "held_position": held_position_info,
     }
 
 
