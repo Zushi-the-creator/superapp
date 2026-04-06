@@ -5248,11 +5248,16 @@ async def cache_refresh_loop():
                 _valid = sum(1 for s in _signals if not s.vetoed)
                 print(f"[CacheRefresh] Evaluator: {_valid} valid entries")
                 _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
+
+                # Also trigger full deep scan (writes scan_YYYY-MM-DD.json)
+                global _scan_running, _scan_cache
+                if not _scan_running:
+                    _scan_cache = None
+                    _scan_running = True
+                    asyncio.create_task(_background_scan())
+                    print(f"[CacheRefresh] Full scan triggered in background")
             except Exception as _precomp_err:
                 print(f"[CacheRefresh] Precompute/eval error: {_precomp_err}")
-
-            # Clear scan cache — will be rebuilt with fresh data on next request
-            _scan_cache = None
 
         except Exception as e:
             import traceback
