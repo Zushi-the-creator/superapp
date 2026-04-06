@@ -5059,7 +5059,7 @@ async def extended_hours_refresh_loop():
 async def cache_refresh_loop():
     """Daily historical data refresh. Holdings first (fast), then scanner universe later.
     Keeps stock_cache.db up to date so scanner/backtest use fresh data."""
-    global _scan_cache
+    global _scan_cache, _scan_running
     await asyncio.sleep(30)  # Wait for uvicorn to be fully ready before heavy I/O
 
     first_run = True
@@ -5250,7 +5250,6 @@ async def cache_refresh_loop():
                 _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
 
                 # Also trigger full deep scan (writes scan_YYYY-MM-DD.json)
-                global _scan_running, _scan_cache
                 if not _scan_running:
                     _scan_cache = None
                     _scan_running = True
