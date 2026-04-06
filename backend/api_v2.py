@@ -1095,7 +1095,7 @@ async def get_portfolio():
             entry_price=entry_price,
             entry_date=pos["entry_date"],
             current_price=round(live_price, 2),
-            day_change_pct=round(day_chg, 2),
+            day_change_pct=round(day_chg, 2) if -30 <= day_chg <= 30 else 0,  # Cap: split-adjusted stale prev_close protection
             pnl=round(pnl, 2),
             pnl_pct=round(pnl_pct, 2),
             cost_basis=round(cost, 2),
