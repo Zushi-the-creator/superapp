@@ -5232,6 +5232,25 @@ async def cache_refresh_loop():
             _signal_cache.clear()
             _exit_strategy_cache.clear()
 
+            # Re-run precompute + evaluator after every price refresh
+            # This keeps the entries tab fresh (was only running on first boot)
+            try:
+                print(f"[CacheRefresh] Re-computing backtests after price refresh...")
+                from backtest_precompute import precompute_all as _precompute
+                await asyncio.to_thread(_precompute)
+                print(f"[CacheRefresh] Backtest cache updated")
+
+                from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
+                _held = set(p["ticker"] for p in positions) if positions else set()
+                _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                _signals = await asyncio.to_thread(_eval_all, 10.0, _held, _live_px)
+                _save_eval(_signals)
+                _valid = sum(1 for s in _signals if not s.vetoed)
+                print(f"[CacheRefresh] Evaluator: {_valid} valid entries")
+                _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
+            except Exception as _precomp_err:
+                print(f"[CacheRefresh] Precompute/eval error: {_precomp_err}")
+
             # Clear scan cache — will be rebuilt with fresh data on next request
             _scan_cache = None
 
@@ -5240,4 +5259,21 @@ async def cache_refresh_loop():
             print(f"[CacheRefresh] Error: {e}")
             traceback.print_exc()
 
-        await asyncio.sleep(14400)  # 4 hours
+        # Sleep until next refresh window
+        # After market close (4pm ET = 21:00 UTC): run in ~4 hours
+        # Target: refresh at ~5pm ET daily when Tiingo has final close data
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        _now = _dt.now(_tz(_td(hours=-4)))  # ET
+        _hour = _now.hour
+        if 16 <= _hour < 18:
+            # Just after close — refresh in 1 hour (wait for Tiingo to finalize)
+            _sleep = 3600
+        elif _hour >= 18 or _hour < 4:
+            # Evening/overnight — next check at 5pm ET tomorrow
+            _hours_until_5pm = (17 - _hour) % 24
+            _sleep = max(3600, _hours_until_5pm * 3600)
+        else:
+            # During market hours — check every 4 hours
+            _sleep = 14400
+        print(f"[CacheRefresh] Next refresh in {_sleep//3600}h (ET hour: {_hour})")
+        await asyncio.sleep(_sleep)
