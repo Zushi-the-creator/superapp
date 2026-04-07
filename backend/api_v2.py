@@ -3535,7 +3535,18 @@ async def get_performance():
         except (ValueError, TypeError):
             hold_days = 0
 
-        result = "OPEN" if status != "CLOSED" else ("WIN" if pnl > 0 else "LOSS")
+        # Skip dust trades (fractional share leftovers)
+        if status == "CLOSED" and shares < 0.1 and abs(pnl) < 1:
+            continue
+
+        if status != "CLOSED":
+            result = "OPEN"
+        elif abs(pnl) < 0.01:
+            result = "BREAK_EVEN"
+        elif pnl > 0:
+            result = "WIN"
+        else:
+            result = "LOSS"
 
         trades.append(TradePerformance(
             ticker=ticker, status="OPEN" if status != "CLOSED" else "CLOSED",
@@ -3545,7 +3556,7 @@ async def get_performance():
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 2), result=result,
         ))
 
-    # Deposits by date (broker-verified) — used for P&L %
+    # Deposits by date (broker-verified)
     _deposits = [
         ("2026-01-04", 1500.00),
         ("2026-01-07", 1500.00),
@@ -3827,7 +3838,7 @@ async def get_performance():
         realized_pnl_pct=realized_pnl_pct,
         win_count=len(wins),
         loss_count=len(losses),
-        win_rate=round(len(wins) / len(closed) * 100, 1) if closed else 0,
+        win_rate=round(len(wins) / (len(wins) + len(losses)) * 100, 1) if (wins or losses) else 0,
         avg_win_pct=round(sum(t.pnl_pct for t in wins) / len(wins), 2) if wins else 0,
         avg_loss_pct=round(sum(t.pnl_pct for t in losses) / len(losses), 2) if losses else 0,
         best_trade=max(closed, key=lambda t: t.pnl_pct).ticker if closed else "",
@@ -4919,6 +4930,19 @@ async def quote_refresh_loop():
                 continue
 
             tickers = [p["ticker"] for p in positions]
+            # Also fetch live quotes for top scan candidates (entries tab)
+            try:
+                from strategy_evaluator import load_cache as _load_eval
+                _eval = _load_eval()
+                if _eval:
+                    _top = sorted([e for e in _eval if not e.get("vetoed")],
+                                  key=lambda x: x.get("score", 0), reverse=True)[:30]
+                    for e in _top:
+                        t = e.get("ticker", "")
+                        if t and t not in tickers:
+                            tickers.append(t)
+            except Exception:
+                pass
             tickers_str = ",".join(tickers)
 
             async with aiohttp.ClientSession() as session:
