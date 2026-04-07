@@ -1220,7 +1220,7 @@ async def get_portfolio():
 
     # Broker tax/fees paid outside per-trade commissions
     BROKER_TAX_FEES = 222.00
-    _total_deposited = 11891.58
+    _total_deposited = 12112.24  # 11891.58 original + 220.66 tax refund (2026-04-07)
     _total_fees_all = round(tx_summary.get("total_fees", 0) + BROKER_TAX_FEES, 2)
 
     # Cash = deposits + realized P&L - fees - cost of open positions
@@ -1230,8 +1230,11 @@ async def get_portfolio():
     # which inflates realized P&L. Real cash = max(0, calculated).
     _cash = max(0, _cash)
 
+    # Total portfolio value = positions + cash
+    total_value_with_cash = total_value + _cash
+
     summary = PortfolioSummary(
-        total_value=round(total_value, 2),
+        total_value=round(total_value_with_cash, 2),
         total_cost=round(total_cost, 2),
         total_pnl=round(total_pnl, 2),
         total_pnl_pct=round(total_pnl / total_cost * 100, 2) if total_cost else 0,
