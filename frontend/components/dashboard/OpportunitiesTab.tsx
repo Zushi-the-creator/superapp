@@ -51,8 +51,9 @@ export function OpportunitiesTab() {
   const handleForceRefresh = async () => {
     setRefreshing(true);
     try {
-      // Fire off refresh in background — don't wait for it
+      // Fire off both refreshes in background — evaluator (entries) + deep_scanner (holdings scores)
       api.refreshAll().catch(() => {});
+      api.refreshScan().catch(() => {});
       // Immediately fetch current results (shows cached data instantly)
       await fetchCombined();
       await refresh();
@@ -213,158 +214,166 @@ export function OpportunitiesTab() {
           </div>
         )}
 
-        {/* Combined Signals — MR + Momentum unified ranking */}
-        {combined.length > 0 && (
-          <>
-            <div className="flex items-center gap-2">
-              <Zap className="h-4 w-4 text-amber-400" />
-              <h3 className="text-sm font-semibold text-amber-400">
-                Top Entries — Combined ({combined.length})
-              </h3>
-              <span className="text-xs text-neutral-500">
-                {combinedStats.mr} dip buys · {combinedStats.mom} breakouts · {combinedStats.both} both
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {combined.slice(0, 12).map((sig) => (
-                <div key={sig.ticker} className={cn(
-                  "rounded-lg border p-3 space-y-2",
-                  sig.strategy === "BOTH" ? "border-amber-500/40 bg-amber-500/5" :
-                  sig.strategy === "MOMENTUM" ? "border-blue-500/30 bg-blue-500/5" :
-                  "border-emerald-500/30 bg-emerald-500/5"
-                )}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-neutral-100">{sig.ticker}</span>
-                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium",
-                        sig.strategy === "BOTH" ? "bg-amber-500/20 text-amber-400" :
-                        sig.strategy === "MOMENTUM" ? "bg-blue-500/20 text-blue-400" :
-                        "bg-emerald-500/20 text-emerald-400"
-                      )}>{sig.strategy_label}</span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-neutral-300 font-medium">{formatCurrency(sig.price)}</span>
-                      {!sig.price_is_live && (
-                        <span className="text-[9px] ml-1 text-signal-sell">DELAYED</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs">
-                    <div>
-                      <span className="text-neutral-500">Score</span>
-                      <div className={cn("font-bold",
-                        sig.score >= 60 ? "text-emerald-400" :
-                        sig.score >= 40 ? "text-blue-400" : "text-neutral-300"
-                      )}>{sig.score.toFixed(0)}</div>
-                    </div>
-                    <div>
-                      <span className="text-neutral-500">WR</span>
-                      <div className="text-neutral-200">{sig.confidence.toFixed(0)}% <span className="text-neutral-600">({sig.trades}t)</span></div>
-                    </div>
-                    {sig.strategy !== "MEAN_REVERSION" && (
-                      <div>
-                        <span className="text-neutral-500">20d Ret</span>
-                        <div className={cn(pnlColor(sig.ret_20d))}>{sig.ret_20d > 0 ? "+" : ""}{sig.ret_20d.toFixed(1)}%</div>
-                      </div>
-                    )}
-                    <div>
-                      <span className="text-neutral-500">Vol</span>
-                      <div className={cn(sig.volume_ratio >= 2 ? "text-signal-buy" : "text-neutral-300")}>{sig.volume_ratio.toFixed(1)}x</div>
-                    </div>
-                    {sig.expected_return > 0 && (
-                      <div>
-                        <span className="text-neutral-500">Avg Ret</span>
-                        <div className={cn(pnlColor(sig.expected_return))}>{sig.expected_return > 0 ? "+" : ""}{sig.expected_return.toFixed(1)}%</div>
-                      </div>
-                    )}
-                    {sig.atr_squeeze > 0 && sig.atr_squeeze < 1 && (
-                      <div>
-                        <span className="text-neutral-500">Squeeze</span>
-                        <div className={cn(sig.atr_squeeze < 0.7 ? "text-signal-buy" : "text-neutral-300")}>{sig.atr_squeeze.toFixed(2)}</div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 text-[10px]">
-                    {sig.analyst_consensus && <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">{sig.analyst_consensus}</span>}
-                    {sig.sentiment_label && <span className={cn("px-1.5 py-0.5 rounded",
-                      sig.sentiment_label === "POSITIVE" ? "bg-emerald-500/10 text-emerald-400" :
-                      sig.sentiment_label === "NEGATIVE" ? "bg-red-500/10 text-red-400" :
-                      "bg-neutral-800 text-neutral-400"
-                    )}>{sig.sentiment_label}</span>}
-                  </div>
+        {/* ═══ UNIFIED ENTRIES LIST ═══ */}
+        {(() => {
+          // Merge MR best candidates + combined momentum into ONE sorted list
+          type UnifiedEntry = {
+            ticker: string;
+            price: number;
+            score: number;
+            wr: number;
+            trades: number;
+            avgRet: number;
+            type: "FRESH_ENTRY" | "BREAKOUT" | "BOTH";
+            typeLabel: string;
+            rsi: number;
+            sentiment?: string;
+            analyst?: string;
+            volumeRatio?: number;
+            regime?: string;
+            vetoed?: boolean;
+            vetoReason?: string;
+            isMR: boolean;
+          };
+
+          const unified: UnifiedEntry[] = [];
+
+          // Add MR strict-pass candidates
+          for (const opp of bestCandidates) {
+            unified.push({
+              ticker: opp.ticker,
+              price: opp.price,
+              score: opp.composite_score,
+              wr: opp.bayesian_wr || opp.win_rate,
+              trades: opp.trades,
+              avgRet: opp.zone_return,
+              type: "FRESH_ENTRY",
+              typeLabel: "RSI Dip — BUY",
+              rsi: opp.rsi2,
+              sentiment: opp.sentiment_label,
+              analyst: opp.analyst_consensus,
+              volumeRatio: opp.volume_ratio,
+              regime: opp.regime,
+              isMR: true,
+            });
+          }
+
+          // Add combined signals (not already in MR list)
+          const mrTickers = new Set(bestCandidates.map((o) => o.ticker));
+          for (const sig of combined) {
+            if (mrTickers.has(sig.ticker)) continue;
+            const isFresh = sig.strategy === "MEAN_REVERSION" || sig.strategy === "BOTH";
+            unified.push({
+              ticker: sig.ticker,
+              price: sig.price,
+              score: sig.score,
+              wr: sig.confidence,
+              trades: sig.trades,
+              avgRet: sig.expected_return,
+              type: isFresh ? (sig.strategy === "BOTH" ? "BOTH" : "FRESH_ENTRY") : "BREAKOUT",
+              typeLabel: sig.strategy_label,
+              rsi: sig.rsi2 ?? 0,
+              sentiment: sig.sentiment_label,
+              analyst: sig.analyst_consensus,
+              volumeRatio: sig.volume_ratio,
+              isMR: sig.strategy !== "MOMENTUM",
+            });
+          }
+
+          // Sort by score (highest first)
+          unified.sort((a, b) => b.score - a.score);
+
+          const freshCount = unified.filter((u) => u.type === "FRESH_ENTRY" || u.type === "BOTH").length;
+          const breakoutCount = unified.filter((u) => u.type === "BREAKOUT").length;
+
+          return (
+            <>
+              <div className="flex items-center gap-2">
+                <Zap className="h-4 w-4 text-amber-400" />
+                <h3 className="text-sm font-semibold text-neutral-200">
+                  Entry Signals ({unified.length})
+                </h3>
+                <span className="text-xs text-neutral-500">
+                  {freshCount > 0 && <><span className="text-emerald-400 font-medium">{freshCount} fresh entries</span> · </>}
+                  {breakoutCount} breakouts
+                </span>
+              </div>
+
+              {unified.length === 0 ? (
+                <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 text-center">
+                  <p className="text-neutral-400 text-sm">No entry signals right now</p>
+                  <p className="text-xs text-neutral-500 mt-1">Scanner checks 3,000+ stocks. Refresh to scan again.</p>
                 </div>
-              ))}
-            </div>
-          </>
-        )}
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {unified.slice(0, showAll ? unified.length : 12).map((entry) => (
+                    <div key={entry.ticker} className={cn(
+                      "rounded-lg border p-3 space-y-2",
+                      entry.type === "FRESH_ENTRY" ? "border-emerald-500/40 bg-emerald-500/5" :
+                      entry.type === "BOTH" ? "border-amber-500/40 bg-amber-500/5" :
+                      "border-blue-500/30 bg-blue-500/5"
+                    )}>
+                      {/* Header */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-neutral-100">{entry.ticker}</span>
+                          <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-bold",
+                            entry.type === "FRESH_ENTRY" ? "bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/30" :
+                            entry.type === "BOTH" ? "bg-amber-500/20 text-amber-400" :
+                            "bg-blue-500/20 text-blue-400"
+                          )}>{entry.typeLabel}</span>
+                        </div>
+                        <span className="text-neutral-300 font-medium">{formatCurrency(entry.price)}</span>
+                      </div>
 
-        {/* Best Candidates (meets strict) */}
-        {bestCandidates.length > 0 && (
-          <>
-            <div className="flex items-center gap-2">
-              <Star className="h-4 w-4 text-emerald-400" />
-              <h3 className="text-sm font-semibold text-emerald-400">
-                Best Candidates ({bestCandidates.length})
-              </h3>
-              <span className="text-xs text-neutral-500">
-                Passes ALL strict ATLAS V2.6 filters (RSI&lt;10, ATR&gt;3%, WR&gt;65%, Fixed30d)
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {bestCandidates.slice(0, 6).map((opp) => (
-                <OpportunityCard
-                  key={opp.ticker}
-                  opp={opp}
-                  holdingsScores={holdingsScores}
-                />
-              ))}
-            </div>
-          </>
-        )}
+                      {/* Metrics */}
+                      <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div>
+                          <span className="text-neutral-500">Score</span>
+                          <div className={cn("font-bold",
+                            entry.score >= 60 ? "text-emerald-400" : entry.score >= 40 ? "text-blue-400" : "text-neutral-300"
+                          )}>{entry.score.toFixed(0)}</div>
+                        </div>
+                        <div>
+                          <span className="text-neutral-500">WR</span>
+                          <div className={cn("font-medium", entry.wr >= 65 ? "text-signal-buy" : entry.wr >= 55 ? "text-neutral-200" : "text-signal-sell")}>
+                            {entry.wr.toFixed(0)}% <span className="text-neutral-600">({entry.trades}t)</span>
+                          </div>
+                        </div>
+                        <div>
+                          <span className="text-neutral-500">Avg Ret</span>
+                          <div className={cn("font-medium", pnlColor(entry.avgRet))}>
+                            {entry.avgRet > 0 ? "+" : ""}{entry.avgRet.toFixed(1)}%
+                          </div>
+                        </div>
+                      </div>
 
-        {/* All Ranked Stocks */}
-        <div className="flex items-center gap-2 mt-2">
-          <Zap className="h-4 w-4 text-blue-400" />
-          <h3 className="text-sm font-semibold text-blue-400">
-            All Ranked Stocks ({sorted.length})
-          </h3>
-          <span className="text-xs text-neutral-500">
-            Sorted by composite score (0-100)
-          </span>
-        </div>
+                      {/* Analyst + Sentiment badges */}
+                      <div className="flex items-center gap-2 pt-1 border-t border-neutral-800/50 text-[10px]">
+                        {entry.analyst && <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">{entry.analyst}</span>}
+                        {entry.sentiment && <span className={cn("px-1.5 py-0.5 rounded",
+                          entry.sentiment === "POSITIVE" ? "bg-emerald-500/10 text-emerald-400" :
+                          entry.sentiment === "NEGATIVE" ? "bg-red-500/10 text-red-400" :
+                          "bg-neutral-800 text-neutral-400"
+                        )}>{entry.sentiment}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-        {/* Old scanner section — DISABLED, replaced by combined entries */}
-        {false && displayStocks.length > 0 ? (
-          <>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {displayStocks.map((opp) => (
-                <OpportunityCard
-                  key={opp.ticker}
-                  opp={opp}
-                  holdingsScores={holdingsScores}
-                />
-              ))}
-            </div>
-            {sorted.length > 30 && !showAll && (
-              <button
-                onClick={() => setShowAll(true)}
-                className="flex items-center gap-1.5 mx-auto px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-sm transition-colors"
-              >
-                <ChevronDown className="h-4 w-4" />
-                Show all {sorted.length} stocks
-              </button>
-            )}
-          </>
-        ) : !loading ? (
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 text-center">
-            <p className="text-neutral-400 text-sm font-medium">
-              No ranked stocks found
-            </p>
-            <p className="text-xs text-neutral-500 mt-1">
-              Run a full scan to discover candidates.
-            </p>
-          </div>
-        ) : null}
+              {unified.length > 12 && !showAll && (
+                <button
+                  onClick={() => setShowAll(true)}
+                  className="flex items-center gap-1.5 mx-auto px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-sm transition-colors"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                  Show all {unified.length} entries
+                </button>
+              )}
+            </>
+          );
+        })()}
 
         {/* Vetoed section */}
         {vetoed.length > 0 && (
@@ -505,8 +514,8 @@ function OpportunityCard({
         <div>
           <span className="text-neutral-500">Win Rate</span>
           <div className="text-neutral-200 font-medium">
-            {(opp.bayesian_wr ?? opp.win_rate).toFixed(1)}%
-            {opp.bayesian_wr != null && Math.abs(opp.bayesian_wr - opp.win_rate) >= 2 && (
+            {(opp.bayesian_wr || opp.win_rate).toFixed(1)}%
+            {opp.bayesian_wr > 0 && Math.abs(opp.bayesian_wr - opp.win_rate) >= 2 && (
               <span className="text-[10px] text-neutral-500 ml-1">(raw: {opp.win_rate.toFixed(0)}%)</span>
             )}
           </div>
