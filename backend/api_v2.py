@@ -265,17 +265,36 @@ async def _auto_refresh_stale_cache() -> None:
         _auto_refresh_running = False
 
 
-def _cache_is_stale(data_date_str: str, max_trading_days: int = 1) -> bool:
-    """True if data_date is more than max_trading_days behind today.
-    Converts calendar-day gap to trading-day gap (×5/7 approximation)."""
+def _expected_last_trading_date() -> str:
+    """Most recent trading-day close that should be in the cache, in ET.
+
+    Mid-session (before 4pm ET): yesterday's close (today's bar doesn't exist yet).
+    After 4:30pm ET on a weekday: today's close (Tiingo finalizes within ~30min).
+    Weekends: last Friday.
+    """
+    from datetime import timezone, timedelta
+    et = datetime.now(timezone(timedelta(hours=-4)))
+    d = et.date()
+    if d.weekday() == 5:        # Sat → Fri
+        d = d - timedelta(days=1)
+    elif d.weekday() == 6:      # Sun → Fri
+        d = d - timedelta(days=2)
+    elif d.weekday() == 0 and (et.hour < 16 or (et.hour == 16 and et.minute < 30)):
+        # Mon mid-session → Fri close
+        d = d - timedelta(days=3)
+    elif et.hour < 16 or (et.hour == 16 and et.minute < 30):
+        # Tue–Fri mid-session → previous trading day
+        d = d - timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
+def _cache_is_stale(data_date_str: str, max_trading_days: int = 0) -> bool:
+    """True if data_date is older than the most recent trading day's close
+    (i.e. cache hasn't ingested the latest available bar)."""
     if not data_date_str:
         return True
     try:
-        today = datetime.now()
-        data_date = datetime.strptime(data_date_str[:10], '%Y-%m-%d')
-        cal_gap = (today - data_date).days
-        trading_gap = max(0, int(cal_gap * 5 / 7))
-        return trading_gap > max_trading_days
+        return data_date_str[:10] < _expected_last_trading_date()
     except Exception:
         return False
 
@@ -1509,7 +1528,8 @@ async def get_portfolio():
     _realized = tx_summary.get("total_realized_pnl", 0)
 
     # Cash = broker-verified balance (formula drifts due to 10 free trades/mo + fees baked into realized_pnl)
-    _cash = 0.0
+    # Updated 2026-04-25: DBD sold @ $85.04 → +$1,274.38 cash, awaiting redeployment.
+    _cash = 1274.38
 
     # Total portfolio value = positions + cash
     total_value_with_cash = total_value + _cash
@@ -2225,14 +2245,64 @@ async def _background_scan():
 
 @router.post("/scan/refresh")
 async def refresh_scan():
-    """Force a fresh scan in background (non-blocking)."""
+    """Force a FULLY fresh scan: refresh Tiingo prices first, then re-scan.
+    Single canonical refresh button. 2026-04-25 audit: previously only re-ran
+    the scanner against stale cached prices, silently producing outdated
+    rankings. Now always pulls fresh prices before scoring."""
     global _scan_cache, _scan_running
     _scan_cache = None
-    # Force reset if scan seems stuck (> 10 min)
     _scan_running = False
     _scan_running = True
-    asyncio.create_task(_background_scan())
-    return {"status": "scanning", "message": "Full scan started (3,000+ stocks). Results on GET /scan/opportunities."}
+    asyncio.create_task(_full_refresh_pipeline())
+    return {"status": "refreshing",
+            "message": "Refreshing prices (Tiingo) + scanning 3,000+ stocks. Poll GET /scan/opportunities."}
+
+
+async def _full_refresh_pipeline():
+    """Two-stage: refresh Tiingo prices (10d) → run scan → reload cache.
+    Updates _system_status so the UI can show stage + progress."""
+    global _scan_running, _scan_cache, _scan_cache_time
+    try:
+        # Stage 1 — refresh stale prices
+        _system_status.update({"stage": "refreshing_prices",
+                               "message": "Refreshing prices (Tiingo, 10d, 20-concurrent)...",
+                               "progress": 10})
+        print("[FullRefresh] Stage 1/2: refreshing Tiingo prices...")
+        try:
+            stale = _cache.get_stale_tickers()
+            if stale:
+                async with aiohttp.ClientSession() as session:
+                    sem = asyncio.Semaphore(20)
+                    async def _one(t):
+                        async with sem:
+                            try:
+                                return await _cache._fetch_tiingo(session, t, days=10, min_rows=1)
+                            except Exception:
+                                return None
+                    results = await asyncio.gather(*[_one(t) for t in stale])
+                    refreshed = sum(1 for r in results if r)
+                    print(f"[FullRefresh] Refreshed {refreshed}/{len(stale)} stale tickers")
+            else:
+                print("[FullRefresh] All tickers already fresh")
+        except Exception as e:
+            print(f"[FullRefresh] Price refresh error (proceeding with cached data): {e}")
+
+        # Stage 2 — run scan against fresh prices
+        _system_status.update({"stage": "scanning",
+                               "message": "Scanning 3,000+ stocks against fresh prices...",
+                               "progress": 50})
+        print("[FullRefresh] Stage 2/2: running scan...")
+        await _background_scan()
+
+        _system_status.update({"stage": "ready",
+                               "message": "Scan complete with fresh data.",
+                               "progress": 100})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _system_status.update({"stage": "error", "message": f"Refresh error: {e}", "progress": 0})
+    finally:
+        _scan_running = False
 
 
 @router.get("/scan/best-replacement/{sell_ticker}")
@@ -2811,7 +2881,8 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
 
 def _build_scan_result(opportunities: list, total_scanned: int,
                        holdings_scores: dict, worst_ticker: str, worst_score: float) -> Dict:
-    """Build the scan response dict. Sort by composite_score descending."""
+    """Build the scan response dict. Sort by composite_score descending.
+    Includes data_freshness so the frontend can show how stale the prices are."""
     # Sort by composite score (best first), vetoed last
     opportunities.sort(key=lambda x: (not x.vetoed, x.composite_score), reverse=True)
 
@@ -2823,6 +2894,25 @@ def _build_scan_result(opportunities: list, total_scanned: int,
         for t, d in holdings_scores.items()
     ]
 
+    # Data freshness — most recent close in cache + how stale that is in trading days
+    freshness = {"latest_close": None, "trading_days_stale": None, "is_fresh": False}
+    try:
+        import sqlite3 as _sql_fresh
+        conn = _sql_fresh.connect(os.path.join(os.path.dirname(__file__), "data", "stock_cache.db"))
+        latest = conn.execute("SELECT MAX(date) FROM daily_prices").fetchone()[0]
+        conn.close()
+        if latest:
+            freshness["latest_close"] = latest
+            today = datetime.now().date()
+            last_dt = datetime.strptime(latest, "%Y-%m-%d").date()
+            cal_days = (today - last_dt).days
+            # Approximate trading-day gap (5/7 of calendar days)
+            tdg = max(0, int(cal_days * 5 / 7))
+            freshness["trading_days_stale"] = tdg
+            freshness["is_fresh"] = tdg <= 1  # today's or yesterday's close = fresh
+    except Exception:
+        pass
+
     non_vetoed = [o for o in opportunities if not o.vetoed]
     return {
         "timestamp": datetime.now().isoformat(),
@@ -2833,6 +2923,8 @@ def _build_scan_result(opportunities: list, total_scanned: int,
         "holdings_scores": h_scores,
         "worst_holding": worst_ticker,
         "worst_score": worst_score,
+        "data_freshness": freshness,
+        "system_status": _system_status.copy(),
     }
 
 
