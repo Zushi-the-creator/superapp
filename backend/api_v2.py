@@ -1406,21 +1406,25 @@ async def get_portfolio():
         except Exception:
             pass
 
-        # V4.1 Rotation — fixes two bugs in V4.0:
-        #   1. Candidates had NO trades>=10 filter → recommended low-sample stocks
-        #      (e.g. ANL with 9 trades) that don't appear in the entries tab.
-        #   2. _best.score is ATR×1.3×price_mult (~25 typical) but h_score was
-        #      _ev_score (Bayesian, ~5 typical). Apples-to-oranges → trivially
-        #      exceeded ROTATION_SCORE_GAP=3 every time.
-        # Both sides now use composite_score (0-100), threshold raised to 15.
-        # Trades-min raised to 10 to match the entries-tab filter, so what
-        # rotation suggests is what the user actually sees as a candidate.
+        # V4.2 Rotation — operational rules (CLAUDE.md "Rotation v3.1: min 15d hold
+        # + protect winners >5% trending"). V4.0 backtest preferred 2d/no-protection
+        # for raw return, but in practice it churns fresh entries and exits winners
+        # mid-trend. Per CLAUDE.md operational rule, protect:
+        #   1. Anything held < 15 trading days (trade hasn't had time to work)
+        #   2. Anything up >5% (winner that's still trending)
+        # Plus the V4.1 fixes: candidates trades>=10 (matches entries tab) and
+        # both sides scored on composite_score 0-100 (apples-to-apples).
         ROTATION_SCORE_GAP = 15.0
-        ROTATION_MIN_DAYS = 2
+        ROTATION_MIN_DAYS = 15
         ROTATION_MIN_TARGET_TRADES = 10
+        ROTATION_WINNER_PROTECT_PCT = 5.0
         _rot_target = None
         _rot_gap = 0.0
-        if days_held >= ROTATION_MIN_DAYS and _regime_name not in ("DANGER", "CRISIS"):
+        # Winner-protection veto — CLAUDE.md "protect winners >5% trending"
+        _winner_protected = pnl_pct > ROTATION_WINNER_PROTECT_PCT
+        if (days_held >= ROTATION_MIN_DAYS
+                and not _winner_protected
+                and _regime_name not in ("DANGER", "CRISIS")):
             try:
                 from strategy_evaluator import load_cache as _load_entries
                 _entries = _load_entries()
@@ -1620,6 +1624,7 @@ async def get_portfolio():
     # Broker-verified balances
     _total_deposited = 11891.58
     _total_fees_all = round(tx_summary.get("total_fees", 0), 2)
+    _total_tax_all = round(tx_summary.get("total_tax", 0), 2)
     _realized = tx_summary.get("total_realized_pnl", 0)
 
     # Cash from live ledger (respects 10-free-trades/month rule via stored fee column).
@@ -1656,6 +1661,7 @@ async def get_portfolio():
         day_pnl_pct=round(day_pnl_pct, 2),
         realized_pnl=round(_realized, 2),
         total_fees=_total_fees_all,
+        total_tax=_total_tax_all,
         total_deposited=_total_deposited,
         position_count=len(details),
         max_positions=MAX_POSITIONS,
