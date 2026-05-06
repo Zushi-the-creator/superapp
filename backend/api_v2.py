@@ -1361,8 +1361,12 @@ async def get_portfolio():
             signal = "EXIT"
             issues.append(f"BEAR EXIT: Profitable {pnl_pct:+.1f}% in bear — lock gains")
 
-        # Priority 4: Bad backtest stats (strong evidence, any regime)
-        elif ez_trades >= 20 and ez_ret < -2 and atlas_wr < 50:
+        # Priority 4: Bad backtest stats (strong evidence, any regime).
+        # Winner-protect: don't EXIT a profitable trade on historical stats —
+        # the trade itself is already proving the stats wrong. Let the per-strategy
+        # exit (Hybrid21d trail / Fixed90d timer) handle when to actually exit.
+        elif (ez_trades >= 20 and ez_ret < -2 and atlas_wr < 50
+              and pnl_pct < 5.0):  # winner-protect: don't exit a >5% trending winner
             signal = "EXIT"
             issues.append(f"Bad backtest ({ez_ret:+.1f}% zone, {atlas_wr:.0f}% WR on {atlas_trades}t)")
 
@@ -1371,10 +1375,15 @@ async def get_portfolio():
             signal = "HOLD"
             issues.append(f"BEAR HOLD: WR {atlas_wr:.0f}%>=65% losing {pnl_pct:+.1f}% — hold (55% improve historically)")
 
-        # Model EXIT: both ATLAS WR and zone WR fail 65% (CLAUDE.md rule)
-        elif ez_trades >= 5 and atlas_trades >= 5 and ez_wr < 65 and atlas_wr < 65:
+        # Model EXIT: both ATLAS WR and zone WR fail 65% (CLAUDE.md rule).
+        # Winner-protect: skip when up >5% — historical WR is clearly wrong
+        # for this trade right now (it's winning). Let trail/timer handle exit.
+        # Per CLAUDE.md "NOT valid: RSI rising (trade working)" — same idea.
+        elif (ez_trades >= 5 and atlas_trades >= 5
+              and ez_wr < 65 and atlas_wr < 65
+              and pnl_pct < 5.0):  # winner-protect: don't exit a >5% trending winner
             signal = "EXIT"
-            issues.append(f"Model EXIT: WR {atlas_wr:.0f}% + zone WR {ez_wr:.0f}% both < 65%")
+            issues.append(f"Model EXIT: WR {atlas_wr:.0f}% + zone WR {ez_wr:.0f}% both < 65% ({pnl_pct:+.1f}%)")
 
         else:
             # Non-bear market: standard checks
@@ -1485,11 +1494,17 @@ async def get_portfolio():
             except Exception:
                 pass
 
-        # Exit strategy: Fixed90d for all strategies
-        # Backtested 168 configs: 90d hold optimal (+2,553% vs 60d +2,019% vs 30d +1,996%)
-        pos_strategy = pos.get("strategy", "MEAN_REVERSION")
-        exit_strat_name = "Fixed90d"
-        exit_target_days = 90
+        # Exit strategy: per CLAUDE.md, MR=Hybrid21d, MOM=Fixed90d.
+        # MR positions exit on Hybrid21d trail-from-peak (after 7d minimum, once
+        # profit > 5%, trail -3% from peak; hard cap 21 trading days).
+        # MOM positions exit on Fixed90d timer.
+        pos_strategy = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
+        if pos_strategy == "MOMENTUM":
+            exit_strat_name = "Fixed90d"
+            exit_target_days = 90
+        else:
+            exit_strat_name = "Hybrid21d"
+            exit_target_days = 21
 
         # Exit targets based on regime
         regime = tech.get("regime", "BULL") if tech else "BULL"
