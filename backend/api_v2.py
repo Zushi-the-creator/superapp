@@ -1406,11 +1406,18 @@ async def get_portfolio():
         except Exception:
             pass
 
-        # V4.0 Rotation — backtested 168 configs, walk-forward validated (2016-2026)
-        # Optimal: H90/M2/G3, protection OFF — +2,553% total, 65.7% WR, 9/10 years profitable
-        # No overfit: train +1,082%, test +1,229% (test BETTER than train)
-        ROTATION_SCORE_GAP = 3.0
+        # V4.1 Rotation — fixes two bugs in V4.0:
+        #   1. Candidates had NO trades>=10 filter → recommended low-sample stocks
+        #      (e.g. ANL with 9 trades) that don't appear in the entries tab.
+        #   2. _best.score is ATR×1.3×price_mult (~25 typical) but h_score was
+        #      _ev_score (Bayesian, ~5 typical). Apples-to-oranges → trivially
+        #      exceeded ROTATION_SCORE_GAP=3 every time.
+        # Both sides now use composite_score (0-100), threshold raised to 15.
+        # Trades-min raised to 10 to match the entries-tab filter, so what
+        # rotation suggests is what the user actually sees as a candidate.
+        ROTATION_SCORE_GAP = 15.0
         ROTATION_MIN_DAYS = 2
+        ROTATION_MIN_TARGET_TRADES = 10
         _rot_target = None
         _rot_gap = 0.0
         if days_held >= ROTATION_MIN_DAYS and _regime_name not in ("DANGER", "CRISIS"):
@@ -1418,20 +1425,59 @@ async def get_portfolio():
                 from strategy_evaluator import load_cache as _load_entries
                 _entries = _load_entries()
                 if _entries:
-                    _valid = [e for e in _entries if not e.get("vetoed") and e.get("ticker") != ticker]
+                    _valid = [
+                        e for e in _entries
+                        if not e.get("vetoed")
+                        and e.get("ticker") != ticker
+                        and e.get("trades", 0) >= ROTATION_MIN_TARGET_TRADES
+                    ]
                     if _valid:
-                        _best = max(_valid, key=lambda e: e.get("score", 0))
-                        # Unified scoring — same _ev_score used for entries
-                        h_ret = tech.get("avg_return", 0) if tech else 0
-                        h_wr = tech.get("win_rate", 0) if tech else 0
-                        h_trades = tech.get("total_trades", 0) if tech else 0
-                        h_score = _ev_score(h_ret, h_wr, h_trades)
-                        _gap = _best.get("score", 0) - h_score
+                        # Composite (0-100) for the candidate. EntrySignal lacks
+                        # zone_*; map confidence→win_rate, expected_return→avg_return.
+                        # analyst/sentiment kept at 0 here for symmetry — the holding
+                        # is also computed without them below so the comparison is fair.
+                        def _comp_for_entry(e: dict) -> float:
+                            inp = {
+                                "price": e.get("price", 0),
+                                "rsi2": e.get("rsi2", 50),
+                                "atr_pct": e.get("atr_pct", 0),
+                                "sma50_buffer": e.get("sma50_buffer", 0),
+                                "volume_ratio": e.get("volume_ratio", 0),
+                                "win_rate": e.get("confidence", 0),
+                                "avg_return": e.get("expected_return", 0),
+                                "trades": e.get("trades", 0),
+                                "zone_return": 0, "zone_win_rate": 0, "zone_trades": 0,
+                                "analyst_consensus": "",
+                                "analyst_upside": 0,
+                                "sentiment_score": 0,
+                            }
+                            s, _ = _compute_composite_score(inp)
+                            return s
+                        for e in _valid:
+                            e["_composite"] = _comp_for_entry(e)
+                        _best = max(_valid, key=lambda e: e["_composite"])
+                        # Holding composite — same formula, same fields zeroed for fairness.
+                        h_inputs = {
+                            "price": tech.get("price", 0) if tech else 0,
+                            "rsi2": tech.get("rsi2", 50) if tech else 50,
+                            "atr_pct": tech.get("atr_pct", 0) if tech else 0,
+                            "sma50_buffer": tech.get("sma50_buffer", 0) if tech else 0,
+                            "volume_ratio": tech.get("volume_ratio", 0) if tech else 0,
+                            "win_rate": tech.get("win_rate", 0) if tech else 0,
+                            "avg_return": tech.get("avg_return", 0) if tech else 0,
+                            "trades": tech.get("total_trades", 0) if tech else 0,
+                            "zone_return": 0, "zone_win_rate": 0, "zone_trades": 0,
+                            "analyst_consensus": "",
+                            "analyst_upside": 0,
+                            "sentiment_score": 0,
+                        }
+                        h_score, _ = _compute_composite_score(h_inputs)
+                        _gap = _best["_composite"] - h_score
                         if _gap > ROTATION_SCORE_GAP:
                             signal = "ROTATE"
                             _rot_target = _best["ticker"]
                             _rot_gap = round(_gap, 1)
-                            issues.append(f"ROTATE to {_best['ticker']} (score {_best['score']:.1f} vs {h_score:.1f}, gap {_rot_gap})")
+                            issues.append(f"ROTATE to {_best['ticker']} (score {_best['_composite']:.0f} vs {h_score:.0f}, gap {_rot_gap})")
             except Exception:
                 pass
 
@@ -2000,6 +2046,12 @@ async def get_opportunities():
                 opp["composite_score"], opp["ranking_factors"] = _compute_composite_score(opp)
                 opp["quality_tier"] = _quality_tier(opp["composite_score"])
                 opp["meets_strict"] = _meets_strict_criteria(opp)
+                # Backfill: the deployed frontend filter requires sentiment OR analyst data
+                # to display an entry. Phase 3 only fills these for stocks it reaches and
+                # whose APIs return data. For everyone else, mark as UNKNOWN so the entry
+                # is still visible (the trades>=10 + composite cap already gate quality).
+                if not opp.get("sentiment_label"):
+                    opp["sentiment_label"] = "UNKNOWN"
         return result
 
     # No cache — trigger scan in subprocess (non-blocking)
