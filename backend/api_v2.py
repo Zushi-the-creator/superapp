@@ -2067,12 +2067,6 @@ async def get_opportunities():
                 opp["composite_score"], opp["ranking_factors"] = _compute_composite_score(opp)
                 opp["quality_tier"] = _quality_tier(opp["composite_score"])
                 opp["meets_strict"] = _meets_strict_criteria(opp)
-                # Backfill: the deployed frontend filter requires sentiment OR analyst data
-                # to display an entry. Phase 3 only fills these for stocks it reaches and
-                # whose APIs return data. For everyone else, mark as UNKNOWN so the entry
-                # is still visible (the trades>=10 + composite cap already gate quality).
-                if not opp.get("sentiment_label"):
-                    opp["sentiment_label"] = "UNKNOWN"
         return result
 
     # No cache — trigger scan in subprocess (non-blocking)
@@ -2789,12 +2783,41 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
     factors.append(f"PX:{price:.0f}")
 
     composite = max(0, min(100, pts))
-    # Soft veto: no volume confirmation (vol_ratio < 1.0x) caps at FAIR.
-    # Original V2.4 entry rule required vol >= 1.5x; this keeps low-volume
-    # setups visible but prevents them from reaching BEST/GOOD tier.
-    if vol_ratio < 1.0 and composite > 50:
+
+    # High-avg_return boost — match how winners ranked on 2026-04-24 where
+    # +20% avg-ret stocks (QBTS, RGTI, NBTX) topped the list. EV's 10-pt cap
+    # under-weights truly outstanding historical returns.
+    eff_ret = zone_ret if zone_trades >= 5 else r.get("avg_return", 0)
+    if eff_ret >= 10:
+        composite = min(100, composite + 25)
+        factors.append(f"RET+{eff_ret:.0f}:+25")
+    elif eff_ret >= 5:
+        composite = min(100, composite + 12)
+        factors.append(f"RET+{eff_ret:.0f}:+12")
+    elif eff_ret >= 2:
+        composite = min(100, composite + 5)
+
+    # Soft veto: no volume confirmation (vol_ratio < 1.0x) caps at FAIR — but
+    # only when prior avg_return is also weak (<5%). High-historical-return
+    # stocks at low-volume dip days are exactly the setups we want to keep
+    # visible (the avg_return signal carries the edge, not the day's volume).
+    if vol_ratio < 1.0 and eff_ret < 5 and composite > 50:
         composite = 50
         factors.append("VOL<1x:CAP50")
+
+    # Validated-stats cap — CLAUDE.md "TRUST BACKTESTS: WR > 55%, 10+ trades".
+    # When a stock has enough sample (≥10 trades) but FAILS the validation
+    # rule (WR<55% OR avg_return≤0%), cap its composite at FAIR (49). The
+    # April 2026 audit found per-stock prior WR has no predictive correlation,
+    # so we don't hard-veto these — but they shouldn't outrank validated picks
+    # at the top of the entries tab. ATR-driven entries with bad backtest can
+    # still appear, just below the validated set.
+    val_trades = max(zone_trades, total_trades)
+    val_wr = zone_wr if zone_trades >= 5 and zone_wr > 0 else wr
+    val_ret = zone_ret if zone_trades >= 5 else r.get("avg_return", 0)
+    if val_trades >= 10 and (val_wr < 55 or val_ret <= 0) and composite >= 50:
+        composite = 49
+        factors.append("UNVALIDATED:CAP49")
     return round(composite, 1), " ".join(factors)
 
 
@@ -3110,10 +3133,12 @@ async def _run_scan() -> Dict:
             scored.sort(key=lambda x: x[0], reverse=True)
             print(f"[Scan] {len(scored)} candidates (price >= ${MIN_PRICE:.0f}, not held)")
 
-            # Phase 3: validate ALL candidates — every stock shown must be fully checked
-            # (earnings, analyst consensus, sentiment). No stale data in upgrades tab.
-            top_to_validate = [r for _, r in scored]
-            print(f"[Scan] Phase 3: validating all {len(top_to_validate)} candidates")
+            # Phase 3: 2026-04-24 behavior — validate top 50 by EV score only.
+            # Anything beyond rank 50 has near-zero or negative ev_score and isn't
+            # worth surfacing. Without this cap, low-ranked negative-ret stocks
+            # would get analyst/sentiment data and pass the deployed frontend filter.
+            top_to_validate = [r for _, r in scored][:50]
+            print(f"[Scan] Phase 3: validating top {len(top_to_validate)} of {len(scored)} candidates")
 
             if top_to_validate:
                 validated = await scanner.phase3_validate(top_to_validate, top_n=len(top_to_validate))
@@ -3863,7 +3888,7 @@ async def get_combined_opportunities():
             signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
             # Step 3: Validate top 30 with earnings/sentiment/analyst
             _system_status.update({"stage": "validating", "message": "Checking earnings, sentiment...", "progress": 70})
-            signals = await validate_top_signals(signals, top_n=30)
+            signals = await validate_top_signals(signals, top_n=50)
             save_cache(signals)
             cached = [asdict(s) for s in signals]
             cache_age_min = 0
@@ -3959,7 +3984,7 @@ async def refresh_all_scans():
 
     # Step 3: Validate top 30
     _system_status.update({"stage": "validating", "message": "Checking earnings, sentiment, analyst...", "progress": 75})
-    signals = await validate_top_signals(signals, top_n=30)
+    signals = await validate_top_signals(signals, top_n=50)
     save_cache(signals)
     valid = [s for s in signals if not s.vetoed]
     _system_status.update({"stage": "ready", "message": f"{len(valid)} entries ready", "progress": 100})
