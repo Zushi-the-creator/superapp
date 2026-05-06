@@ -72,6 +72,54 @@ FINNHUB_MAX_PER_MIN = 50  # Leave headroom from 60/min limit
 _extended_hours_cache: Dict[str, Dict] = {}  # ticker -> {ext_price, ext_change_pct, session, ts}
 
 
+def _compute_cash_balance(total_deposited: float) -> float:
+    """Derive cash from the transaction ledger:
+        cash = deposits
+             − Σ(BUY.total + BUY.fee)
+             + Σ(SELL.total − SELL.fee)
+             − Σ(SPLIT.fee)
+             − Σ(TAX.total)
+    Fee column on each tx already respects the 10-free-trades-per-month rule
+    (set by `_calc_trade_fee` at trade time). Optional env override
+    BROKER_CASH_OVERRIDE pins to a known broker balance when ledger drift
+    happens. Negative results clamp to 0 (impossible in cash account; signals
+    missing deposits or duplicate buys — tracked separately as data integrity).
+    """
+    override = os.environ.get("BROKER_CASH_OVERRIDE")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    import sqlite3 as _sql
+    db_path = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+    conn = _sql.connect(db_path)
+    try:
+        cur = conn.cursor()
+        buy_total, buy_fee = cur.execute(
+            "SELECT COALESCE(SUM(total),0), COALESCE(SUM(fee),0) FROM transactions WHERE action='BUY'"
+        ).fetchone()
+        sell_total, sell_fee = cur.execute(
+            "SELECT COALESCE(SUM(total),0), COALESCE(SUM(fee),0) FROM transactions WHERE action='SELL'"
+        ).fetchone()
+        split_fee = cur.execute(
+            "SELECT COALESCE(SUM(fee),0) FROM transactions WHERE action='SPLIT'"
+        ).fetchone()[0]
+        tax_total = cur.execute(
+            "SELECT COALESCE(SUM(total),0) FROM transactions WHERE action='TAX'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    raw = total_deposited - buy_total - buy_fee + sell_total - sell_fee - split_fee - tax_total
+    if raw < 0:
+        # Ledger drift — log once per request so we notice without poisoning the UI.
+        print(f"[cash] computed cash {raw:.2f} < 0 — clamping to 0. "
+              f"Likely missing DEPOSIT row or duplicate BUY. "
+              f"Pin via BROKER_CASH_OVERRIDE env var if known.")
+        return 0.0
+    return round(raw, 2)
+
+
 def _get_market_session() -> str:
     """Return current US market session based on ET time.
     PRE_MARKET:   4:00 AM - 9:30 AM ET (Mon-Fri)
@@ -1528,9 +1576,10 @@ async def get_portfolio():
     _total_fees_all = round(tx_summary.get("total_fees", 0), 2)
     _realized = tx_summary.get("total_realized_pnl", 0)
 
-    # Cash = broker-verified balance (formula drifts due to 10 free trades/mo + fees baked into realized_pnl)
-    # Updated 2026-04-25: DBD sold @ $85.04 → +$1,274.38 cash, awaiting redeployment.
-    _cash = 1274.38
+    # Cash from live ledger (respects 10-free-trades/month rule via stored fee column).
+    # Stays 0-floored even when formula goes negative due to ledger drift; pin via
+    # BROKER_CASH_OVERRIDE env var if you want to anchor to broker reality.
+    _cash = _compute_cash_balance(_total_deposited)
 
     # Total portfolio value = positions + cash
     total_value_with_cash = total_value + _cash
