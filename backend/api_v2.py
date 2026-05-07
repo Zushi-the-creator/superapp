@@ -1344,24 +1344,38 @@ async def get_portfolio():
         pos_entry_date = pos.get("entry_date", "")
         tech = _technicals_cache.get(ticker)
 
-        # Re-evaluate exit trigger with current price
+        # Re-evaluate exit trigger with current price.
+        # Per CLAUDE.md: MR positions use Hybrid21d (7d min + -3% trail + 21d cap),
+        # MOM positions use Fixed90d. _technicals_cache stores Hybrid21d for ALL
+        # tickers (it's strategy-agnostic) — so we MUST override the cached
+        # strategy with the position's actual strategy before evaluating, or
+        # MOM positions like APEI hit the 21d cap on day 25 by mistake.
         if tech and tech.get("exit_strategy"):
             df = _cache.get(ticker, 365)
             if df is not None and len(df) >= 10:
                 closes_live = df["Close"].dropna().tolist()
                 rsi_live = tech.get("rsi2", -1)
-                # Use exit strategy cache if available; fallback to technicals cache
+                pos_strategy_eval = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
+                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Hybrid21d"
+                # Use exit strategy cache if it matches the position's strategy;
+                # otherwise build a fresh exit_cached with the right strategy
+                # name so _evaluate_exit_trigger picks the correct hold target
+                # and (non-)trailing logic.
                 exit_cached = _exit_strategy_cache.get(ticker)
-                if not exit_cached and tech.get("exit_strategy"):
-                    exit_cached = {"strategy": tech["exit_strategy"]}
-                if not exit_cached:
-                    exit_cached = {"strategy": ""}
+                if not exit_cached or exit_cached.get("strategy") != expected_exit_strat:
+                    exit_cached = {
+                        "strategy": expected_exit_strat,
+                        "wr": tech.get("exit_strategy_wr", 0),
+                        "avg_ret": tech.get("exit_strategy_ret", 0),
+                        "avg_hold": tech.get("exit_strategy_hold", 21 if expected_exit_strat == "Hybrid21d" else 90),
+                    }
                 live_exit = _evaluate_exit_trigger(
                     exit_cached,
                     closes_live, rsi_live, live_price, entry_price,
                     entry_date=pos_entry_date
                 )
                 old_triggered = tech.get("exit_triggered", False)
+                tech["exit_strategy"] = expected_exit_strat  # surface the right name in the UI
                 tech["exit_triggered"] = live_exit["triggered"]
                 tech["exit_momentum_override"] = live_exit.get("momentum_override", False)
                 tech["exit_price"] = live_exit["exit_price"]
