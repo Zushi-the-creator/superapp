@@ -22,7 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from schemas_v2 import (
-    BuyRequest, SellRequest, TradeResult,
+    BuyRequest, SellRequest, DepositRequest, TradeResult,
     PortfolioResponse, PortfolioSummary, PositionDetail,
     HealthCheckResponse, HealthIssue,
     ScanResponse, ScanOpportunity, HoldingScore,
@@ -72,18 +72,46 @@ FINNHUB_MAX_PER_MIN = 50  # Leave headroom from 60/min limit
 _extended_hours_cache: Dict[str, Dict] = {}  # ticker -> {ext_price, ext_change_pct, session, ts}
 
 
+# Broker-verified historical deposit baseline. Every DEPOSIT recorded via the
+# /positions/deposit endpoint adds on top of this number through the DB ledger.
+# Don't bump this constant for new deposits — they should flow through the DB.
+HISTORICAL_DEPOSIT_BASELINE = 11891.58
+
+
+def _sum_db_deposits() -> float:
+    """Sum of DEPOSIT rows in the transactions ledger.
+    Extends the historical baseline with deposits recorded via /positions/deposit."""
+    import sqlite3 as _sql
+    db_path = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+    conn = _sql.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(total),0) FROM transactions WHERE action='DEPOSIT'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return float(row[0] or 0)
+
+
+def _total_deposited_now() -> float:
+    """Authoritative total deposited = broker-verified historical baseline + DB DEPOSITs."""
+    return round(HISTORICAL_DEPOSIT_BASELINE + _sum_db_deposits(), 2)
+
+
 def _compute_cash_balance(total_deposited: float) -> float:
     """Derive cash from the transaction ledger:
-        cash = deposits
+        cash = total_deposited
              − Σ(BUY.total + BUY.fee)
              + Σ(SELL.total − SELL.fee)
              − Σ(SPLIT.fee)
              − Σ(TAX.total)
-    Fee column on each tx already respects the 10-free-trades-per-month rule
-    (set by `_calc_trade_fee` at trade time). Optional env override
-    BROKER_CASH_OVERRIDE pins to a known broker balance when ledger drift
-    happens. Negative results clamp to 0 (impossible in cash account; signals
-    missing deposits or duplicate buys — tracked separately as data integrity).
+    `total_deposited` should already include DB DEPOSITs (caller passes
+    `_total_deposited_now()`). Fee column on each tx already respects the
+    10-free-trades-per-month rule (set by `_calc_trade_fee` at trade time).
+    Optional env override BROKER_CASH_OVERRIDE pins to a known broker balance
+    when ledger drift happens. Negative results clamp to 0 (impossible in
+    cash account; signals missing deposits or duplicate buys — tracked
+    separately as data integrity).
     """
     override = os.environ.get("BROKER_CASH_OVERRIDE")
     if override:
@@ -112,11 +140,12 @@ def _compute_cash_balance(total_deposited: float) -> float:
         conn.close()
     raw = total_deposited - buy_total - buy_fee + sell_total - sell_fee - split_fee - tax_total
     if raw < 0:
-        # Ledger drift — log once per request so we notice without poisoning the UI.
-        print(f"[cash] computed cash {raw:.2f} < 0 — clamping to 0. "
-              f"Likely missing DEPOSIT row or duplicate BUY. "
-              f"Pin via BROKER_CASH_OVERRIDE env var if known.")
-        return 0.0
+        # Surface the drift instead of clamping — the user wants to see the real
+        # number so fee/tax mismatches with the broker are visible. Set
+        # BROKER_CASH_OVERRIDE if you want to pin to the broker's authoritative
+        # balance instead.
+        print(f"[cash] computed cash {raw:.2f} < 0 (ledger drift, not clamped). "
+              f"Set BROKER_CASH_OVERRIDE to pin to broker reality.")
     return round(raw, 2)
 
 
@@ -1452,41 +1481,30 @@ async def get_portfolio():
                 and not _winner_protected
                 and _regime_name not in ("DANGER", "CRISIS")):
             try:
-                from strategy_evaluator import load_cache as _load_entries
-                _entries = _load_entries()
-                if _entries:
-                    _valid = [
-                        e for e in _entries
-                        if not e.get("vetoed")
-                        and e.get("ticker") != ticker
-                        and e.get("trades", 0) >= ROTATION_MIN_TARGET_TRADES
-                    ]
-                    if _valid:
-                        # Composite (0-100) for the candidate. EntrySignal lacks
-                        # zone_*; map confidence→win_rate, expected_return→avg_return.
-                        # analyst/sentiment kept at 0 here for symmetry — the holding
-                        # is also computed without them below so the comparison is fair.
-                        def _comp_for_entry(e: dict) -> float:
-                            inp = {
-                                "price": e.get("price", 0),
-                                "rsi2": e.get("rsi2", 50),
-                                "atr_pct": e.get("atr_pct", 0),
-                                "sma50_buffer": e.get("sma50_buffer", 0),
-                                "volume_ratio": e.get("volume_ratio", 0),
-                                "win_rate": e.get("confidence", 0),
-                                "avg_return": e.get("expected_return", 0),
-                                "trades": e.get("trades", 0),
-                                "zone_return": 0, "zone_win_rate": 0, "zone_trades": 0,
-                                "analyst_consensus": "",
-                                "analyst_upside": 0,
-                                "sentiment_score": 0,
-                            }
-                            s, _ = _compute_composite_score(inp)
-                            return s
-                        for e in _valid:
-                            e["_composite"] = _comp_for_entry(e)
-                        _best = max(_valid, key=lambda e: e["_composite"])
-                        # Holding composite — same formula, same fields zeroed for fairness.
+                # V4.3: read candidates from /scan/opportunities cache (the same
+                # set the user sees in the entries tab). The deep-scanner veto
+                # chain (SMA50, earnings, analyst Hold/Sell, correlation) is
+                # already applied — and composite_score is already computed.
+                # Previously rotation read from strategy_evaluator's cache which
+                # has a LOOSER veto chain, so it suggested vetoed-by-deep-scanner
+                # tickers (e.g. ANET below SMA50) that don't appear in entries tab.
+                opps = (_scan_cache or {}).get("opportunities", []) if _scan_cache else []
+                _valid = [
+                    o for o in opps
+                    if not o.get("vetoed")
+                    and o.get("ticker") != ticker
+                    and (o.get("trades", 0) or 0) >= ROTATION_MIN_TARGET_TRADES
+                    and o.get("ticker") not in {p.get("ticker") for p in (_position_mgr._get_open_positions_sync() or [])}
+                ]
+                if _valid:
+                    _best = max(_valid, key=lambda o: o.get("composite_score", 0) or 0)
+                    # Use the holding's composite from holdings_scores to keep
+                    # both sides on the same scale (the entries tab's composite).
+                    h_score = (holdings_scores.get(ticker, {}).get("score", 0)
+                               if "holdings_scores" in dir() and isinstance(holdings_scores, dict)
+                               else 0)
+                    if h_score == 0:
+                        # Fallback: live recompute when holdings_scores not in scope
                         h_inputs = {
                             "price": tech.get("price", 0) if tech else 0,
                             "rsi2": tech.get("rsi2", 50) if tech else 50,
@@ -1496,18 +1514,21 @@ async def get_portfolio():
                             "win_rate": tech.get("win_rate", 0) if tech else 0,
                             "avg_return": tech.get("avg_return", 0) if tech else 0,
                             "trades": tech.get("total_trades", 0) if tech else 0,
-                            "zone_return": 0, "zone_win_rate": 0, "zone_trades": 0,
-                            "analyst_consensus": "",
-                            "analyst_upside": 0,
-                            "sentiment_score": 0,
+                            "zone_return": tech.get("zone_return", 0) if tech else 0,
+                            "zone_win_rate": tech.get("zone_wr", 0) if tech else 0,
+                            "zone_trades": tech.get("zone_trades", 0) if tech else 0,
+                            "analyst_consensus": tech.get("analyst_consensus", "") if tech else "",
+                            "analyst_upside": tech.get("analyst_upside", 0) if tech else 0,
+                            "sentiment_score": tech.get("sentiment_score", 0) if tech else 0,
                         }
                         h_score, _ = _compute_composite_score(h_inputs)
-                        _gap = _best["_composite"] - h_score
-                        if _gap > ROTATION_SCORE_GAP:
-                            signal = "ROTATE"
-                            _rot_target = _best["ticker"]
-                            _rot_gap = round(_gap, 1)
-                            issues.append(f"ROTATE to {_best['ticker']} (score {_best['_composite']:.0f} vs {h_score:.0f}, gap {_rot_gap})")
+                    _best_comp = _best.get("composite_score", 0) or 0
+                    _gap = _best_comp - h_score
+                    if _gap > ROTATION_SCORE_GAP:
+                        signal = "ROTATE"
+                        _rot_target = _best["ticker"]
+                        _rot_gap = round(_gap, 1)
+                        issues.append(f"ROTATE to {_best['ticker']} (score {_best_comp:.0f} vs {h_score:.0f}, gap {_rot_gap})")
             except Exception:
                 pass
 
@@ -1654,7 +1675,7 @@ async def get_portfolio():
     tx_summary = _position_mgr.get_transaction_summary()
 
     # Broker-verified balances
-    _total_deposited = 11891.58
+    _total_deposited = _total_deposited_now()  # baseline + DB DEPOSITs
     _total_fees_all = round(tx_summary.get("total_fees", 0), 2)
     _total_tax_all = round(tx_summary.get("total_tax", 0), 2)
     _realized = tx_summary.get("total_realized_pnl", 0)
@@ -2976,6 +2997,20 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
             vetoed = True
             veto_reason = f"Correlated {_corr['max_corr']:.0%} with {_corr['corr_with']}"
 
+    # 5. V2.7 VALIDATION GATE (CLAUDE.md mandate): WR > 55% AND 10+ trades.
+    # The 2026-04-24 audit removed avg_return<3 as a HARD veto (it rejected
+    # future winners). But CLAUDE.md still requires WR > 55 for "validation"
+    # before recommending any entry. Apply Bayesian-shrunk WR so single-sample
+    # noise doesn't game the gate. Stocks failing this fall to the "Vetoed"
+    # section and don't pollute the main entries list.
+    _trades_n = trades_count
+    if not vetoed and _trades_n >= 10:
+        _wins_n = int(round(r.get("win_rate", 0) * _trades_n / 100))
+        _bwr = _bayesian_wr(_wins_n, _trades_n)
+        if _bwr <= 55:
+            vetoed = True
+            veto_reason = f"V2.7 validation: WR {_bwr:.0f}% ≤ 55 (need > 55)"
+
     # Composite ranking score
     composite, ranking_factors = _compute_composite_score(r)
     quality = _quality_tier(composite)
@@ -3390,6 +3425,57 @@ async def sell_position(req: SellRequest):
         total=total,
         fee=fee,
     )
+
+
+@router.post("/positions/deposit")
+async def record_deposit(req: DepositRequest):
+    """Record a cash deposit. Inserts a DEPOSIT row in the transactions ledger
+    so cash + total_deposited update everywhere immediately."""
+    amount = float(req.amount)
+    if amount <= 0:
+        return {"success": False, "message": "Deposit amount must be positive"}
+
+    deposit_date = (req.date or datetime.now().strftime("%Y-%m-%d")).strip()[:10]
+    try:
+        # Validate ISO date
+        from datetime import date as _date
+        _date.fromisoformat(deposit_date)
+    except ValueError:
+        return {"success": False, "message": f"Invalid date '{deposit_date}' (expected YYYY-MM-DD)"}
+
+    import sqlite3 as _sql
+    db_path = os.path.join(os.path.dirname(__file__), "data", "positions.db")
+    conn = _sql.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO transactions (position_id, ticker, action, date, price, shares, total, fee, realized_pnl, notes, created_at) "
+            "VALUES (NULL, '_CASH', 'DEPOSIT', ?, ?, 1, ?, 0, NULL, ?, ?)",
+            (deposit_date, amount, amount, req.notes or "", datetime.now().isoformat()),
+        )
+        tx_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Bust caches that depend on cash / deposit total / equity curve.
+    _signal_cache.clear()
+    _exit_strategy_cache.clear()
+    global _perf_cache, _perf_cache_time, _health_cache, _health_cache_time
+    _perf_cache = None
+    _perf_cache_time = None
+    _health_cache = None
+    _health_cache_time = None
+
+    new_total = _total_deposited_now()
+    return {
+        "success": True,
+        "message": f"Recorded deposit ${amount:,.2f} on {deposit_date}",
+        "transaction_id": tx_id,
+        "amount": amount,
+        "date": deposit_date,
+        "total_deposited": new_total,
+    }
 
 
 # ── History Endpoint ──
@@ -4213,7 +4299,8 @@ async def get_performance():
             pnl=round(pnl, 2), pnl_pct=round(pnl_pct, 2), result=result,
         ))
 
-    # Deposits by date (broker-verified)
+    # Historical deposits (broker-verified, baked into the curve before the
+    # /positions/deposit endpoint existed). New deposits live in the DB.
     _deposits = [
         ("2026-01-04", 1500.00),
         ("2026-01-07", 1500.00),
@@ -4223,7 +4310,17 @@ async def get_performance():
         ("2026-02-13", 3213.37),
         ("2026-02-27", 3478.00),
     ]
-    total_deposited = sum(d[1] for d in _deposits)  # $11,891.58
+    # Merge in any DEPOSIT rows from the ledger so the curve picks up new
+    # deposits recorded via /positions/deposit.
+    try:
+        for _r in conn.execute(
+            "SELECT date, COALESCE(SUM(total),0) FROM transactions "
+            "WHERE action='DEPOSIT' GROUP BY date"
+        ).fetchall():
+            _deposits.append((_r[0], float(_r[1])))
+    except Exception:
+        pass
+    total_deposited = round(sum(d[1] for d in _deposits), 2)
 
     # Build cumulative deposits by date for daily PnL curve
     _cum_deposits = {}
