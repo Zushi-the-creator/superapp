@@ -267,6 +267,56 @@ async def _fetch_tiingo_iex_batch(tickers: List[str], batch_size: int = 100) -> 
     return updated
 
 
+async def _run_precompute_and_eval_subproc(held: set, live_px: dict, label: str = "Eval") -> int:
+    """Run backtest_precompute + strategy_evaluator in a subprocess so the heavy
+    pandas/numpy work can't starve the event loop on shared-1x Fly machines.
+    Returns count of valid (non-vetoed) signals, or -1 on error/timeout."""
+    import json as _json
+    payload = _json.dumps({"held": sorted(held), "live_px": live_px})
+    code = (
+        "import json, sys\n"
+        "from backtest_precompute import precompute_all\n"
+        "from strategy_evaluator import evaluate_all, save_cache\n"
+        "p = json.loads(sys.stdin.read())\n"
+        "precompute_all()\n"
+        "sigs = evaluate_all(10.0, set(p['held']), p['live_px'])\n"
+        "save_cache(sigs)\n"
+        "print(f'__VALID__ {sum(1 for s in sigs if not s.vetoed)}')\n"
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code,
+            cwd=os.path.dirname(__file__),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as e:
+        print(f"[{label}] Subprocess spawn failed: {e}")
+        return -1
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=payload.encode()),
+            timeout=900,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        print(f"[{label}] Subprocess timed out (>900s)")
+        return -1
+    if stderr:
+        for line in stderr.decode().split("\n")[-10:]:
+            if line.strip():
+                print(f"[{label}:err] {line.strip()}")
+    valid = -1
+    for line in (stdout or b"").decode().split("\n"):
+        if line.startswith("__VALID__"):
+            try:
+                valid = int(line.split()[1])
+            except Exception:
+                pass
+    return valid
+
+
 async def _auto_refresh_stale_cache() -> None:
     """Background task: refresh stale historical bars + re-run precompute + evaluator.
     Triggered when /scan/combined detects data_date is more than 1 trading day old.
@@ -287,18 +337,11 @@ async def _auto_refresh_stale_cache() -> None:
         _exit_strategy_cache.clear()
 
         try:
-            from backtest_precompute import precompute_all as _precompute
-            _system_status.update({"stage": "auto_refreshing", "message": "Pre-computing backtests...", "progress": 60})
-            await asyncio.to_thread(_precompute)
-
-            from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
-            _system_status.update({"stage": "auto_refreshing", "message": "Re-evaluating entries...", "progress": 80})
+            _system_status.update({"stage": "auto_refreshing", "message": "Pre-computing backtests + evaluating...", "progress": 60})
             positions = _position_mgr._get_open_positions_sync()
             held = set(p["ticker"] for p in positions) if positions else set()
             live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
-            signals = await asyncio.to_thread(_eval_all, 10.0, held, live_px)
-            _save_eval(signals)
-            valid = sum(1 for s in signals if not s.vetoed)
+            valid = await _run_precompute_and_eval_subproc(held, live_px, label="AutoRefresh")
             print(f"[AutoRefresh] Evaluator: {valid} valid entries")
             _system_status.update({"stage": "ready", "message": f"{valid} entries ready", "progress": 100})
 
@@ -1075,38 +1118,12 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
     if day_chg < -8:
         issues.append(f"CRASH ({day_chg:.1f}% today)")
 
-    # Network-dependent rules (5-7)
-    # In production: only run these from background warmup (skip_network=False).
-    # In the request path: skip them to keep the endpoint fast.
-    _net_timeout = 3.0 if _is_prod else 8.0
-
-    # Only run network rules if called from warmup (not from HTTP request)
-    # The signal cache check at the top means cached signals skip all of this
-    if not _is_prod:
-        # Local dev: always run network rules
-        _run_network = True
-    else:
-        # Production: only run if this is background warmup (no active HTTP request)
-        # Heuristic: if there's no cached signal yet, we're in warmup
-        _run_network = ticker not in _signal_cache
-
-    if _run_network:
-        # Rule 5: Earnings check (Finnhub)
-        try:
-            from deep_scanner import DeepScanner
-            ds = DeepScanner()
-            earnings = await asyncio.wait_for(ds._check_earnings(session, ticker), timeout=_net_timeout)
-            if earnings:
-                issues.append(f"Earnings on {earnings['date']} (<7 days)")
-        except (asyncio.TimeoutError, Exception):
-            pass
-
-        # Rule 6 (sentiment) and Rule 7 (analyst target) REMOVED from /analyze issues.
-        # Backtest on 95K signals shows both filters HURT edge:
-        #   sentiment<-0.3:  edge -0.43%
-        #   price>target:    edge -0.40%
-        # Raw sentiment/analyst data still surfaced in response for user context,
-        # but no longer flagged as "issues".
+    # Network-dependent rules disabled in the portfolio request path —
+    # earnings/sentiment checks here added ~3s × N positions of latency every
+    # time _signal_cache was cleared by cache_refresh_loop. Earnings warnings
+    # are still surfaced via /analyze and the scanner Phase-3 veto, which is
+    # the right gate for new entries.
+    _run_network = False
 
     # Rule 8: RSI zone expected return analysis (CRITICAL for exit decisions)
     # "When this stock was at this RSI zone historically, what was the 7-day forward return?"
@@ -1679,8 +1696,8 @@ async def get_portfolio():
         total_tax=_total_tax_all,
         total_deposited=_total_deposited,
         position_count=len(details),
-        max_positions=MAX_POSITIONS,
-        slots_available=max(0, MAX_POSITIONS - len(details)),
+        max_positions=0,        # 0 = no cap; field kept for schema compat
+        slots_available=0,      # uncapped — frontend doesn't surface this
         avg_win_rate=round(sum(wr_list) / len(wr_list), 1) if wr_list else 0,
         cash=_cash,
         yesterday_pnl=round(_yesterday_pnl, 2),
@@ -3243,9 +3260,6 @@ def _calc_trade_fee(ticker: str) -> float:
     return 0.0 if count < 10 else 1.50
 
 
-MAX_POSITIONS = 6  # 5-6 optimal. 2 keepers + 4 momentum = 6 current
-
-
 @router.post("/positions/buy", response_model=TradeResult)
 async def buy_position(req: BuyRequest):
     """Record a buy and create position + transaction."""
@@ -3253,15 +3267,6 @@ async def buy_position(req: BuyRequest):
     total = req.price * req.shares
     fee = _calc_trade_fee(ticker)
     currency = "ILS" if ticker.endswith(".TA") else "USD"
-
-    # Enforce max positions (backtested: 5 is optimal)
-    open_positions = _position_mgr._get_open_positions_sync(currency)
-    if len(open_positions) >= MAX_POSITIONS:
-        return TradeResult(
-            success=False,
-            message=f"Max {MAX_POSITIONS} positions reached. Sell or rotate before buying.",
-            ticker=ticker,
-        )
 
     # Add position
     result = _position_mgr._add_position_sync(
@@ -3282,11 +3287,17 @@ async def buy_position(req: BuyRequest):
         fee=fee, notes=req.notes, position_id=result.get("position_id"),
     )
 
-    # Invalidate caches so signals/exit strategies are recalculated with new position
+    # Invalidate caches so signals/exit strategies/perf history reflect the new position
     _signal_cache.clear()
     _exit_strategy_cache.clear()
-    global _scan_cache
-    _scan_cache = None  # Force scan cache rebuild (holdings changed)
+    global _scan_cache, _perf_cache, _perf_cache_time, _health_cache, _health_cache_time, _momentum_cache, _momentum_cache_time
+    _scan_cache = None          # holdings changed → re-rank
+    _perf_cache = None          # /performance must include the new trade
+    _perf_cache_time = None
+    _health_cache = None        # strategy health depends on portfolio composition
+    _health_cache_time = None
+    _momentum_cache = None      # correlation veto depends on holdings
+    _momentum_cache_time = None
 
     return TradeResult(
         success=True,
@@ -3358,11 +3369,16 @@ async def sell_position(req: SellRequest):
         position_id=pos["id"],
     )
 
-    # Invalidate caches so signals/exit strategies are recalculated without sold position
+    # Invalidate caches so signals/exit strategies/perf history reflect the closed position
     _signal_cache.clear()
     _exit_strategy_cache.clear()
-    global _scan_cache
-    _scan_cache = None  # Force scan cache rebuild (holdings changed)
+    global _scan_cache, _perf_cache, _perf_cache_time, _health_cache, _health_cache_time, _momentum_cache, _momentum_cache_time
+    _scan_cache = None
+    _perf_cache = None
+    _perf_cache_time = None
+    _health_cache = None
+    _momentum_cache = None
+    _momentum_cache_time = None
 
     return TradeResult(
         success=True,
@@ -3679,6 +3695,88 @@ async def refresh_momentum():
     return {"status": "scanning", "message": "Momentum scan started."}
 
 
+# ── KDE Adaptive Cascade strategy lane ─────────────────────────────────────────
+_kde_engine = None
+_kde_engine_label = "default"
+
+
+def _get_kde_engine():
+    global _kde_engine
+    if _kde_engine is None:
+        try:
+            from atlas_v2.kde_strategy import KDEStrategyEngine
+            _kde_engine = KDEStrategyEngine(label=_kde_engine_label)
+        except FileNotFoundError as e:
+            return None, str(e)
+        except Exception as e:
+            return None, f"KDE engine init failed: {e}"
+    return _kde_engine, None
+
+
+@router.get("/scan/kde")
+async def scan_kde(limit: int = 30, min_price: float = 5.0):
+    """KDE Adaptive Cascade signals — third strategy lane.
+
+    Backtest (500 tickers, 6.2yr walk-forward, 20 slots, no stop):
+      $14K → $224K, CAGR +56.2%, Sharpe 1.82, max DD -66.9%
+
+    Sizing recommendation: 5% per position (target 20 slots), max 10% concentration cap,
+    14d same-name cooldown, NO stop-loss (kills momentum upside).
+    """
+    engine, err = _get_kde_engine()
+    if engine is None:
+        return {"status": "no_model", "error": err,
+                "hint": "Run: python3 -m atlas_v2.kde_train --tickers 500"}
+    held = {p["ticker"] for p in (_position_mgr._get_open_positions_sync() or [])}
+    t0 = time.time()
+    signals = engine.score_universe(min_price=min_price, held_tickers=held, limit=limit)
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "elapsed_sec": round(time.time() - t0, 2),
+        "model_meta": engine.meta(),
+        "n_signals": len(signals),
+        "signals": [
+            {
+                "ticker": s.ticker, "price": s.price, "score": round(s.score, 4),
+                "expected_return_pct": round(s.expected_return_pct, 2),
+                "p_big_winner": round(s.p_big_winner, 3),
+                "best_horizon_days": s.best_horizon_days,
+                "regime": s.regime,
+                "rsi2": s.rsi2, "atr_pct": s.atr_pct,
+                "sma50_buf_pct": s.sma50_buf_pct, "mom20_pct": s.mom20_pct,
+                "data_date": s.data_date,
+                "horizon_breakdown": s.horizon_breakdown,
+            } for s in signals
+        ],
+        "sizing_hint": {
+            "target_slots": 20,
+            "position_size_pct_of_book": 5.0,
+            "max_concentration_pct": 10.0,
+            "cooldown_days": 14,
+            "stop_loss": None,  # Intentionally none
+            "rationale": "Best-practice diversification; KDE picks fat-tail momentum names that need to ride deep drawdowns.",
+        },
+    }
+
+
+@router.post("/scan/kde/retrain")
+async def retrain_kde():
+    """Trigger KDE model retraining in background (subprocess)."""
+    import subprocess
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "atlas_v2.kde_train",
+        "--tickers", "500", "--label", _kde_engine_label,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    # Reset engine so next scan reloads new bundle
+    global _kde_engine
+    _kde_engine = None
+    return {"status": "training_started", "pid": proc.pid,
+            "message": "KDE retrain in progress. Refresh /scan/kde in ~10 minutes."}
+
+
 @router.get("/system/status")
 async def get_system_status():
     """Current system status — what's running, what stage."""
@@ -3782,7 +3880,7 @@ async def refresh_backtest_cache():
 
 
 @router.post("/cache/populate")
-async def populate_cache(days: int = 10, ticker: str | None = None):
+async def populate_cache(days: int = 10, ticker: Optional[str] = None):
     """Fetch historical data via Tiingo. days=10 for daily refresh, days=2600 for 10yr backfill.
     Pass ticker=XYZ to backfill only one stock (cheap, ~20KB per ticker)."""
     label = f"{days}d" if days <= 30 else f"{days//365}yr"
@@ -5741,20 +5839,12 @@ async def cache_refresh_loop():
                         _upd = 0
                         print(f"[CacheRefresh] All stocks already fresh")
 
-                    # Pre-compute backtests (17s for 3K stocks) then run fast evaluator (<5s)
-                    _system_status.update({"stage": "precomputing", "message": "Pre-computing backtests for 3000+ stocks...", "progress": 70})
-                    from backtest_precompute import precompute_all as _precompute
-                    await asyncio.to_thread(_precompute)
-                    print(f"[CacheRefresh] Backtest cache updated")
-
-                    _system_status.update({"stage": "evaluating", "message": "Fast scan with cached backtests...", "progress": 90})
-                    from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
+                    # Pre-compute + evaluator run in subprocess so they can't block the event loop
+                    _system_status.update({"stage": "precomputing", "message": "Pre-computing backtests + evaluating (subprocess)...", "progress": 70})
                     _held = set(p["ticker"] for p in positions) if positions else set()
                     _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
-                    _signals = await asyncio.to_thread(_eval_all, 10.0, _held, _live_px)
-                    _save_eval(_signals)
-                    _valid = sum(1 for s in _signals if not s.vetoed)
-                    print(f"[CacheRefresh] Evaluator: {_valid} valid entries (fast scan)")
+                    _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="CacheRefresh")
+                    print(f"[CacheRefresh] Evaluator: {_valid} valid entries (subprocess)")
                     _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
                 except (asyncio.TimeoutError, Exception) as _e:
                     import traceback; traceback.print_exc()
@@ -5825,20 +5915,13 @@ async def cache_refresh_loop():
             _signal_cache.clear()
             _exit_strategy_cache.clear()
 
-            # Re-run precompute + evaluator after every price refresh
-            # This keeps the entries tab fresh (was only running on first boot)
+            # Re-run precompute + evaluator after every price refresh, in a subprocess
+            # so the heavy CPU work can't starve the event loop on shared-1x Fly.
             try:
-                print(f"[CacheRefresh] Re-computing backtests after price refresh...")
-                from backtest_precompute import precompute_all as _precompute
-                await asyncio.to_thread(_precompute)
-                print(f"[CacheRefresh] Backtest cache updated")
-
-                from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
+                print(f"[CacheRefresh] Re-computing backtests + evaluating (subprocess)...")
                 _held = set(p["ticker"] for p in positions) if positions else set()
                 _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
-                _signals = await asyncio.to_thread(_eval_all, 10.0, _held, _live_px)
-                _save_eval(_signals)
-                _valid = sum(1 for s in _signals if not s.vetoed)
+                _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="CacheRefresh")
                 print(f"[CacheRefresh] Evaluator: {_valid} valid entries")
                 _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
 
@@ -5857,20 +5940,35 @@ async def cache_refresh_loop():
             traceback.print_exc()
 
         # Sleep until next refresh window
-        # After market close (4pm ET = 21:00 UTC): run in ~4 hours
-        # Target: refresh at ~5pm ET daily when Tiingo has final close data
+        # Cadence:
+        #   Pre-market 4-9 ET:    skip (Tiingo doesn't have intraday for most until open)
+        #   Market hours 9-16 ET: every 60 min (keeps entries tab live during trading)
+        #   Post-close 16-18 ET:  1h wait then refresh (Tiingo finalizes)
+        #   Overnight 18-4 ET:    long sleep until 5pm ET next day
+        # Target: refresh at ~5pm ET daily for final close + hourly during the
+        # trading day so the user doesn't see yesterday's data midday.
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         _now = _dt.now(_tz(_td(hours=-4)))  # ET
         _hour = _now.hour
-        if 16 <= _hour < 18:
-            # Just after close — refresh in 1 hour (wait for Tiingo to finalize)
+        _wday = _now.weekday()  # 0=Mon, 6=Sun
+        if _wday >= 5:
+            # Weekend — sleep until Monday 9 ET
+            _days_to_mon = (7 - _wday) % 7 or 1
+            _sleep = max(3600, _days_to_mon * 24 * 3600 - _hour * 3600)
+        elif 16 <= _hour < 18:
+            # Just after close — wait 1h for Tiingo to finalize daily bars
             _sleep = 3600
         elif _hour >= 18 or _hour < 4:
-            # Evening/overnight — next check at 5pm ET tomorrow
+            # Evening/overnight — next check at 5pm ET (or next morning)
             _hours_until_5pm = (17 - _hour) % 24
             _sleep = max(3600, _hours_until_5pm * 3600)
+        elif 4 <= _hour < 9:
+            # Pre-market — wait until 9 ET when intraday data starts flowing
+            _sleep = max(900, (9 - _hour) * 3600)
         else:
-            # During market hours — check every 4 hours
-            _sleep = 14400
-        print(f"[CacheRefresh] Next refresh in {_sleep//3600}h (ET hour: {_hour})")
+            # Market hours (9-16 ET) — refresh every 60 min so the entries tab
+            # uses today's live prices, not yesterday's close. Tiingo refresh of
+            # ~3K stale tickers + precompute is well within the 10K/hr quota.
+            _sleep = 3600
+        print(f"[CacheRefresh] Next refresh in {_sleep//60}min (ET {_hour}:00 {'wkd' if _wday<5 else 'wknd'})")
         await asyncio.sleep(_sleep)
