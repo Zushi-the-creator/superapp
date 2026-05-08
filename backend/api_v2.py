@@ -6103,24 +6103,47 @@ async def cache_refresh_loop():
             _signal_cache.clear()
             _exit_strategy_cache.clear()
 
-            # Re-run precompute + evaluator after every price refresh, in a subprocess
-            # so the heavy CPU work can't starve the event loop on shared-1x Fly.
-            try:
-                print(f"[CacheRefresh] Re-computing backtests + evaluating (subprocess)...")
-                _held = set(p["ticker"] for p in positions) if positions else set()
-                _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
-                _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="CacheRefresh")
-                print(f"[CacheRefresh] Evaluator: {_valid} valid entries")
-                _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
+            # Decide whether to re-run the heavy precompute + scan. During market
+            # hours the daily Tiingo bar isn't complete (today's row is partial
+            # or missing — we already saw 0/52 succeed at noon ET) so re-running
+            # precompute against the same data wastes CPU and triggers timeout
+            # cycles (~10min subprocess on shared-1x Fly). Only run heavy work
+            # when daily-bar refresh actually fetched new rows OR we're past the
+            # post-close window where Tiingo has the day's final close.
+            from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
+            _et_now = _dt2.now(_tz2(_td2(hours=-4)))
+            _et_hour = _et_now.hour
+            _is_after_close = _et_hour >= 16 or _et_hour < 4  # 16 ET–04 ET next day
+            _refresh_made_progress = (result.get("refreshed", 0) > 0) if 'result' in dir() else False
+            _should_run_heavy = _is_after_close or _refresh_made_progress
 
-                # Also trigger full deep scan (writes scan_YYYY-MM-DD.json)
-                if not _scan_running:
-                    _scan_cache = None
-                    _scan_running = True
-                    asyncio.create_task(_background_scan())
-                    print(f"[CacheRefresh] Full scan triggered in background")
-            except Exception as _precomp_err:
-                print(f"[CacheRefresh] Precompute/eval error: {_precomp_err}")
+            if _should_run_heavy:
+                try:
+                    print(f"[CacheRefresh] Re-computing backtests + evaluating (subprocess)...")
+                    _held = set(p["ticker"] for p in positions) if positions else set()
+                    _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                    _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="CacheRefresh")
+                    print(f"[CacheRefresh] Evaluator: {_valid} valid entries")
+                    _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
+
+                    # Trigger full deep scan only if we have fresh data AND the
+                    # last scan is older than 4 hours (avoid back-to-back scans).
+                    _scan_age_min = (
+                        (_dt2.now() - _scan_cache_time).total_seconds() / 60
+                        if _scan_cache_time else 9999
+                    )
+                    if not _scan_running and _scan_age_min > 240:
+                        _scan_cache = None
+                        _scan_running = True
+                        asyncio.create_task(_background_scan())
+                        print(f"[CacheRefresh] Full scan triggered (last scan {_scan_age_min:.0f}min ago)")
+                    else:
+                        print(f"[CacheRefresh] Skipping scan (running={_scan_running}, age={_scan_age_min:.0f}min)")
+                except Exception as _precomp_err:
+                    print(f"[CacheRefresh] Precompute/eval error: {_precomp_err}")
+            else:
+                print(f"[CacheRefresh] Skipping heavy work (market hours, no new daily bars). "
+                      f"Live IEX overlay handles intraday prices.")
 
         except Exception as e:
             import traceback
