@@ -134,23 +134,40 @@ export function DataStatusBar() {
         </>
       )}
 
-      {/* Portfolio Earnings — Tiingo News, ±7d window */}
+      {/* Portfolio Earnings — Tiingo News, 14d window. Split into:
+            UPCOMING (binary event risk ahead → amber WARNING)
+            REPORTED (just-released results → muted INFO, no risk left) */}
       {status.portfolio_earnings && status.portfolio_earnings.count > 0 && (
         <>
           <span className="text-neutral-700">|</span>
-          <div
-            className="flex items-center gap-1.5"
-            title={status.portfolio_earnings.hits
-              .map((h) => `${h.ticker} ${h.direction} ${h.age_hours.toFixed(0)}h: ${h.title}`)
-              .join("\n")}
-          >
+          <div className="flex items-center gap-2">
             <CalendarClock className="h-3 w-3" />
-            <span className="text-amber-400">
-              Earnings:{" "}
-              {status.portfolio_earnings.hits
-                .map((h) => `${h.ticker}${h.direction === "future" ? "↑" : ""}`)
-                .join(" ")}
-            </span>
+            {status.portfolio_earnings.upcoming.length > 0 && (
+              <span
+                className="text-amber-400 font-medium"
+                title={status.portfolio_earnings.upcoming
+                  .map((h) => `${h.ticker}: ${h.title}`)
+                  .join("\n")}
+              >
+                Earnings ahead:{" "}
+                {status.portfolio_earnings.upcoming
+                  .map((h) => h.ticker)
+                  .join(" ")}
+              </span>
+            )}
+            {status.portfolio_earnings.reported.length > 0 && (
+              <span
+                className="text-neutral-500"
+                title={status.portfolio_earnings.reported
+                  .map((h) => `${h.ticker} (${h.age_hours.toFixed(0)}h ago): ${h.title}`)
+                  .join("\n")}
+              >
+                Reported:{" "}
+                {status.portfolio_earnings.reported
+                  .map((h) => h.ticker)
+                  .join(" ")}
+              </span>
+            )}
           </div>
         </>
       )}

@@ -44,25 +44,59 @@ _SEARCH_URL = "https://api.tiingo.com/tiingo/utilities/search"
 # mentioning us.
 _COMPANY_NAME_CACHE: dict[str, str] = {}
 
-# Title patterns that indicate AN EARNINGS EVENT (not generic commentary).
-# Tightened after smoke test — single word "earnings" is too broad and lets
-# valuation commentary leak through. Now requires explicit event language.
-_EARNINGS_TITLE_RE = re.compile(
+# UPCOMING earnings — the warning class. These titles signal a binary event
+# RISK ahead of us (per CLAUDE.md "earnings within 7 days = VETO"). Tightened
+# to require explicit forward-event language. Generic phrasing like
+# "earnings outlook" or "earnings expectations" is just commentary and
+# fires false positives on valuation articles.
+_UPCOMING_TITLE_RE = re.compile(
     r"\b("
-    r"q[1-4]\s+results|"
-    r"q[1-4]\s+\d{4}|"
-    r"q[1-4]\s+earnings|"
-    r"(reports|posts|announces|delivers)\s+(?:fiscal\s+)?"
-    r"(first|second|third|fourth|q[1-4])(\s+quarter)?|"
-    r"earnings\s+(call|preview|date|release|report|results|beat|miss|"
-    r"transcript|highlights|expectations|beats|misses|tops)|"
-    r"beats\s+q[1-4]|"
-    r"surpasses\s+q[1-4]|"
-    r"to\s+report\s+(?:fiscal\s+)?(first|second|third|fourth|q[1-4])|"
-    r"earnings\s+(jump|surge|drop|fall|rise)"
+    r"ahead\s+of\s+(?:its\s+)?(?:q[1-4]\s+)?earnings|"
+    r"before\s+(?:its\s+|the\s+)?[a-z]+\s+\d{1,2}\s+earnings|"
+    r"earnings\s+preview|"
+    r"earnings\s+are\s+coming|"
+    r"to\s+report\s+(?:fiscal\s+)?(?:q[1-4]|first|second|third|fourth)\s+(?:quarter\s+)?(?:results|earnings)|"
+    r"will\s+report\s+(?:fiscal\s+)?(?:q[1-4]|first|second|third|fourth)|"
+    r"set\s+to\s+report|"
+    r"upcoming\s+earnings|"
+    r"expected\s+to\s+report\s+(?:q[1-4]|first|second|third|fourth|earnings)|"
+    r"earnings\s+date\s+(?:announced|set|confirmed)|"
+    r"earnings\s+(?:on|due)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|\d{1,2})|"
+    r"reports\s+earnings\s+(?:on|next)\s+|"
+    r"q[1-4]\s+earnings\s+(?:on|due)\s+\d|"
+    r"earnings\s+release\s+(?:on|scheduled)|"
+    r"q[1-4]\s+\d{4}\s+(?:earnings|results)\s+(?:on|date|preview)"
     r")\b",
     re.IGNORECASE,
 )
+
+# JUST-REPORTED earnings — informational, not a warning. The event already
+# happened; market reaction is in price; no binary risk left.
+_REPORTED_TITLE_RE = re.compile(
+    r"\b("
+    r"q[1-4]\s+results|"
+    r"q[1-4]\s+\d{4}|"
+    r"q[1-4]\s+earnings\s+(call|highlights|transcript|results|beat|miss|tops)|"
+    r"earnings\s+(call\s+highlights|highlights|transcript|results|beat|miss|"
+    r"beats|misses|tops)|"
+    r"(reports|posts|announces|delivers)\s+(?:fiscal\s+)?"
+    r"(first|second|third|fourth|q[1-4])(\s+quarter)?|"
+    r"beats\s+q[1-4]|"
+    r"surpasses\s+q[1-4]|"
+    r"after\s+earnings\s+(beat|miss)|"
+    r"earnings\s+(jump|surge|drop|fell|rose)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_title(title: str) -> Optional[str]:
+    """Classify earnings article: 'upcoming' (warning) | 'reported' (info) | None."""
+    if _UPCOMING_TITLE_RE.search(title):
+        return "upcoming"
+    if _REPORTED_TITLE_RE.search(title):
+        return "reported"
+    return None
 
 # Stock-exchange ticker tag inside a title (e.g., "Graham (NYSE:GHC)") — strong
 # signal that the article is about THAT specific symbol. If we see the tag and
@@ -205,7 +239,8 @@ async def earnings_window(
     candidates = []
     for a in articles:
         title = a.get("title", "") or ""
-        if not _EARNINGS_TITLE_RE.search(title):
+        kind = _classify_title(title)
+        if kind is None:
             continue
         # Title must be ABOUT this ticker, not just mention it (Tiingo tags
         # every ticker mentioned). Without this filter NVDA fires on
@@ -227,14 +262,18 @@ async def earnings_window(
             "title": title,
             "url": a.get("url", "") or "",
             "source": "tiingo",
-            "direction": "past" if age_hours >= 0 else "future",
+            # Forward semantics:
+            #   "upcoming" = binary event RISK ahead (warn the user)
+            #   "reported" = event already happened, market has digested it
+            "kind": kind,
+            "direction": "future" if kind == "upcoming" else "past",
             "age_hours": round(age_hours, 1),
         })
     if not candidates:
         return None
-    # Prefer future-dated articles (preview / expectations) — those are the
-    # actionable warnings. If only past articles exist, take the most recent.
-    candidates.sort(key=lambda c: (c["direction"] != "future", abs(c["age_hours"])))
+    # Prefer upcoming (the actionable warning) over reported (informational).
+    # Within each class, prefer the most recent article.
+    candidates.sort(key=lambda c: (c["kind"] != "upcoming", abs(c["age_hours"])))
     return candidates[0]
 
 

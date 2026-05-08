@@ -3987,9 +3987,19 @@ _EARNINGS_CACHE_TTL_SEC = 1800  # 30 min
 
 async def _portfolio_earnings_cached(tickers: list) -> dict:
     """Tiingo News earnings check for portfolio holdings, cached 30 min.
-    Returns {count, hits: [{ticker, direction, age_hours, title, url, date}]}."""
+
+    Splits hits into two semantically-distinct groups:
+      - upcoming: forward-event articles ("earnings preview", "set to report",
+        "Before May 20 Earnings"). These are WARNINGS — binary event risk
+        ahead, per CLAUDE.md "earnings within 7 days = VETO" rule.
+      - reported: just-released results ("Q3 Earnings Call Highlights",
+        "Reports first quarter"). These are INFO — event already happened,
+        market has digested it; no further binary risk.
+
+    Frontend pill shows upcoming prominently and reported as muted info.
+    """
     if not tickers:
-        return {"count": 0, "hits": []}
+        return {"count": 0, "upcoming": [], "reported": []}
     key = tuple(sorted(tickers))
     cached = _earnings_cache.get(key)
     if cached:
@@ -3999,23 +4009,30 @@ async def _portfolio_earnings_cached(tickers: list) -> dict:
     try:
         from tiingo_earnings import earnings_window_batch
         async with aiohttp.ClientSession() as ses:
-            hits = await earnings_window_batch(ses, list(tickers), days=7)
+            hits = await earnings_window_batch(ses, list(tickers), days=14)
+        upcoming = []
+        reported = []
+        for tk, h in sorted(hits.items()):
+            entry = {
+                "ticker": tk,
+                "kind": h.get("kind", ""),
+                "direction": h.get("direction", ""),
+                "age_hours": h.get("age_hours", 0),
+                "title": h.get("title", ""),
+                "url": h.get("url", ""),
+                "date": h.get("date", ""),
+            }
+            if entry["kind"] == "upcoming":
+                upcoming.append(entry)
+            else:
+                reported.append(entry)
         result = {
-            "count": len(hits),
-            "hits": [
-                {
-                    "ticker": tk,
-                    "direction": h["direction"],
-                    "age_hours": h["age_hours"],
-                    "title": h["title"],
-                    "url": h["url"],
-                    "date": h["date"],
-                }
-                for tk, h in sorted(hits.items())
-            ],
+            "count": len(upcoming) + len(reported),
+            "upcoming": upcoming,
+            "reported": reported,
         }
     except Exception as e:
-        result = {"count": 0, "hits": [], "error": str(e)}
+        result = {"count": 0, "upcoming": [], "reported": [], "error": str(e)}
     _earnings_cache[key] = (result, datetime.now())
     return result
 

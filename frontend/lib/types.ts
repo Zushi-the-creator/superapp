@@ -490,8 +490,18 @@ export interface DataStatus {
   system: { stage: string; message: string; progress: number };
   portfolio_earnings?: {
     count: number;
-    hits: Array<{
+    upcoming: Array<{
       ticker: string;
+      kind: "upcoming" | "reported";
+      direction: "past" | "future";
+      age_hours: number;
+      title: string;
+      url: string;
+      date: string;
+    }>;
+    reported: Array<{
+      ticker: string;
+      kind: "upcoming" | "reported";
       direction: "past" | "future";
       age_hours: number;
       title: string;
