@@ -3349,17 +3349,31 @@ async def buy_position(req: BuyRequest):
         fee=fee, notes=req.notes, position_id=result.get("position_id"),
     )
 
-    # Invalidate caches so signals/exit strategies/perf history reflect the new position
+    # Invalidate caches so signals/exit strategies/perf history reflect the new position.
+    # IMPORTANT: do NOT nullify _scan_cache here. _try_load_scan_cache() rebuilds 155+
+    # opportunities × 8 holdings = 1,240 _check_correlation calls synchronously inside
+    # the next /scan/opportunities request handler — that blocks the event loop for
+    # 20-60s on shared-1x Fly and tanks the whole backend until rebuild completes.
+    # The opportunities list is unchanged by a new holding; only `beats_holdings` and
+    # correlation flags shift. Background scan loop refreshes those on schedule.
     _signal_cache.clear()
     _exit_strategy_cache.clear()
-    global _scan_cache, _perf_cache, _perf_cache_time, _health_cache, _health_cache_time, _momentum_cache, _momentum_cache_time
-    _scan_cache = None          # holdings changed → re-rank
+    _technicals_cache.pop(ticker, None)  # next request recomputes for this ticker
+    global _perf_cache, _perf_cache_time, _health_cache, _health_cache_time, _momentum_cache, _momentum_cache_time
     _perf_cache = None          # /performance must include the new trade
     _perf_cache_time = None
     _health_cache = None        # strategy health depends on portfolio composition
     _health_cache_time = None
     _momentum_cache = None      # correlation veto depends on holdings
     _momentum_cache_time = None
+
+    # Kick off a non-blocking background scan refresh — runs in subprocess so it
+    # can't starve the event loop. Existing _scan_cache continues serving until
+    # the new scan completes (typically 1-3 min).
+    global _scan_running
+    if not _scan_running:
+        _scan_running = True
+        asyncio.create_task(_background_scan())
 
     return TradeResult(
         success=True,
@@ -3431,16 +3445,24 @@ async def sell_position(req: SellRequest):
         position_id=pos["id"],
     )
 
-    # Invalidate caches so signals/exit strategies/perf history reflect the closed position
+    # Invalidate caches so signals/exit strategies/perf history reflect the closed position.
+    # See buy_position for why _scan_cache is NOT nullified here (avoid blocking
+    # the event loop on the next request via _try_load_scan_cache rebuild).
     _signal_cache.clear()
     _exit_strategy_cache.clear()
-    global _scan_cache, _perf_cache, _perf_cache_time, _health_cache, _health_cache_time, _momentum_cache, _momentum_cache_time
-    _scan_cache = None
+    _technicals_cache.pop(ticker, None)
+    global _perf_cache, _perf_cache_time, _health_cache, _health_cache_time, _momentum_cache, _momentum_cache_time
     _perf_cache = None
     _perf_cache_time = None
     _health_cache = None
     _momentum_cache = None
     _momentum_cache_time = None
+
+    # Background scan refresh — non-blocking. Existing _scan_cache keeps serving.
+    global _scan_running
+    if not _scan_running:
+        _scan_running = True
+        asyncio.create_task(_background_scan())
 
     return TradeResult(
         success=True,
