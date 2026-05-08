@@ -2,37 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { Database, Wifi, Clock, AlertTriangle, CheckCircle } from "lucide-react";
-
-interface DataStatus {
-  timestamp: string;
-  today: string;
-  market_session: string;
-  cache: {
-    stale_count: number;
-    total_checked: number;
-    tickers: Record<string, { latest: string | null; rows: number; fresh: boolean }>;
-  };
-  quotes: {
-    cached_count: number;
-    tickers: Record<string, { price: number; age_sec: number | null }>;
-  };
-  extended_hours: {
-    available: number;
-    session: string;
-    tickers: Record<string, { ext_price: number | null; session: string }>;
-  };
-  market_regime: {
-    regime: string;
-    pause_entries: boolean;
-    spy_5d_return?: number;
-    spy_price?: number;
-    spy_price_live?: number;
-    vix?: number;
-  };
-  scan_cache_age_min: number | null;
-  system: { stage: string; message: string; progress: number };
-}
+import type { DataStatus } from "@/lib/types";
+import { Database, Wifi, Clock, AlertTriangle, CheckCircle, CalendarClock } from "lucide-react";
 
 const SESSION_LABELS: Record<string, { label: string; color: string }> = {
   PRE_MARKET: { label: "Pre-Market", color: "text-blue-400" },
@@ -57,16 +28,9 @@ export function DataStatusBar() {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const res = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL ?? ""}/api/v2/data/status`,
-          { cache: "no-store" }
-        );
-        if (res.ok) {
-          setStatus(await res.json());
-          setError(false);
-        } else {
-          setError(true);
-        }
+        const data = await api.getDataStatus();
+        setStatus(data);
+        setError(false);
       } catch {
         setError(true);
       }
@@ -165,6 +129,27 @@ export function DataStatusBar() {
             <Clock className="h-3 w-3" />
             <span className={scanAge > 120 ? "text-red-400" : scanAge > 60 ? "text-amber-400" : "text-neutral-500"}>
               Scan: {scanAge < 1 ? "<1" : Math.round(scanAge)}m ago
+            </span>
+          </div>
+        </>
+      )}
+
+      {/* Portfolio Earnings — Tiingo News, ±7d window */}
+      {status.portfolio_earnings && status.portfolio_earnings.count > 0 && (
+        <>
+          <span className="text-neutral-700">|</span>
+          <div
+            className="flex items-center gap-1.5"
+            title={status.portfolio_earnings.hits
+              .map((h) => `${h.ticker} ${h.direction} ${h.age_hours.toFixed(0)}h: ${h.title}`)
+              .join("\n")}
+          >
+            <CalendarClock className="h-3 w-3" />
+            <span className="text-amber-400">
+              Earnings:{" "}
+              {status.portfolio_earnings.hits
+                .map((h) => `${h.ticker}${h.direction === "future" ? "↑" : ""}`)
+                .join(" ")}
             </span>
           </div>
         </>

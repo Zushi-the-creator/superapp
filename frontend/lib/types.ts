@@ -91,12 +91,17 @@ export interface PortfolioSummary {
   day_pnl_pct: number;
   realized_pnl: number;
   total_fees: number;
+  total_tax: number;
   total_deposited: number;
   position_count: number;
   max_positions: number;
   slots_available: number;
   avg_win_rate: number;
   cash: number;
+  yesterday_pnl: number;
+  yesterday_pnl_pct: number;
+  week_pnl: number;
+  week_pnl_pct: number;
   market_session: string;
   timestamp: string;
 }
@@ -187,11 +192,15 @@ export interface ScanOpportunity {
   // Composite ranking
   quality_tier: string; // BEST, GOOD, FAIR, WEAK, POOR
   composite_score: number; // 0-100
-  ranking_factors: string; // "ZR:8.2 WR:75 RSI:3 ATR:5.1 ..."
+  ranking_factors: string; // "EV:3.4 WR:67 ATR:3.7 RSI:9 BUF:21 PX:51 [VOL<1x:CAP50]"
   meets_strict: boolean; // passes all original strict ATLAS V2.5 criteria
   bayesian_wr?: number;
+  // Backend ScanOpportunity also ships these (schemas_v2.py:184-188); FE renders may want them.
+  low52_dist?: number;
+  ret20?: number;
+  ml_score?: number;
   beats_holdings: string[];
-  is_upgrade: boolean;
+  is_upgrade: boolean; // beats at least one holding (or no holdings yet) and not vetoed
 }
 
 export interface HoldingScore {
@@ -201,6 +210,18 @@ export interface HoldingScore {
   win_rate: number;
   exit_triggered: boolean;
   signal: string;
+}
+
+export interface DataFreshness {
+  latest_close: string | null;          // YYYY-MM-DD of most recent close in cache
+  trading_days_stale: number | null;    // approximate trading-day gap from today
+  is_fresh: boolean;                    // true if today's or yesterday's close
+}
+
+export interface SystemStatus {
+  stage: string;     // idle / refreshing_prices / scanning / ready / error
+  message: string;
+  progress: number;  // 0-100
 }
 
 export interface ScanResponse {
@@ -214,6 +235,8 @@ export interface ScanResponse {
   worst_score: number;
   last_scan: string;
   market_regime?: MarketRegime;
+  data_freshness?: DataFreshness;
+  system_status?: SystemStatus;
 }
 
 export interface TransactionRecord {
@@ -301,6 +324,29 @@ export interface StockAnalysis {
     missed_gain_total: number;
     mistake: boolean;
   } | null;
+  proposed_strategy: {
+    exit_strategy: string;
+    exit_strategy_wr: number;
+    exit_strategy_ret: number;
+    exit_strategy_hold: number;
+    validation: string;
+  } | null;
+  held_position: {
+    is_held: boolean;
+    entry_price: number;
+    entry_date: string;
+    shares: number;
+    cost_basis: number;
+    current_value: number;
+    pnl: number;
+    pnl_pct: number;
+    days_held: number;
+    strategy: string;
+    exit_triggered: boolean;
+    exit_label: string;
+    target_hold_days: number;
+    days_remaining: number;
+  } | null;
 }
 
 export interface ChartCandle {
@@ -366,6 +412,7 @@ export interface PerformanceResponse {
   net_pnl_pct: number;
   win_count: number;
   loss_count: number;
+  break_even_count?: number;
   win_rate: number;
   avg_win_pct: number;
   avg_loss_pct: number;
@@ -380,32 +427,79 @@ export interface PerformanceResponse {
   total_trades: number;
 }
 
-export interface MomentumSignal {
-  ticker: string;
+export interface SectorData {
+  etf: string;
+  name: string;
   price: number;
-  trend_score: number;
-  pct_from_high: number;
-  pct_from_low: number;
   ret_5d: number;
   ret_20d: number;
   ret_60d: number;
-  volume_ratio: number;
-  atr_pct: number;
-  atr_squeeze: number;
-  momentum_score: number;
-  analyst_consensus: string;
-  sentiment_label: string;
-  vetoed: boolean;
-  veto_reason: string;
+  ret_ytd: number;
+  mr_wr: number;
+  mr_trades: number;
+  mr_avg_ret: number;
+  rsi14: number;
+  above_sma50: boolean;
+  trend: string;
 }
 
-export interface MomentumResponse {
+export interface PortfolioSectorExposure {
+  sector: string;
+  tickers: string[];
+  cost: number;
+  value: number;
+  weight: number;
+}
+
+export interface SectorsResponse {
   timestamp: string;
-  total_scanned: number;
-  valid: number;
-  signals: MomentumSignal[];
-  last_scan?: string;
-  scanning?: boolean;
+  sectors: SectorData[];
+  portfolio_exposure: PortfolioSectorExposure[];
+  total_sectors_used: number;
+  total_sectors: number;
+  market_regime?: MarketRegime;
+}
+
+export interface DataStatus {
+  timestamp: string;
+  today: string;
+  market_session: string;
+  cache: {
+    stale_count: number;
+    total_checked: number;
+    tickers: Record<string, { latest: string | null; rows: number; fresh: boolean }>;
+  };
+  quotes: {
+    cached_count: number;
+    tickers: Record<string, { price: number; age_sec: number | null }>;
+  };
+  extended_hours: {
+    available: number;
+    session: string;
+    tickers: Record<string, { ext_price: number | null; session: string }>;
+  };
+  market_regime: {
+    regime: string;
+    pause_entries: boolean;
+    spy_5d_return?: number;
+    spy_price?: number;
+    spy_price_live?: number;
+    vix?: number;
+  };
+  scan_cache_age_min: number | null;
+  system: { stage: string; message: string; progress: number };
+  portfolio_earnings?: {
+    count: number;
+    hits: Array<{
+      ticker: string;
+      direction: "past" | "future";
+      age_hours: number;
+      title: string;
+      url: string;
+      date: string;
+    }>;
+    error?: string;
+  };
 }
 
 export interface CombinedSignal {
@@ -447,7 +541,8 @@ export interface CombinedResponse {
   signals: CombinedSignal[];
   market_regime?: MarketRegime;
   system_status?: Record<string, unknown>;
-  live_prices?: Record<string, number>;
+  live_prices?: number; // count of updated prices
+  cache_age_min?: number;
 }
 
-export type TabId = "portfolio" | "opportunities" | "performance" | "history" | "sectors";
+export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors";

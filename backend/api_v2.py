@@ -38,6 +38,7 @@ from atlas_v2.regime import RegimeDetector
 router = APIRouter(prefix="/api/v2", tags=["V2 Dashboard"])
 
 FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
+TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
 
 # Shared state
 _position_mgr = PositionManager(db_path=os.path.join(os.path.dirname(__file__), "data", "positions.db"))
@@ -219,46 +220,58 @@ def _record_finnhub_call():
     _finnhub_calls_this_minute += 1
 
 async def _get_finnhub_quote(session: aiohttp.ClientSession, ticker: str) -> Optional[Dict]:
-    """Get live quote from Finnhub. 30s cache + rate limiter + last-known-good fallback."""
-    # Return cached quote if fresh (avoids redundant API calls)
+    """DEPRECATED — kept as alias for callers that haven't migrated.
+    Use _get_tiingo_quote (Tiingo IEX) instead. Tiingo is our sole price source.
+    """
+    return await _get_tiingo_quote(session, ticker)
+
+
+async def _get_tiingo_quote(session: aiohttp.ClientSession, ticker: str) -> Optional[Dict]:
+    """Get live quote from Tiingo IEX. 30s cache + last-known-good fallback.
+
+    Single-ticker variant of _fetch_tiingo_iex_batch — used by /analyze and
+    other on-demand callers that need one quote at request time. Bulk paths
+    (warmup, scan/refresh) should call _fetch_tiingo_iex_batch directly to
+    amortize the HTTP round-trip across many tickers.
+
+    Tiingo Power plan: 10K req/hr, 100K req/day — well above what /analyze
+    needs. No additional rate limiter required (the cache TTL handles bursts).
+    """
+    # Cache hit?
     if ticker in _quote_cache:
         cached_result, cached_time = _quote_cache[ticker]
         if (datetime.now() - cached_time).total_seconds() < QUOTE_CACHE_TTL:
             return cached_result
 
-    # Check rate limit before calling
-    if not _check_finnhub_rate():
-        if ticker in _price_cache:
-            return _price_cache[ticker]
-        return None
+    if not TIINGO_KEY:
+        return _price_cache.get(ticker)
 
     _timeout = 4 if os.environ.get("FLY_APP_NAME") else 8
     try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
-        _record_finnhub_call()
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=_timeout)) as resp:
-            if resp.status == 429:
-                if ticker in _price_cache:
-                    _quote_cache[ticker] = (_price_cache[ticker], datetime.now())
-                    return _price_cache[ticker]
-                return None
+        url = f"https://api.tiingo.com/iex/{ticker}?token={TIINGO_KEY}"
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=_timeout),
+            headers={"Content-Type": "application/json"},
+        ) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                if data.get("c", 0) > 0:
-                    pc = data.get("pc", data["c"])
-                    result = {
-                        "price": data["c"],
-                        "prev_close": pc,
-                        "day_chg": (data["c"] - pc) / pc * 100 if pc else 0,
-                    }
-                    _price_cache[ticker] = result
-                    _quote_cache[ticker] = (result, datetime.now())
-                    return result
+                if isinstance(data, list) and data:
+                    row = data[0]
+                    last = row.get("tngoLast") or row.get("last") or 0
+                    prev = row.get("prevClose") or row.get("open") or last
+                    if last and last > 0:
+                        result = {
+                            "price": float(last),
+                            "prev_close": float(prev),
+                            "day_chg": (float(last) - float(prev)) / float(prev) * 100 if prev else 0,
+                        }
+                        _price_cache[ticker] = result
+                        _quote_cache[ticker] = (result, datetime.now())
+                        return result
     except Exception:
         pass
-    if ticker in _price_cache:
-        return _price_cache[ticker]
-    return None
+    return _price_cache.get(ticker)
 
 
 async def _fetch_tiingo_iex_batch(tickers: List[str], batch_size: int = 100) -> int:
@@ -3937,6 +3950,11 @@ async def get_data_status():
     elif _scan_cache_time:
         scan_age_min = (datetime.now() - _scan_cache_time).total_seconds() / 60
 
+    # 6. Portfolio earnings warnings (Tiingo News, tags=earnings, ±7d window).
+    # Cached for 30 min — earnings news doesn't move that fast and Tiingo's
+    # news endpoint costs us API calls we don't want to burn on every poll.
+    earnings_status = await _portfolio_earnings_cached(holding_tickers)
+
     return {
         "timestamp": datetime.now().isoformat(),
         "today": today_str,
@@ -3958,7 +3976,48 @@ async def get_data_status():
         "market_regime": regime,
         "scan_cache_age_min": round(scan_age_min, 1) if scan_age_min else None,
         "system": _system_status,
+        "portfolio_earnings": earnings_status,
     }
+
+
+# Cache for portfolio earnings — 30 min TTL, keyed by sorted ticker tuple.
+_earnings_cache: Dict[tuple, tuple] = {}  # (tickers,) -> (result_dict, datetime)
+_EARNINGS_CACHE_TTL_SEC = 1800  # 30 min
+
+
+async def _portfolio_earnings_cached(tickers: list) -> dict:
+    """Tiingo News earnings check for portfolio holdings, cached 30 min.
+    Returns {count, hits: [{ticker, direction, age_hours, title, url, date}]}."""
+    if not tickers:
+        return {"count": 0, "hits": []}
+    key = tuple(sorted(tickers))
+    cached = _earnings_cache.get(key)
+    if cached:
+        result, ts = cached
+        if (datetime.now() - ts).total_seconds() < _EARNINGS_CACHE_TTL_SEC:
+            return result
+    try:
+        from tiingo_earnings import earnings_window_batch
+        async with aiohttp.ClientSession() as ses:
+            hits = await earnings_window_batch(ses, list(tickers), days=7)
+        result = {
+            "count": len(hits),
+            "hits": [
+                {
+                    "ticker": tk,
+                    "direction": h["direction"],
+                    "age_hours": h["age_hours"],
+                    "title": h["title"],
+                    "url": h["url"],
+                    "date": h["date"],
+                }
+                for tk, h in sorted(hits.items())
+            ],
+        }
+    except Exception as e:
+        result = {"count": 0, "hits": [], "error": str(e)}
+    _earnings_cache[key] = (result, datetime.now())
+    return result
 
 
 @router.post("/backtest/refresh")
@@ -4590,11 +4649,12 @@ async def get_performance():
     if closed:
         _avg_hold = round(sum(t.hold_days for t in closed) / len(closed), 1)
 
+    _perf_total_tax = round(tx_summary.get("total_tax", 0), 2)
     result = PerformanceResponse(
         trades=sorted(trades, key=lambda t: t.entry_date, reverse=True),
         daily_pnl=daily_pnl,
         tax_rate=0,
-        tax_amount=0,
+        tax_amount=_perf_total_tax,    # broker tax withholdings, used by frontend Total P&L formula
         net_realized=round(total_realized, 2),
         net_pnl_pct=round(total_realized / total_deposited * 100, 2) if total_deposited > 0 else 0,
 

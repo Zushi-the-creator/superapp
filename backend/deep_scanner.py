@@ -365,27 +365,54 @@ class DeepScanner:
         zone_hi = zone_lo + 10
         zone_label = f"{zone_lo}-{zone_hi}"
 
-        fwd = 30  # Fixed30d hold
+        # Hybrid21d simulation — matches production exit (api_v2._evaluate_exit_trigger).
+        # Hold ≥7 trading days; once profit > 5%, trail -3% from peak; hard cap 21 days.
+        # Mega-study (5,037 trades): 62.9% WR, +2.63% avg, PF 1.80, +0.164/day.
+        # Using Fixed30d here would mis-state the avg_return shown on the entries tab
+        # (Fixed30d shows ~+4.00% but Hybrid21d only captures ~+2.63% per trade).
+        max_hold = 21
+        min_hold = 7
         trades = []
         zone_trades_list = []
         last_exit_day = -1
         zone_last_exit = -1
-        for i in range(50, len(closes) - 31):
+
+        def _hybrid_exit(ed: int):
+            """Simulate Hybrid21d from entry day `ed`. Returns (exit_idx, exit_price)."""
+            ep = opens_list[ed] if ed < len(opens_list) and opens_list[ed] > 0 else closes[ed - 1]
+            peak = ep
+            ex_idx = min(ed + max_hold, len(closes) - 1)
+            ex_price = closes[ex_idx]
+            for j in range(ed, min(ed + max_hold + 1, len(closes))):
+                if closes[j] > peak:
+                    peak = closes[j]
+                days = j - ed
+                if days >= min_hold:
+                    pnl = ((closes[j] - ep) / ep) * 100
+                    if pnl > 5 and closes[j] < peak * 0.97:  # -3% trail after +5%
+                        return j, closes[j], ep
+                if days >= max_hold:
+                    return j, closes[j], ep
+            return ex_idx, ex_price, ep
+
+        for i in range(50, len(closes) - max_hold - 2):
             if closes[i] <= sma50_arr[i]:
                 continue
-            if i + 1 + fwd >= len(closes):
+            if i + 1 + max_hold >= len(closes):
                 continue
-            entry_price = opens_list[i + 1] if i + 1 < len(opens_list) and opens_list[i + 1] > 0 else closes[i]
-            exit_price = closes[i + 1 + fwd]
+            ed = i + 1
+            exit_idx, exit_price, entry_price = _hybrid_exit(ed)
+            if entry_price <= 0:
+                continue
             ret = ((exit_price - entry_price) / entry_price) * 100 - _FEE_PCT
 
             if rsi2_arr[i] < 10 and i > last_exit_day:
-                trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i], "hold": fwd})
-                last_exit_day = i + 1 + fwd
+                trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i], "hold": exit_idx - ed})
+                last_exit_day = exit_idx
 
             if zone_lo <= rsi2_arr[i] < zone_hi and i > zone_last_exit:
                 zone_trades_list.append({"return": ret, "win": ret > 0})
-                zone_last_exit = i + 1 + fwd
+                zone_last_exit = exit_idx
 
         if len(trades) < 10:
             return None
@@ -393,6 +420,8 @@ class DeepScanner:
         wins = sum(1 for t in trades if t["win"])
         win_rate = wins / len(trades) * 100
         avg_return = sum(t["return"] for t in trades) / len(trades)
+        # Use the actual avg Hybrid21d hold for the displayed hold_days
+        hold_days = round(sum(t["hold"] for t in trades) / len(trades))
 
         # V2.6 price filter
         if price < 10:
@@ -521,34 +550,23 @@ class DeepScanner:
 
     async def _check_earnings(self, session: aiohttp.ClientSession,
                               ticker: str) -> Optional[Dict]:
-        """Check if stock has earnings within 7 days using Finnhub."""
+        """Check earnings within 7 days. Source: Tiingo News with tags=earnings.
+
+        Why Tiingo News and not Finnhub: Finnhub's free-tier earnings calendar
+        has gaps for many small/mid caps (it missed IREN's Q3 FY26 print on
+        2026-05-08 — we held through the report without warning). Our paid
+        Tiingo Power plan includes the News API for ALL tickers; articles
+        tagged "earnings" cover both upcoming previews AND just-released
+        results. Finnhub's fundamentals/calendar add-on costs extra.
+
+        Returns {'date', 'title', 'url', 'source', 'direction', 'age_hours'}
+        or None.
+        """
         try:
-            import json as _json
-            today = datetime.now()
-            from_date = today.strftime('%Y-%m-%d')  # Fixed: only future earnings
-            to_date = (today + timedelta(days=7)).strftime('%Y-%m-%d')  # Fixed: 7 days per CLAUDE.md
-            url = (f'https://finnhub.io/api/v1/calendar/earnings'
-                   f'?from={from_date}&to={to_date}'
-                   f'&symbol={ticker}&token={self.FINNHUB_KEY}')
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status != 200:
-                    return None
-                # Use text() + json.loads() — Finnhub sometimes returns text/plain
-                text = await resp.text()
-                data = _json.loads(text)
-                earnings = data.get('earningsCalendar', [])
-                for e in earnings:
-                    sym = e.get('symbol', '').upper()
-                    # Match exact or cross-listed (AG.TO matches AG, GFI.JO matches GFI)
-                    if sym == ticker.upper() or sym.startswith(ticker.upper() + '.'):
-                        return {
-                            'date': e.get('date', ''),
-                            'eps_estimate': e.get('epsEstimate'),
-                            'revenue_estimate': e.get('revenueEstimate'),
-                        }
+            from tiingo_earnings import earnings_window
+            return await earnings_window(session, ticker, days=7)
         except Exception:
-            pass
-        return None
+            return None
 
     FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
 
@@ -665,6 +683,12 @@ class DeepScanner:
         # Phase 3: Validate ALL non-BEAR candidates (analyst + sentiment + earnings)
         # With 63x backtest speedup, Phase 2 is fast — Phase 3 API calls are the bottleneck
         # Validate up to 50 (was 15) — covers all realistic candidates
+        # Phase 3 cap restored to 2026-04-24 behavior: top 50 by EV score.
+        # ev_score = Bayesian-shrunk(avg_return) × Bayesian-shrunk(WR) / 100.
+        # Negative-ret stocks land far past rank 50, never get analyst/sentiment
+        # data, and are silently hidden by the deployed frontend filter (which
+        # requires analyst OR sentiment populated). That's the natural quality
+        # gate that kept negative-ret entries off the 2026-04-24 entries tab.
         results = await self.phase3_validate(results, top_n=min(50, len(results)))
 
         # Save cache

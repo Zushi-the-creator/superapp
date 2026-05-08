@@ -83,7 +83,7 @@ class HoldingCheck:
     signal: str = ""  # BUY_ZONE, HOLD, SELL, CAUTION
 
 
-FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
+FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
 
 async def _get_quote(session, ticker: str) -> Optional[Dict]:
@@ -251,28 +251,24 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
     print("done")
 
     # ── Step 4: Earnings check ──
-    print("  [4/8] Earnings calendar...", end=" ", flush=True)
-    async with aiohttp.ClientSession() as session:
-        today = datetime.now()
-        from_date = today.strftime("%Y-%m-%d")
-        to_date = (today + timedelta(days=7)).strftime("%Y-%m-%d")
-
+    # Tiingo News (tags=earnings) is our source — Finnhub free tier had gaps.
+    print("  [4/8] Earnings (Tiingo News)...", end=" ", flush=True)
+    try:
+        from tiingo_earnings import earnings_window_batch
+        async with aiohttp.ClientSession() as session:
+            tickers = [c.ticker for c in results]
+            hits = await earnings_window_batch(session, tickers, days=7)
         for check in results:
-            try:
-                url = (f"https://finnhub.io/api/v1/calendar/earnings"
-                       f"?from={from_date}&to={to_date}"
-                       f"&symbol={check.ticker}&token={FINNHUB_KEY}")
-                async with session.get(url, timeout=8) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for e in data.get("earningsCalendar", []):
-                            if e.get("symbol", "").upper() == check.ticker.upper():
-                                check.earnings_date = e.get("date", "")
-                                check.earnings_within_7d = True
-                                check.issues.append(f"EARNINGS on {check.earnings_date} - SELL BEFORE")
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
+            hit = hits.get(check.ticker)
+            if hit:
+                check.earnings_date = hit["date"][:10]
+                check.earnings_within_7d = True
+                check.issues.append(
+                    f"EARNINGS {hit['direction']} ({hit['age_hours']:+.0f}h): "
+                    f"{hit['title'][:70]}"
+                )
+    except Exception as _e:
+        print(f"(skip: {_e})", end=" ")
     print("done")
 
     # ── Step 5: Sentiment ──

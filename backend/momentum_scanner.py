@@ -60,7 +60,7 @@ class MomentumSignal:
 class MomentumScanner:
     """Scan for momentum breakout opportunities."""
 
-    FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
+    FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
     def __init__(self):
         self.cache = DataCache()
@@ -113,6 +113,13 @@ class MomentumScanner:
 
         # Acceleration trigger: 20d return > 5% (backtested optimal: 51.7% WR, 14,827 trades)
         if ret_20d < 5:
+            return None
+
+        # Parabolic spike veto — backtested 18,805 cases (gap_up_backtest.py):
+        # >10% single-day gap → 45.4% 5d WR, median -1.10% (vs 48.8%/-0.12% baseline).
+        # Bigger gaps are worse. Block stocks that ripped >10% yesterday.
+        day_change_pct = ((closes[-1] / closes[-2]) - 1) * 100 if n >= 2 else 0
+        if day_change_pct >= 10:
             return None
 
         # Volume ratio (informational, not a gate — backtested: vol filter hurts WR)
@@ -184,22 +191,18 @@ class MomentumScanner:
 
             async def _validate_one(r):
                 async with sem:
-                    # Earnings check
+                    # Earnings check via Tiingo News (tags=earnings) — Finnhub
+                    # free tier had gaps that missed events like IREN Q3 FY26.
                     try:
-                        today = datetime.now()
-                        url = (f'https://finnhub.io/api/v1/calendar/earnings'
-                               f'?from={today.strftime("%Y-%m-%d")}'
-                               f'&to={(today + timedelta(days=7)).strftime("%Y-%m-%d")}'
-                               f'&symbol={r.ticker}&token={self.FINNHUB_KEY}')
-                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                            if resp.status == 200:
-                                import json as _json
-                                data = _json.loads(await resp.text())
-                                for e in data.get('earningsCalendar', []):
-                                    if e.get('symbol', '').upper() == r.ticker.upper():
-                                        r.vetoed = True
-                                        r.veto_reason = f"Earnings on {e.get('date')} (within 7 days)"
-                                        return
+                        from tiingo_earnings import earnings_window
+                        hit = await earnings_window(session, r.ticker, days=10)
+                        if hit:
+                            r.vetoed = True
+                            r.veto_reason = (
+                                f"Earnings {hit['direction']} ({hit['age_hours']:+.0f}h): "
+                                f"{hit['title'][:60]}"
+                            )
+                            return
                     except Exception:
                         pass
 
@@ -216,15 +219,14 @@ class MomentumScanner:
                     except Exception:
                         pass
 
-                    # Sentiment
+                    # Sentiment — informational ONLY, no VETO.
+                    # Backtest on 88K signals: sentiment<-0.3 filter has edge -0.43% (HURTS).
+                    # Aligned to deep_scanner.py + strategy_evaluator.py per 2026-04-24 audit.
                     try:
                         sdata = await sentiment_engine.get_ticker_sentiment(r.ticker)
                         if sdata:
                             r.sentiment_label = sdata.get("sentiment_label", "NEUTRAL")
                             r.sentiment_score = sdata.get("sentiment_score", 0)
-                            if r.sentiment_score < -0.3:
-                                r.vetoed = True
-                                r.veto_reason = f"Negative sentiment ({r.sentiment_score:.2f})"
                     except Exception:
                         pass
 

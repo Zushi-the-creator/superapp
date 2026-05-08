@@ -77,11 +77,20 @@ def _sma_arr(closes, period):
 # Universe prior for Bayesian WR
 _UNIVERSE_WR = 53.5
 _PRIOR_WEIGHT = 10
+# Universe prior for Bayesian return (ret prior pulled to weighted-avg of MR+momentum
+# returns across 26K trades; phantom weight is heavy because return variance is huge).
+_UNIVERSE_RET = 2.85
+_RET_PRIOR_WEIGHT = 20
 
 
 def _bayesian_wr(wins, total):
     pw = _UNIVERSE_WR / 100 * _PRIOR_WEIGHT
     return (wins + pw) / (total + _PRIOR_WEIGHT) * 100
+
+
+def _bayesian_ret(ret, trades):
+    """Shrink observed return toward universe prior. Required by api_v2._ev_score."""
+    return (ret * trades + _UNIVERSE_RET * _RET_PRIOR_WEIGHT) / (trades + _RET_PRIOR_WEIGHT)
 
 
 # Momentum ret_20d zones
@@ -434,6 +443,82 @@ def load_cache() -> Optional[List[dict]]:
         with open(path) as f:
             return json.load(f)
     return None
+
+
+def load_most_recent_cache():
+    """Load the newest entries_YYYY-MM-DD.json regardless of date.
+    Returns (signals_list, date_str, age_days) or (None, None, None)."""
+    import glob, re
+    files = sorted(glob.glob(os.path.join(CACHE_DIR, "entries_*.json")))
+    if not files:
+        return None, None, None
+    latest = files[-1]
+    m = re.search(r"entries_(\d{4}-\d{2}-\d{2})\.json$", latest)
+    date_str = m.group(1) if m else ""
+    age_days = 0
+    try:
+        if date_str:
+            d_dt = datetime.strptime(date_str, "%Y-%m-%d")
+            age_days = max(0, (datetime.now() - d_dt).days)
+    except Exception:
+        pass
+    try:
+        with open(latest) as f:
+            return json.load(f), date_str, age_days
+    except Exception:
+        return None, date_str, age_days
+
+
+async def validate_top_signals(signals: List[EntrySignal], top_n: int = 30) -> List[EntrySignal]:
+    """Phase 3: Attach earnings / analyst / sentiment to top non-vetoed signals.
+    Earnings within 10 days and analyst Hold/Sell are hard vetoes (CLAUDE.md V2.4).
+    """
+    import asyncio, aiohttp
+    top = [s for s in signals if not s.vetoed][:top_n]
+    if not top:
+        return signals
+
+    sem = asyncio.Semaphore(5)
+
+    async def _check(sig: EntrySignal):
+        async with sem:
+            # Earnings veto via Tiingo News (tags=earnings). Replaces the
+            # previous Finnhub free-tier calendar check, which had gaps that
+            # let known events slip through (IREN Q3 FY26 missed on 2026-05-08).
+            try:
+                from tiingo_earnings import earnings_window
+                async with aiohttp.ClientSession() as ses:
+                    hit = await earnings_window(ses, sig.ticker, days=10)
+                if hit:
+                    sig.vetoed = True
+                    sig.veto_reason = (
+                        f"Earnings {hit['direction']} ({hit['age_hours']:+.0f}h): "
+                        f"{hit['title'][:60]}"
+                    )
+            except Exception:
+                pass
+            if not sig.vetoed:
+                try:
+                    from analyst_data import AnalystDataFetcher
+                    a = await AnalystDataFetcher().fetch_analyst_data(sig.ticker)
+                    if a:
+                        sig.analyst_consensus = a.get("consensus", "") or ""
+                        if sig.analyst_consensus in ("Hold", "Sell", "Strong Sell", "Underperform"):
+                            sig.vetoed = True
+                            sig.veto_reason = f"Analyst says {sig.analyst_consensus}"
+                except Exception:
+                    pass
+            if not sig.vetoed:
+                try:
+                    from sentiment import SentimentEngine
+                    s = await SentimentEngine().get_ticker_sentiment(sig.ticker)
+                    if s:
+                        sig.sentiment_label = s.get("sentiment_label", "") or ""
+                except Exception:
+                    pass
+
+    await asyncio.gather(*[_check(s) for s in top], return_exceptions=True)
+    return signals
 
 
 if __name__ == "__main__":
