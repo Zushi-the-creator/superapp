@@ -1417,6 +1417,19 @@ async def get_portfolio():
         _regime_name = _regime.get("regime", "HEALTHY")
         _is_true_bear = _regime_name == "BEAR"  # Only true bear (drawdown >20% or >5% below SMA200)
 
+        # Trading-days held since entry — needed by the Model EXIT gate below.
+        _days_held_for_exit = 0
+        try:
+            from datetime import date as _date
+            _entry_d = _date.fromisoformat(pos.get("entry_date", ""))
+            _today_d = _date.today()
+            _days_held_for_exit = sum(
+                1 for n in range((_today_d - _entry_d).days)
+                if (_entry_d + timedelta(days=n + 1)).weekday() < 5
+            )
+        except Exception:
+            pass
+
         # Priority 1: Fixed60d exit triggered
         if exit_triggered:
             signal = "EXIT"
@@ -1452,11 +1465,15 @@ async def get_portfolio():
         # Winner-protect: skip when up >5% — historical WR is clearly wrong
         # for this trade right now (it's winning). Let trail/timer handle exit.
         # Per CLAUDE.md "NOT valid: RSI rising (trade working)" — same idea.
+        # Min-hold gate: don't fire on fresh positions. Hybrid21d MR exits have a
+        # 7-day minimum; flagging a position bought today as EXIT contradicts the
+        # entry filters that just approved it.
         elif (ez_trades >= 5 and atlas_trades >= 5
               and ez_wr < 65 and atlas_wr < 65
-              and pnl_pct < 5.0):  # winner-protect: don't exit a >5% trending winner
+              and pnl_pct < 5.0
+              and _days_held_for_exit >= 7):  # respect Hybrid21d's 7-day min
             signal = "EXIT"
-            issues.append(f"Model EXIT: WR {atlas_wr:.0f}% + zone WR {ez_wr:.0f}% both < 65% ({pnl_pct:+.1f}%)")
+            issues.append(f"Model EXIT: WR {atlas_wr:.0f}% + zone WR {ez_wr:.0f}% both < 65% ({pnl_pct:+.1f}%, {_days_held_for_exit}d held)")
 
         else:
             # Non-bear market: standard checks
@@ -2112,25 +2129,47 @@ async def get_opportunities():
         result["market_regime"] = _check_market_regime()
         opps = result.get("opportunities", [])
 
-        # Fetch live quotes for top 50 candidates via Tiingo IEX batch (1 request, ~100ms)
-        # Priority: highest composite score first (most likely shown to user)
+        # Fetch live quotes for EVERY visible opportunity via Tiingo IEX batch.
+        # _fetch_tiingo_iex_batch chunks into 100-ticker batches automatically,
+        # so 200+ tickers is 2-3 HTTP calls (~200ms total). Force-refresh — don't
+        # skip tickers already in _price_cache, since the cache can hold a stale
+        # price from a prior fetch (e.g., APLD locked at Friday's $41.25 while
+        # live is $45.35). Every visible row must have a valid live-recomputed
+        # composite_score, not yesterday's reading.
         sorted_opps = sorted(opps, key=lambda o: o.get("composite_score", 0), reverse=True)
         tickers_need_quote = [o.get("ticker", "") for o in sorted_opps
-                              if o.get("ticker") and o.get("ticker") not in _price_cache
-                              and not o.get("vetoed", False)][:50]
+                              if o.get("ticker") and not o.get("vetoed", False)]
         if tickers_need_quote:
             try:
                 await _fetch_tiingo_iex_batch(tickers_need_quote)
             except Exception as e:
                 print(f"[Scan] Tiingo IEX batch error: {e}")
 
-        # Overlay live prices + recompute RSI(2), SMA50 buffer, ATR% with today's price
+        # Overlay live prices + recompute RSI(2), SMA50 buffer, ATR%, composite
+        # against today's price. Flag stocks whose entry signal has already
+        # played out — RSI(2) was <10 at the close that triggered the scan,
+        # but if the live overlay shows RSI(2) > 30, the bounce already
+        # happened and chasing in is dangerous.
         for opp in opps:
+            scan_rsi2 = opp.get("rsi2", 0)
             _apply_live_overlay(opp)
+            live_rsi2 = opp.get("rsi2", 0)
+            # Signal-expired guard: entered on RSI<10, now RSI risen materially
+            # → trade in progress, don't promote to BEST tier.
+            if not opp.get("vetoed", False) and scan_rsi2 < 10 and live_rsi2 > 30:
+                opp["signal_expired"] = True
+                opp["signal_expired_reason"] = (
+                    f"RSI(2) recovered from {scan_rsi2:.0f}→{live_rsi2:.0f} — "
+                    f"bounce in progress"
+                )
             if not opp.get("vetoed", False):
-                # Recompute composite score + strict flag with live data (scanner-specific)
                 opp["composite_score"], opp["ranking_factors"] = _compute_composite_score(opp)
                 opp["quality_tier"] = _quality_tier(opp["composite_score"])
+                # Cap expired signals at FAIR — they're not actionable as fresh entries.
+                if opp.get("signal_expired") and opp["composite_score"] > 49:
+                    opp["composite_score"] = 49
+                    opp["quality_tier"] = _quality_tier(49)
+                    opp["ranking_factors"] = (opp.get("ranking_factors") or "") + " EXPIRED:CAP49"
                 opp["meets_strict"] = _meets_strict_criteria(opp)
         return result
 
@@ -4472,14 +4511,18 @@ async def get_performance():
         except Exception:
             pass
 
-        # Build cumulative realized P&L + fees by date from transactions
+        # Build cumulative realized P&L + fees + tax by date from transactions.
+        # TAX rows (action='TAX') represent broker withholdings — they reduce
+        # the daily P&L curve from the date they're recorded.
         tx_rows = conn.execute(
-            "SELECT date, action, fee, realized_pnl FROM transactions ORDER BY date"
+            "SELECT date, action, fee, total, realized_pnl FROM transactions ORDER BY date"
         ).fetchall()
         daily_realized = {}  # date -> cumulative realized P&L
         daily_fees = {}      # date -> cumulative fees
+        daily_tax = {}       # date -> cumulative tax (broker withholdings)
         cum_realized = 0.0
         cum_fees = 0.0
+        cum_tax = 0.0
         for tx in tx_rows:
             tx_date = tx["date"]
             rpnl = tx["realized_pnl"]
@@ -4487,12 +4530,16 @@ async def get_performance():
                 cum_realized += rpnl
             fee = tx["fee"] or 0
             cum_fees += fee
+            if tx["action"] == "TAX":
+                cum_tax += tx["total"] or 0
             daily_realized[tx_date] = cum_realized
             daily_fees[tx_date] = cum_fees
+            daily_tax[tx_date] = cum_tax
 
         # Pre-sort realized dates for efficient forward-fill
         last_realized = 0.0
         last_fees = 0.0
+        last_tax = 0.0
 
         # Use index-based iteration instead of list.pop(0) which is O(n)
         deposit_dates_iter = list(_deposit_dates_sorted)
@@ -4560,11 +4607,12 @@ async def get_performance():
                 deposited_so_far = _cum_deposits[deposit_dates_iter[dep_idx]]
                 dep_idx += 1
 
-            # Forward-fill cumulative realized P&L and fees up to this date
+            # Forward-fill cumulative realized P&L, fees, and tax up to this date
             while real_idx < len(realized_dates_list) and realized_dates_list[real_idx] <= date_str:
                 d = realized_dates_list[real_idx]
                 last_realized = daily_realized[d]
                 last_fees = daily_fees[d]
+                last_tax = daily_tax.get(d, last_tax)
                 real_idx += 1
 
             # Sweep-line: add trades that entered on or before this date
@@ -4603,8 +4651,8 @@ async def get_performance():
                 total_cost += t.entry_price * sh
                 pos_count += 1
 
-            # Total P&L = realized gains + unrealized gains - fees
-            total_pnl = last_realized + unrealized - last_fees
+            # Total P&L = realized + unrealized − fees − broker tax
+            total_pnl = last_realized + unrealized - last_fees - last_tax
             dep = deposited_so_far if deposited_so_far > 0 else total_deposited
             portfolio_value = dep + total_pnl
             pnl_pct = (total_pnl / dep * 100) if dep > 0 else 0
