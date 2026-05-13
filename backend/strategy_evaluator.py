@@ -482,13 +482,15 @@ async def validate_top_signals(signals: List[EntrySignal], top_n: int = 30) -> L
 
     async def _check(sig: EntrySignal):
         async with sem:
-            # Earnings veto via Tiingo News (tags=earnings). Replaces the
-            # previous Finnhub free-tier calendar check, which had gaps that
-            # let known events slip through (IREN Q3 FY26 missed on 2026-05-08).
+            # Earnings veto via Tiingo News + Finnhub calendar union. Either
+            # source alone has blind spots — Tiingo missed CAMT/CELC (small-cap
+            # news gaps), Finnhub missed IREN (since fixed). The combined query
+            # closes both gaps; this is the entries-tab call path that let CELC
+            # through on 2026-05-08 with earnings 6 days out.
             try:
-                from tiingo_earnings import earnings_window
+                from tiingo_earnings import earnings_window_combined
                 async with aiohttp.ClientSession() as ses:
-                    hit = await earnings_window(ses, sig.ticker, days=10)
+                    hit = await earnings_window_combined(ses, sig.ticker, days=10)
                 if hit:
                     sig.vetoed = True
                     sig.veto_reason = (

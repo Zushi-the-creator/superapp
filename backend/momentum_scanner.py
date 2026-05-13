@@ -191,11 +191,12 @@ class MomentumScanner:
 
             async def _validate_one(r):
                 async with sem:
-                    # Earnings check via Tiingo News (tags=earnings) — Finnhub
-                    # free tier had gaps that missed events like IREN Q3 FY26.
+                    # Earnings check via Tiingo News + Finnhub calendar union.
+                    # Each source has blind spots (Tiingo missed CAMT/CELC,
+                    # Finnhub missed IREN) — the combined query closes both.
                     try:
-                        from tiingo_earnings import earnings_window
-                        hit = await earnings_window(session, r.ticker, days=10)
+                        from tiingo_earnings import earnings_window_combined
+                        hit = await earnings_window_combined(session, r.ticker, days=10)
                         if hit:
                             r.vetoed = True
                             r.veto_reason = (

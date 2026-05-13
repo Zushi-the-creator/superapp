@@ -550,21 +550,20 @@ class DeepScanner:
 
     async def _check_earnings(self, session: aiohttp.ClientSession,
                               ticker: str) -> Optional[Dict]:
-        """Check earnings within 7 days. Source: Tiingo News with tags=earnings.
+        """Check earnings within 7 days. Union of Tiingo News + Finnhub calendar.
 
-        Why Tiingo News and not Finnhub: Finnhub's free-tier earnings calendar
-        has gaps for many small/mid caps (it missed IREN's Q3 FY26 print on
-        2026-05-08 — we held through the report without warning). Our paid
-        Tiingo Power plan includes the News API for ALL tickers; articles
-        tagged "earnings" cover both upcoming previews AND just-released
-        results. Finnhub's fundamentals/calendar add-on costs extra.
+        Why both: each source has DIFFERENT blind spots — Tiingo News missed
+        CAMT 2026-05-12 and CELC 2026-05-14 (small-cap coverage gaps); Finnhub
+        free-tier missed IREN 2026-05-08 retroactively (since fixed). Querying
+        both in parallel and OR-ing the result eliminates the gap that let
+        CELC into the entries tab on 2026-05-08 with earnings 6 days away.
 
-        Returns {'date', 'title', 'url', 'source', 'direction', 'age_hours'}
-        or None.
+        Returns {'date', 'title', 'url', 'source', 'sources', 'direction',
+        'age_hours'} or None.
         """
         try:
-            from tiingo_earnings import earnings_window
-            return await earnings_window(session, ticker, days=7)
+            from tiingo_earnings import earnings_window_combined
+            return await earnings_window_combined(session, ticker, days=7)
         except Exception:
             return None
 
