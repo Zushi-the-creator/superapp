@@ -2888,18 +2888,23 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
 
     composite = max(0, min(100, pts))
 
-    # High-avg_return boost — match how winners ranked on 2026-04-24 where
-    # +20% avg-ret stocks (QBTS, RGTI, NBTX) topped the list. EV's 10-pt cap
-    # under-weights truly outstanding historical returns.
+    # High-avg_return boost — toned down 2026-05-13 audit. Previous +25 saturated
+    # too many tickers at the 100 ceiling, eliminating discrimination at the top
+    # of the entries list. Now +12 max for ≥10% avg-ret, scaled so only stocks
+    # ALSO at high ATR get the full bump (vol ⨯ historical-return is the
+    # combination that predicted in the walk-forward).
     eff_ret = zone_ret if zone_trades >= 5 else r.get("avg_return", 0)
-    if eff_ret >= 10:
-        composite = min(100, composite + 25)
-        factors.append(f"RET+{eff_ret:.0f}:+25")
-    elif eff_ret >= 5:
+    if eff_ret >= 10 and atr_pct >= 5:
         composite = min(100, composite + 12)
         factors.append(f"RET+{eff_ret:.0f}:+12")
-    elif eff_ret >= 2:
+    elif eff_ret >= 10:
+        composite = min(100, composite + 6)
+        factors.append(f"RET+{eff_ret:.0f}:+6")
+    elif eff_ret >= 5:
         composite = min(100, composite + 5)
+        factors.append(f"RET+{eff_ret:.0f}:+5")
+    elif eff_ret >= 2:
+        composite = min(100, composite + 2)
 
     # Soft veto: no volume confirmation (vol_ratio < 1.0x) caps at FAIR — but
     # only when prior avg_return is also weak (<5%). High-historical-return
@@ -2909,19 +2914,31 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
         composite = 50
         factors.append("VOL<1x:CAP50")
 
-    # Validated-stats cap — CLAUDE.md "TRUST BACKTESTS: WR > 55%, 10+ trades".
-    # When a stock has enough sample (≥10 trades) but FAILS the validation
-    # rule (WR<55% OR avg_return≤0%), cap its composite at FAIR (49). The
-    # April 2026 audit found per-stock prior WR has no predictive correlation,
-    # so we don't hard-veto these — but they shouldn't outrank validated picks
-    # at the top of the entries tab. ATR-driven entries with bad backtest can
-    # still appear, just below the validated set.
+    # Validated-stats cap — NARROWED 2026-05-13 after audit on 8 holdings showed
+    # the prior cap (WR<55% OR avg<=0) was inverting our biggest winners. IREN
+    # (97.6→49) and AMSC (100→49) had prior WR ~50% but ATR≥7.5%, Strong Buy/Buy
+    # analyst, positive sentiment, vol≥1.1× — all the operational signals were
+    # green. The cap penalized them on a stat the April 2026 audit already
+    # proved doesn't predict forward returns (r=-0.033). Both went on to +16%
+    # and +32%, while uncapped low-WR + high-ATR stocks like CLS scored 100
+    # and lost money.
+    #
+    # New rule: only cap when MULTIPLE conviction signals fail together:
+    #   prior WR < 55%  AND  ATR < 5%  AND  analyst not in {Buy, Strong Buy,
+    #   Outperform, Overweight}  → CAP49
+    # Plus the absolute floor: avg_return <= 0 with >=10 trades still caps
+    # (a stock that LOST money historically on 10+ samples shouldn't be top
+    # of the entries list regardless of other factors).
     val_trades = max(zone_trades, total_trades)
     val_wr = zone_wr if zone_trades >= 5 and zone_wr > 0 else wr
     val_ret = zone_ret if zone_trades >= 5 else r.get("avg_return", 0)
-    if val_trades >= 10 and (val_wr < 55 or val_ret <= 0) and composite >= 50:
-        composite = 49
-        factors.append("UNVALIDATED:CAP49")
+    if val_trades >= 10:
+        analyst_supportive = analyst_cons in ("Buy", "Strong Buy", "Outperform", "Overweight")
+        weak_combo = (val_wr < 55 and atr_pct < 5 and not analyst_supportive)
+        clearly_losing = val_ret <= 0
+        if (weak_combo or clearly_losing) and composite >= 50:
+            composite = 49
+            factors.append("UNVALIDATED:CAP49")
     return round(composite, 1), " ".join(factors)
 
 
