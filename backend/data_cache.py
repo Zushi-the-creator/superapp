@@ -31,10 +31,10 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'stock_cache.db')
-TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "6f632a60d6188ebc1b92221e83d4fba37e2a5c42")
+TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "")
 POLYGON_KEY = os.environ.get("POLYGON_API_KEY", "")
 FMP_KEY = os.environ.get("FMP_API_KEY", "")
-FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
+FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
 
 class DataCache:
@@ -207,6 +207,123 @@ class DataCache:
         except Exception:
             return None
 
+    async def _fetch_tiingo_crypto(self, session: aiohttp.ClientSession,
+                                    ticker: str, days: int = 730,
+                                    min_rows: int = 0) -> Optional[pd.DataFrame]:
+        """Fetch crypto OHLCV from Tiingo crypto endpoint. ticker format: btcusd"""
+        start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        end = datetime.now().strftime('%Y-%m-%d')
+        url = 'https://api.tiingo.com/tiingo/crypto/prices'
+        params = {
+            'tickers': ticker.lower(),
+            'startDate': start,
+            'endDate': end,
+            'resampleFreq': '1day',
+            'token': TIINGO_KEY,
+        }
+        headers = {'Content-Type': 'application/json'}
+        required = min_rows if min_rows > 0 else (50 if days > 30 else 1)
+
+        try:
+            async with session.get(url, params=params, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 429:
+                    await asyncio.sleep(2)
+                    return None
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                # Tiingo crypto returns: [{ticker: "btcusd", priceData: [...]}]
+                if not data or not isinstance(data, list) or len(data) == 0:
+                    return None
+                prices = data[0].get('priceData', [])
+                if len(prices) < required:
+                    return None
+                df = pd.DataFrame(prices)
+                df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+                df = df.set_index('date').sort_index()
+                col_map = {'open': 'Open', 'high': 'High',
+                           'low': 'Low', 'close': 'Close', 'volume': 'Volume'}
+                df = df.rename(columns=col_map)
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col not in df.columns:
+                        return None
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                for col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                return df
+        except Exception:
+            return None
+
+    async def populate_crypto(self, tickers: List[str], days: int = 730) -> Dict:
+        """Populate crypto OHLCV data (730d = 2yr history, 20 concurrent)."""
+        import time
+        tickers = [t.lower() for t in tickers]
+        cached = set(t.lower() for t in self.get_cached_tickers())
+        to_fetch = [t for t in tickers if t not in cached]
+
+        if not to_fetch:
+            print(f'[CRYPTO] All {len(tickers)} crypto tickers already cached')
+            return {'fetched': 0, 'cached': len(tickers), 'failed': 0}
+
+        print(f'[CRYPTO] Populate: {len(to_fetch)} tickers (Tiingo crypto, {days}d)')
+        start_time = time.time()
+        fetched = 0
+        failed_tickers = set()
+        sem = asyncio.Semaphore(20)
+
+        async with aiohttp.ClientSession() as session:
+            async def fetch_one(ticker):
+                nonlocal fetched
+                async with sem:
+                    result = await self._fetch_tiingo_crypto(session, ticker, days=days)
+                    if isinstance(result, pd.DataFrame):
+                        self.store(ticker, result)
+                        fetched += 1
+                    else:
+                        failed_tickers.add(ticker)
+
+            await asyncio.gather(*[fetch_one(t) for t in to_fetch])
+
+        elapsed = time.time() - start_time
+        print(f'[CRYPTO] Done in {elapsed:.0f}s: {fetched} fetched, {len(failed_tickers)} failed')
+        if failed_tickers:
+            print(f'[CRYPTO] Failed: {sorted(failed_tickers)}')
+        return {'fetched': fetched, 'cached': len(tickers) - len(to_fetch), 'failed': len(failed_tickers)}
+
+    async def refresh_crypto(self, tickers: List[str]) -> Dict:
+        """Refresh crypto data (10d window)."""
+        import time
+        tickers = [t.lower() for t in tickers]
+        stale = [t for t in tickers if not self.is_fresh(t)]
+
+        if not stale:
+            print(f'[CRYPTO] All {len(tickers)} crypto tickers up to date')
+            return {'refreshed': 0, 'failed': 0}
+
+        print(f'[CRYPTO] Refresh: {len(stale)} stale tickers')
+        start_time = time.time()
+        refreshed = 0
+        failed_tickers = set()
+        sem = asyncio.Semaphore(20)
+
+        async with aiohttp.ClientSession() as session:
+            async def refresh_one(ticker):
+                nonlocal refreshed
+                async with sem:
+                    result = await self._fetch_tiingo_crypto(session, ticker, days=10, min_rows=1)
+                    if isinstance(result, pd.DataFrame):
+                        self.store(ticker, result)
+                        refreshed += 1
+                    else:
+                        failed_tickers.add(ticker)
+
+            await asyncio.gather(*[refresh_one(t) for t in stale])
+
+        elapsed = time.time() - start_time
+        print(f'[CRYPTO] Refresh done in {elapsed:.0f}s: {refreshed} OK, {len(failed_tickers)} failed')
+        return {'refreshed': refreshed, 'failed': len(failed_tickers)}
+
     # ── Bulk Operations ──
 
     async def populate(self, tickers: List[str], force: bool = False) -> Dict:
@@ -251,6 +368,55 @@ class DataCache:
         print(f'[CACHE] Done in {elapsed:.0f}s: {fetched} fetched, {len(failed_tickers)} failed')
         return {'fetched': fetched, 'cached': len(cached), 'failed': len(failed_tickers)}
 
+    def _rebase_if_adjusted(self, ticker: str, df: pd.DataFrame) -> bool:
+        """Detect split/dividend re-adjustment and rebase cached history to match.
+
+        Tiingo prices are back-adjusted: after a split or dividend the ENTIRE
+        history shifts basis, but a 10d refresh window only rewrites the last
+        10 rows — leaving older cached rows on the old basis (a 10:1 split
+        looks like a -90% cliff and corrupts every indicator/backtest).
+
+        Compares the earliest overlapping fetched bar against the cached bar.
+        If they disagree >0.5%, multiplies all older cached rows by the ratio
+        (and inversely scales volume for split-sized changes). Returns True if
+        a rebase was applied.
+        """
+        ticker = ticker.upper()
+        ratio = 0.0
+        first_date = None
+        try:
+            for i in range(min(3, len(df))):
+                date_str = df.index[i].strftime('%Y-%m-%d')
+                row = self.conn.execute(
+                    'SELECT close FROM daily_prices WHERE ticker = ? AND date = ?',
+                    (ticker, date_str)).fetchone()
+                if row and row[0]:
+                    new_close = float(df['Close'].iloc[i])
+                    cached_close = float(row[0])
+                    if new_close > 0 and cached_close > 0:
+                        ratio = new_close / cached_close
+                        first_date = df.index[0].strftime('%Y-%m-%d')
+                        break
+        except Exception:
+            return False
+        if not first_date or ratio <= 0 or abs(ratio - 1.0) <= 0.005:
+            return False
+        if not (0.001 < ratio < 1000):
+            return False
+        self.conn.execute(
+            'UPDATE daily_prices SET open = open * ?, high = high * ?, '
+            'low = low * ?, close = close * ? WHERE ticker = ? AND date < ?',
+            (ratio, ratio, ratio, ratio, ticker, first_date))
+        if ratio < 0.9 or ratio > 1.1:
+            # Split-sized change — adjusted volume scales inversely to price
+            self.conn.execute(
+                'UPDATE daily_prices SET volume = volume / ? WHERE ticker = ? AND date < ?',
+                (ratio, ticker, first_date))
+        self.conn.commit()
+        print(f'[CACHE] {ticker}: adjustment basis changed x{ratio:.4f} '
+              f'(split/dividend) — rebased history before {first_date}')
+        return True
+
     async def refresh(self, tickers: Optional[List[str]] = None) -> Dict:
         """Daily refresh via Tiingo (10d window, 20 concurrent). Minimal bandwidth."""
         import time
@@ -276,6 +442,7 @@ class DataCache:
                 async with sem:
                     result = await self._fetch_tiingo(session, ticker, days=10, min_rows=1)
                     if isinstance(result, pd.DataFrame):
+                        self._rebase_if_adjusted(ticker, result)
                         self.store(ticker, result)
                         refreshed += 1
                     else:

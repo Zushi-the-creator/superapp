@@ -138,7 +138,11 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
             check.issues.append("NO CACHED DATA - cannot validate")
             continue
 
-        closes = df["Close"].dropna().tolist()
+        # Drop NaN closes FIRST, then extract all columns from the same filtered
+        # frame — otherwise closes[i] and opens[i+1]/highs[i] refer to different
+        # days whenever a close is NULL, silently corrupting the backtest.
+        df = df.dropna(subset=["Close"])
+        closes = df["Close"].tolist()
         if len(closes) < 60:
             check.issues.append(f"Only {len(closes)} days of data (need 60+)")
             continue
@@ -170,9 +174,11 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
                 check.volume_ratio = volumes[-1] / avg_vol
                 check.volume_confirmed = check.volume_ratio >= 1.5
 
-        # Full backtest — V2.6: RSI<10, next-day open, 30d hold, fee-adjusted, non-overlapping
+        # Full backtest — RSI<10, next-day open, 30d hold (= live Fixed30d exit),
+        # fee-adjusted, non-overlapping. Was 60 — SELL thresholds (WR<55 etc.)
+        # are calibrated for the 30d strategy actually traded.
         _FEE_PCT = 0.30
-        _HOLD = 60
+        _HOLD = 30
         opens = df["Open"].tolist() if "Open" in df.columns else closes
         trades = []
         last_exit_day = -1
@@ -480,11 +486,12 @@ def print_report(results: List[HoldingCheck]):
     total_value = 0
     total_pnl = 0
 
+    portfolio_total = sum(r.shares * r.live_price for r in results)
     for c in results:
         value = c.shares * c.live_price
         total_value += value
         total_pnl += c.pnl
-        pct_of_portfolio = value / sum(r.shares * r.live_price for r in results) * 100
+        pct_of_portfolio = value / portfolio_total * 100 if portfolio_total else 0
 
         sig_map = {
             "SELL": "!! SELL !!",
@@ -524,7 +531,8 @@ def print_report(results: List[HoldingCheck]):
     print(f"\n{'=' * 105}")
     print(f"  SUMMARY")
     print(f"{'=' * 105}")
-    print(f"  Portfolio value: ${total_value:,.2f} | P&L: ${total_pnl:+,.2f} ({total_pnl/total_value*100:+.1f}%)")
+    pnl_pct_str = f"{total_pnl/total_value*100:+.1f}%" if total_value else "n/a — no holdings found"
+    print(f"  Portfolio value: ${total_value:,.2f} | P&L: ${total_pnl:+,.2f} ({pnl_pct_str})")
     print()
 
     sells = [r for r in results if r.signal in ("SELL", "CRASH", "SELL BEFORE EARNINGS")]

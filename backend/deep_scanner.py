@@ -365,54 +365,52 @@ class DeepScanner:
         zone_hi = zone_lo + 10
         zone_label = f"{zone_lo}-{zone_hi}"
 
-        # Hybrid21d simulation — matches production exit (api_v2._evaluate_exit_trigger).
-        # Hold ≥7 trading days; once profit > 5%, trail -3% from peak; hard cap 21 days.
-        # Mega-study (5,037 trades): 62.9% WR, +2.63% avg, PF 1.80, +0.164/day.
-        # Using Fixed30d here would mis-state the avg_return shown on the entries tab
-        # (Fixed30d shows ~+4.00% but Hybrid21d only captures ~+2.63% per trade).
-        max_hold = 21
-        min_hold = 7
+        # Fixed30d simulation — matches the LIVE exit (api_v2._select_best_exit,
+        # V3.2 2026-06-02: MR/BOTH exit at trading day 30, no stop/trail).
+        # Historical entries apply the same gates as the live scan above:
+        # RSI(2)<10, close > SMA50, ATR(14)% >= 3, close >= $10 — so the
+        # WR/avg_return shown on the entries tab measures the strategy that
+        # actually gets traded (Hybrid21d sim removed when the exit retired).
+        HOLD = 30
         trades = []
         zone_trades_list = []
         last_exit_day = -1
         zone_last_exit = -1
 
-        def _hybrid_exit(ed: int):
-            """Simulate Hybrid21d from entry day `ed`. Returns (exit_idx, exit_price)."""
-            ep = opens_list[ed] if ed < len(opens_list) and opens_list[ed] > 0 else closes[ed - 1]
-            peak = ep
-            ex_idx = min(ed + max_hold, len(closes) - 1)
-            ex_price = closes[ex_idx]
-            for j in range(ed, min(ed + max_hold + 1, len(closes))):
-                if closes[j] > peak:
-                    peak = closes[j]
-                days = j - ed
-                if days >= min_hold:
-                    pnl = ((closes[j] - ep) / ep) * 100
-                    if pnl > 5 and closes[j] < peak * 0.97:  # -3% trail after +5%
-                        return j, closes[j], ep
-                if days >= max_hold:
-                    return j, closes[j], ep
-            return ex_idx, ex_price, ep
+        # Rolling ATR(14)% array (O(n)) — historical entries respect the
+        # volatility floor, same as the current-bar check at the top.
+        atr_pct_arr = [0.0] * len(closes)
+        _trs = []
+        for _i in range(1, len(closes)):
+            _tr = max(highs[_i] - lows[_i],
+                      abs(highs[_i] - closes[_i - 1]),
+                      abs(lows[_i] - closes[_i - 1]))
+            _trs.append(_tr)
+            if len(_trs) > 14:
+                _trs.pop(0)
+            if len(_trs) == 14 and closes[_i] > 0:
+                atr_pct_arr[_i] = sum(_trs) / 14 / closes[_i] * 100
 
-        for i in range(50, len(closes) - max_hold - 2):
+        for i in range(50, len(closes) - HOLD - 2):
             if closes[i] <= sma50_arr[i]:
                 continue
-            if i + 1 + max_hold >= len(closes):
-                continue
             ed = i + 1
-            exit_idx, exit_price, entry_price = _hybrid_exit(ed)
+            ex_idx = ed + HOLD
+            if ex_idx >= len(closes):
+                continue
+            entry_price = opens_list[ed] if ed < len(opens_list) and opens_list[ed] > 0 else closes[i]
             if entry_price <= 0:
                 continue
-            ret = ((exit_price - entry_price) / entry_price) * 100 - _FEE_PCT
+            ret = ((closes[ex_idx] - entry_price) / entry_price) * 100 - _FEE_PCT
 
-            if rsi2_arr[i] < 10 and i > last_exit_day:
-                trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i], "hold": exit_idx - ed})
-                last_exit_day = exit_idx
+            if (rsi2_arr[i] < 10 and closes[i] >= 10
+                    and atr_pct_arr[i] >= 3.0 and i > last_exit_day):
+                trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i], "hold": HOLD})
+                last_exit_day = ex_idx
 
             if zone_lo <= rsi2_arr[i] < zone_hi and i > zone_last_exit:
                 zone_trades_list.append({"return": ret, "win": ret > 0})
-                zone_last_exit = exit_idx
+                zone_last_exit = ex_idx
 
         if len(trades) < 10:
             return None
@@ -420,8 +418,7 @@ class DeepScanner:
         wins = sum(1 for t in trades if t["win"])
         win_rate = wins / len(trades) * 100
         avg_return = sum(t["return"] for t in trades) / len(trades)
-        # Use the actual avg Hybrid21d hold for the displayed hold_days
-        hold_days = round(sum(t["hold"] for t in trades) / len(trades))
+        hold_days = HOLD
 
         # V2.6 price filter
         if price < 10:
@@ -602,6 +599,20 @@ class DeepScanner:
                             return
                     except Exception as e:
                         print(f"  {r.ticker}: Earnings check failed: {e}")
+
+                    # 1b. Biotech catalyst check (VETO if upcoming trial readout
+                    # / FDA decision / PDUFA / NDA filing within 14 days). Built
+                    # after CELC and PRAX biotech blowups on 2026-06-01/02.
+                    try:
+                        from tiingo_biotech_catalyst import catalyst_window
+                        cat = await catalyst_window(session, r.ticker, days=14)
+                        if cat and cat.get("kind") == "upcoming":
+                            r.vetoed = True
+                            r.veto_reason = f"Biotech catalyst ({cat.get('catalyst_type','?')}): {cat.get('title','')[:60]}"
+                            print(f"  {r.ticker}: CATALYST VETO - {cat.get('catalyst_type','?')} ahead")
+                            return
+                    except Exception as e:
+                        print(f"  {r.ticker}: Catalyst check failed: {e}")
 
                     # 2. Analyst data (Finviz) — VETO on Hold/Sell (CLAUDE.md V2.4)
                     try:

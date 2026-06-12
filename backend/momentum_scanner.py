@@ -79,6 +79,8 @@ class MomentumScanner:
         price = closes[-1]
         if price < 10:
             return None
+        if price > 200:
+            return None  # research-backed cap — >$200 momentum has -5% edge
 
         # Moving averages
         n = len(closes)
@@ -120,6 +122,11 @@ class MomentumScanner:
         # Bigger gaps are worse. Block stocks that ripped >10% yesterday.
         day_change_pct = ((closes[-1] / closes[-2]) - 1) * 100 if n >= 2 else 0
         if day_change_pct >= 10:
+            return None
+
+        # 5-day return > 15% veto — documented entry rule: don't chase a move
+        # that already ran half the expected hold's gain in a week.
+        if ret_5d > 15:
             return None
 
         # Volume ratio (informational, not a gate — backtested: vol filter hurts WR)

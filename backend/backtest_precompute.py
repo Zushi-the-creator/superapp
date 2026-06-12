@@ -91,23 +91,29 @@ def _sma_arr(closes, period, n):
 
 
 def _backtest_mr(closes, opens, highs, lows, n):
-    """Mean reversion backtest: RSI(2)<10, ATR>=3%, price>=$10, 45d hold.
-    Returns (trades, wins, total_return)."""
+    """Mean reversion backtest: RSI(2)<10, price>SMA50, ATR>=3%, price>=$10,
+    MR_HOLD_DAYS hold. Returns (trades, wins, total_return)."""
     if n < 100:  # Need enough bars
         return 0, 0, 0.0
 
     rsi2 = _rsi2_arr(closes, n)
+    sma50 = _sma_arr(closes, 50, n)
     trades = 0
     wins = 0
     total_ret = 0.0
     last_exit = -1
 
-    for i in range(14, n - MR_HOLD_DAYS - 2):
+    for i in range(50, n - MR_HOLD_DAYS - 2):
         if i <= last_exit:
             continue
         if rsi2[i] >= 10:
             continue
         if closes[i] < 10:
+            continue
+        # Uptrend filter — production MR never enters below SMA50; without
+        # this the cached WR/avg_return includes downtrend dips the live
+        # scanner would reject (the 19-29% WR regime from the March audit).
+        if sma50[i] <= 0 or closes[i] <= sma50[i]:
             continue
 
         # ATR(14) % check

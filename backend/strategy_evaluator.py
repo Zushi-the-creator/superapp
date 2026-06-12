@@ -218,8 +218,9 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         volumes = [r[5] for r in rows]
         n = len(closes)
 
-        # Append today's live price if available (for intraday RSI detection)
-        if ticker in _live and _live[ticker] > 0:
+        # Append today's live price if available (for intraday RSI detection).
+        # Weekday check: on weekends a phantom Saturday bar would shift RSI(2).
+        if ticker in _live and _live[ticker] > 0 and datetime.now().weekday() < 5:
             live_px = _live[ticker]
             today_str = datetime.now().strftime('%Y-%m-%d')
             if dates[-1] != today_str:  # Don't double-append
@@ -283,7 +284,11 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         # MEAN REVERSION CHECK (V3.0 — cache-accelerated)
         # ═══════════════════════════════════════════
         cache_row = None  # Will be loaded from backtest_cache if needed
-        is_mr = (current_rsi < 10 and atr_pct >= 3 and price >= 10)
+        # Same gates as deep_scanner: RSI(2)<10, uptrend (price > SMA50),
+        # ATR>=3%, price>=$10. The SMA50 filter was missing here — below-SMA50
+        # stocks were emitted as MR signals and only caught on one serve path.
+        is_mr = (current_rsi < 10 and atr_pct >= 3 and price >= 10
+                 and current_sma50 > 0 and price > current_sma50)
 
         mr_score = 0
         mr_wr = 0
@@ -316,7 +321,13 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         trend_score = sum(trend_rules)
         # Backtested: ret>5% + no vol filter = 51.7% WR, +1.56% avg (14,827 trades)
         # vs strict ret>15% + vol>1.5x = 49.3% WR (worse) but +1.92% avg (fewer signals)
-        is_mom = (trend_score == 6 and ret_20d > 5)
+        # Documented momentum VETOs (match momentum_scanner):
+        #   parabolic spike — prior-day move >= 10% (45.4% WR cohort, gap study)
+        #   5d return > 15% — chasing an extended move
+        #   price > $200 — research-backed cap (-5% edge above $200)
+        ret_1d = ((closes[-1] / closes[-2]) - 1) * 100 if n >= 2 and closes[-2] > 0 else 0
+        is_mom = (trend_score == 6 and ret_20d > 5
+                  and abs(ret_1d) < 10 and ret_5d <= 15 and price <= 200)
 
         mom_score = 0
         mom_wr = 0
@@ -346,20 +357,33 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         # ═══════════════════════════════════════════
         # DETERMINE BEST STRATEGY + COMBINED SCORE
         # ═══════════════════════════════════════════
+        # V3.3.1 (2026-06-03): When stock qualifies for BOTH, only use a side
+        # whose sample meets the CLAUDE.md minimum (MR≥10 OR MOM≥15). Previously
+        # CDNA (MR=28 / MOM=9) → BOTH picked MOM score (+47.98% on 9 trades),
+        # inflating EV to 31 and ranking #1. Now MOM<15 disqualifies the MOM
+        # side from being chosen; fall back to MR side stats.
+        mom_qualified = mom_trades >= 15
+        mr_qualified = mr_trades >= 10
         if is_mr and is_mom and mr_trades >= 5 and mom_trades >= 5:
             strategy = "BOTH"
             label = "RSI Dip + Breakout"
-            # Use whichever has higher expected value (no arbitrary multiplier)
-            if mr_score >= mom_score:
-                score = mr_score
-                exp_ret = mr_ret
-                conf = mr_wr
-                trades_n = mr_trades
+            # Pick whichever QUALIFIED side has higher score. If only one
+            # qualifies, use it. If neither qualifies, fall through (will be
+            # vetoed below).
+            if mr_qualified and mom_qualified:
+                use_mom = mom_score >= mr_score
+            elif mom_qualified:
+                use_mom = True
+            elif mr_qualified:
+                use_mom = False
             else:
-                score = mom_score
-                exp_ret = mom_ret
-                conf = mom_wr
-                trades_n = mom_trades
+                # Neither side has adequate sample — use MR by default (will
+                # fail the V3.3 BOTH veto downstream regardless).
+                use_mom = False
+            if use_mom:
+                score = mom_score; exp_ret = mom_ret; conf = mom_wr; trades_n = mom_trades
+            else:
+                score = mr_score; exp_ret = mr_ret; conf = mr_wr; trades_n = mr_trades
             mr_count += 1; mom_count += 1
         elif is_mr and mr_trades >= 5:
             strategy = "MEAN_REVERSION"
@@ -380,25 +404,56 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
         else:
             continue  # No signal or insufficient backtest data
 
-        # VETO filters — safety net (line 341-373 should already filter, but belt+suspenders)
+        # ═══ V3.3 ENTRY VALIDATION GATES (2026-06-03) ═══
+        # Mirrors /analyze deep-validation. End-to-end QA on 2026-06-03 found
+        # 85% of top-20 entries (17/20) were CAUTION or HOLD on /analyze.
+        # Root causes: tiny MOM samples (8-11 trades inflated EV), expired
+        # signals (RSI bounced), and aggregate cache WR hiding zone failures.
+        # These gates close the gap so /scan/combined ≈ /analyze BUY criteria.
         vetoed = False
         veto_reason = ""
         if trades_n < 5:
             vetoed = True; veto_reason = f"Too few trades ({trades_n} < 5 minimum)"
         elif strategy == "MEAN_REVERSION":
-            if mr_trades < 5:
-                vetoed = True; veto_reason = f"Too few MR trades ({mr_trades} < 5)"
+            # MR: CLAUDE.md MANDATORY rule — trust backtests only with 10+ trades.
+            # 2026-06-03 deep QA on top-10 candidates showed RKLB (7 trades,
+            # /analyze BUY, +17% 30d avg, -40% worst case) ranked above APP
+            # (13 trades, /analyze BUY, +19% 30d avg, -26% worst case) only
+            # because EV uses 60d-cache numbers that inflate small samples.
+            # Strict 10-trade gate aligns with CLAUDE.md and demotes RKLB/GRAL/
+            # FEIM (5-7 trades each) below APP/IMVT/STX (13-24 trades).
+            if mr_trades < 10:
+                vetoed = True; veto_reason = f"Too few MR trades ({mr_trades} < 10 CLAUDE.md min)"
             elif conf < 55:
                 vetoed = True; veto_reason = f"MR WR {conf:.0f}% < 55%"
             elif mr_ret < 3:
                 vetoed = True; veto_reason = f"MR return {mr_ret:.1f}% < 3%"
+            # NEW: signal-expired gate — RSI(2) > 30 means the dip already bounced.
+            # MR entries are about catching the deep dip, not chasing the recovery.
+            elif current_rsi > 30:
+                vetoed = True; veto_reason = f"MR signal expired (RSI(2)={current_rsi:.0f} > 30)"
         elif strategy == "MOMENTUM":
-            if mom_trades < 5:
-                vetoed = True; veto_reason = f"Too few momentum trades ({mom_trades} < 5)"
+            # MOM minimum raised from 5 → 15 trades. With 90d hold, MOM signals
+            # fire ~4×/year; 5 trades = ~1yr of data, way too small for stable
+            # statistics. 15 trades ≈ 4-5 years of history — meaningful sample.
+            # 2026-06-03 QA: CDNA (9 trades, 65% WR cache vs 41.7% /analyze),
+            # ENPH (8 trades, 57.5% vs 25% /analyze), AMR (11 trades, similar).
+            # All would top the EV-sorted list yet fail /analyze's deeper check.
+            if mom_trades < 15:
+                vetoed = True; veto_reason = f"Too few momentum trades ({mom_trades} < 15)"
             elif conf < 55:
                 vetoed = True; veto_reason = f"Momentum WR {conf:.0f}% < 55%"
             elif mom_ret < 2:
                 vetoed = True; veto_reason = f"Momentum return {mom_ret:.1f}% < 2%"
+        elif strategy == "BOTH":
+            # BOTH: pass if EITHER side meets CLAUDE.md sample minimum
+            # (MR>=10 OR MOM>=15). FEIM with only 7+6 trades correctly fails.
+            if mr_trades < 10 and mom_trades < 15:
+                vetoed = True; veto_reason = f"BOTH insufficient sample (MR={mr_trades}, MOM={mom_trades})"
+            elif conf < 55:
+                vetoed = True; veto_reason = f"BOTH WR {conf:.0f}% < 55%"
+            elif exp_ret < 3:
+                vetoed = True; veto_reason = f"BOTH return {exp_ret:.1f}% < 3%"
 
         signals.append(EntrySignal(
             ticker=ticker, price=round(price, 2),

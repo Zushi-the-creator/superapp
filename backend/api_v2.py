@@ -11,6 +11,7 @@ import bisect
 import json
 import os
 import sys
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -399,6 +400,37 @@ async def _auto_refresh_stale_cache() -> None:
         _auto_refresh_running = False
 
 
+def _mom_stat(ticker: str, col: str) -> float:
+    """Momentum backtest stat from backtest_cache, NULL-safe (NULL column → 0)."""
+    row = _cache.conn.execute(f"SELECT {col} FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone()
+    return row[0] if row and row[0] is not None else 0
+
+
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET_TZ = _ZoneInfo("America/New_York")
+except Exception:  # tzdata missing in container — fall back to manual DST rule
+    _ET_TZ = None
+
+
+def _now_et() -> datetime:
+    """Current time in US Eastern, DST-aware (UTC-4 in summer, UTC-5 in winter)."""
+    from datetime import timezone, timedelta
+    if _ET_TZ is not None:
+        return datetime.now(_ET_TZ)
+    # Manual rule: DST from 2nd Sunday of March to 1st Sunday of November
+    utc = datetime.now(timezone.utc)
+    year = utc.year
+
+    def _nth_sunday(month: int, n: int) -> datetime:
+        d = datetime(year, month, 1, 7, tzinfo=timezone.utc)  # 2am ET ≈ 7utc
+        first_sunday = d + timedelta(days=(6 - d.weekday()) % 7)
+        return first_sunday + timedelta(days=7 * (n - 1))
+
+    is_dst = _nth_sunday(3, 2) <= utc < _nth_sunday(11, 1)
+    return utc.astimezone(timezone(timedelta(hours=-4 if is_dst else -5)))
+
+
 def _expected_last_trading_date() -> str:
     """Most recent trading-day close that should be in the cache, in ET.
 
@@ -407,7 +439,7 @@ def _expected_last_trading_date() -> str:
     Weekends: last Friday.
     """
     from datetime import timezone, timedelta
-    et = datetime.now(timezone(timedelta(hours=-4)))
+    et = _now_et()
     d = et.date()
     if d.weekday() == 5:        # Sat → Fri
         d = d - timedelta(days=1)
@@ -545,8 +577,9 @@ _exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, 
 _EXIT_CACHE_TTL = 21600  # 6 hours
 
 _EXIT_STRATEGIES = {
+    "Fixed30d": {"type": "fixed", "days": 30},  # MR / BOTH — V3.2 2026-06-02
     "Fixed60d": {"type": "fixed", "days": 60},
-    "Fixed90d": {"type": "fixed", "days": 90},
+    "Fixed90d": {"type": "fixed", "days": 90},  # MOM
 }
 
 
@@ -639,15 +672,17 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
 
 
 def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None) -> Dict:
-    """Hybrid21d exit for MR stocks (V3.1).
+    """Fixed30d exit for MR stocks (V3.2 — 2026-06-02).
 
-    Backtest (5,037 trades, production-filtered):
-      Hybrid21d: 62.9% WR, +2.63% avg, PF 1.80, +0.164/day — BEST capital efficiency
-      Fixed30d:  60.2% WR, +4.00% avg, PF 2.00, +0.133/day — old strategy
-      Fixed14d:  56.6% WR, +1.99% avg, PF 1.63, +0.142/day
+    Switched from Hybrid21d to Fixed30d after 10-year paired backtest
+    (9,919 raw signals across 39 quarterly anchors):
+      Raw MR: Fixed-30d +1.83%/mo vs Hybrid21d +1.13%/mo, p<0.0001
+      Filtered MR (top-10% composite): Fixed-30d +0.99%/mo vs Hybrid21d +0.53%/mo
+      Portfolio sim (top-5 picks/anchor): B_OLD_F30 +32.3% cum vs A_OLD_Hyb -1.4%
+    The trailing-stop logic in Hybrid21d chops winners; fixed-hold compounds better.
 
-    Logic: Hold 7d minimum (let bounce develop), then if profit > 5%,
-    activate -3% trailing stop from peak. Max hold 21 trading days.
+    Logic: Hold exactly 30 trading days from next-day-open entry.
+    Backtest per stock to compute WR/avg_ret for display.
     """
     cache_key = ticker
     current_price = closes[-1] if closes else 0
@@ -661,9 +696,9 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
             if age < _EXIT_CACHE_TTL:
                 return _evaluate_exit_trigger(cached, closes, current_rsi, current_price, entry_price=entry_price, entry_date=entry_date)
 
-    # Backtest Hybrid21d on this stock's historical data
+    # Backtest Fixed30d on this stock's historical data
     _FEE_PCT = 0.30
-    max_hold = 21
+    hold_days = 30
 
     rsi2_arr = [50.0] * len(closes)
     for i in range(2, len(closes)):
@@ -676,64 +711,40 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     for i in range(49, len(closes)):
         sma50_arr[i] = sum(closes[i-49:i+1]) / 50
 
-    # Full-sample backtest for Hybrid21d stats
+    # Full-sample backtest for Fixed30d stats
     full_trades = []
-    hold_days_list = []
     last_exit = -1
-    for i in range(50, len(closes) - max_hold - 2):
+    for i in range(50, len(closes) - hold_days - 2):
         if rsi2_arr[i] >= 10 or closes[i] <= sma50_arr[i] or sma50_arr[i] <= 0:
             continue
         if i <= last_exit:
             continue
         ed = i + 1
-        if ed + max_hold >= len(closes):
+        if ed + hold_days >= len(closes):
             continue
         ep = opens[ed] if opens and ed < len(opens) and opens[ed] > 0 else closes[i]
         if ep <= 0:
             continue
-
-        # Hybrid exit: hold 7d min, trail 3% from peak if profit>5%, max 21d
-        peak = ep
-        exit_price = closes[min(ed + max_hold, len(closes) - 1)]
-        exit_day = max_hold
-        for j in range(ed, min(ed + max_hold + 1, len(closes))):
-            if closes[j] > peak:
-                peak = closes[j]
-            days = j - ed
-            if days >= 7:
-                pnl = ((closes[j] - ep) / ep) * 100
-                if pnl > 5 and closes[j] < peak * 0.97:  # -3% trailing
-                    exit_price = closes[j]
-                    exit_day = days
-                    break
-            if days >= max_hold:
-                exit_price = closes[j]
-                exit_day = days
-                break
-
-        ret = ((exit_price - ep) / ep) * 100 - _FEE_PCT
+        exit_idx = ed + hold_days - 1
+        ret = ((closes[exit_idx] - ep) / ep) * 100 - _FEE_PCT
         full_trades.append(ret)
-        hold_days_list.append(exit_day)
-        last_exit = ed + exit_day
+        last_exit = exit_idx
 
     n = len(full_trades)
     if n < 5:
-        # Insufficient backtest data for Hybrid21d — fall back to Fixed60d
         wr = 0
         avg_ret = 0
-        avg_hold = 60  # Use Fixed60d hold instead of defaulting to 21
     else:
         wr = round(sum(1 for r in full_trades if r > 0) / n * 100, 1)
         avg_ret = round(sum(full_trades) / n, 2)
-        avg_hold = round(sum(hold_days_list) / n, 0)
     ci_lo, ci_hi = _wilson_ci(sum(1 for r in full_trades if r > 0), n) if n > 0 else (0, 0)
 
     result = {
-        "strategy": "Hybrid21d", "wr": wr,
-        "avg_ret": avg_ret, "avg_hold": avg_hold,
+        "strategy": "Fixed30d", "wr": wr,
+        "avg_ret": avg_ret, "avg_hold": 30,
         "oos_wr": wr, "is_wr": wr,
-        "overfitting_ratio": 1.0, "validation_note": "HYBRID_21D_V3.1",
-        "overfit": 1.0, "validation": "HYBRID_21D_V3.1",
+        "overfitting_ratio": 1.0, "validation_note": "FIXED_30D_V3.2",
+        "overfit": 1.0, "validation": "FIXED_30D_V3.2",
         "ci_lo": ci_lo, "ci_hi": ci_hi,
         "oos_ci_lo": ci_lo, "oos_ci_hi": ci_hi,
         "_cached_at": datetime.now().timestamp(),
@@ -985,25 +996,42 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     rsi14 = _entry.calc_rsi(closes, 14)
     avg_vol = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 0
     vol_spike = volumes[-1] > 1.5 * avg_vol if avg_vol > 0 else False
+    vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 0
+
+    # ATR(14)% and 20d return — needed so holdings can be composite-scored with
+    # the same inputs scan candidates get (rotation comparison).
+    atr_pct = 0.0
+    if len(closes) >= 15:
+        trs = []
+        for j in range(len(closes) - 14, len(closes)):
+            tr = max(highs[j] - lows[j],
+                     abs(highs[j] - closes[j - 1]),
+                     abs(lows[j] - closes[j - 1]))
+            trs.append(tr)
+        atr = sum(trs) / 14
+        atr_pct = atr / closes[-1] * 100 if closes[-1] > 0 else 0
+    ret_20d = ((closes[-1] - closes[-21]) / closes[-21] * 100) if len(closes) >= 21 and closes[-21] > 0 else 0
 
     regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
     regime = regime_info.regime.value if hasattr(regime_info, "regime") else str(regime_info)
 
-    # Backtest (30-day forward returns — V2.6: RSI<10 entry, next-day open, fee-adjusted)
+    # Backtest (30-trading-day hold — matches live Fixed30d exit; RSI<10 entry,
+    # next-day open, fee-adjusted, non-overlapping trades).
     # Uses pre-computed arrays: O(n) instead of O(n²) — 63x faster
     _FEE_PCT = 0.30
+    _HOLD = 30  # entry at open i+1, exit at close i+1+_HOLD (= live Fixed30d)
     rsi2_arr = _rsi2_array(closes)
     sma50_arr = _sma_array(closes, 50)
     last_exit_day = -1
     trades = []
-    for i in range(50, len(closes) - 62):
+    for i in range(50, len(closes) - _HOLD - 2):
         if i <= last_exit_day:
             continue
         if rsi2_arr[i] < 10 and closes[i] >= 10:
             entry_p = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-            ret = ((closes[i + 1 + 60] - entry_p) / entry_p) * 100 - _FEE_PCT
+            ret = ((closes[i + 1 + _HOLD] - entry_p) / entry_p) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i]})
-            last_exit_day = i + 46
+            last_exit_day = i + 1 + _HOLD
 
     wins_count = sum(1 for t in trades if t["win"])
     wr = wins_count / len(trades) * 100 if trades else 0
@@ -1023,19 +1051,19 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
 
     # Exit zone analysis: forward 30-day returns at CURRENT RSI zone using ALL data points
     # This answers: "When this stock was at RSI X historically, what was the 30-day forward return?"
-    # V2.6: Fixed60d universal exit — consistent with entry backtests
+    # Fixed30d hold — consistent with the entry backtest above and the live exit.
     # Reuses pre-computed rsi2_arr from above (no recalculation)
     exit_zone_trades_list = []
     ez_last_exit = -1
-    for i in range(50, len(closes) - 62):
+    for i in range(50, len(closes) - _HOLD - 2):
         if i <= ez_last_exit:
             continue
         if zone_low <= rsi2_arr[i] < zone_high:
             entry_px = opens[i + 1] if opens and i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-            exit_px = closes[i + 1 + 60]
+            exit_px = closes[i + 1 + _HOLD]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
             exit_zone_trades_list.append({"return": ret, "win": ret > 0})
-            ez_last_exit = i + 46
+            ez_last_exit = i + 1 + _HOLD
 
     exit_zone_ret = sum(t["return"] for t in exit_zone_trades_list) / len(exit_zone_trades_list) if exit_zone_trades_list else 0
     exit_zone_wr = sum(1 for t in exit_zone_trades_list if t["win"]) / len(exit_zone_trades_list) * 100 if exit_zone_trades_list else 0
@@ -1061,6 +1089,10 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     return {
         "rsi2": round(rsi2, 1),
         "rsi14": round(rsi14, 1),
+        "price": round(closes[-1], 2),
+        "atr_pct": round(atr_pct, 2),
+        "volume_ratio": round(vol_ratio, 2),
+        "ret_20d": round(ret_20d, 2),
         "sma10": round(sma10, 2),
         "sma50": round(sma50, 2),
         "sma200": round(sma200, 2),
@@ -1326,6 +1358,23 @@ async def get_portfolio():
 
     # Use cached prices (SQLite-seeded or Finnhub-refreshed) — NEVER block on API calls.
     # Background quote_refresh_loop() keeps prices fresh every 60s.
+    #
+    # Upcoming-event lookups for the "Next Event" column. Both are 30-min cached
+    # (first poll pays the batch fetch, the rest are instant) so this stays cheap
+    # on a frequently-polled endpoint:
+    #   - next_earnings: forward Finnhub calendar (when does it next report?)
+    #   - catalysts: biotech trial readouts / FDA / PDUFA within ±14d
+    held_tickers = [p["ticker"] for p in positions]
+    try:
+        next_earnings_map = await _portfolio_next_earnings_cached(held_tickers)
+    except Exception:
+        next_earnings_map = {}
+    try:
+        _cat = await _portfolio_catalysts_cached(held_tickers)
+        catalyst_map = {h["ticker"]: h for h in _cat.get("upcoming", [])}
+    except Exception:
+        catalyst_map = {}
+
     details = []
     for pos in positions:
         ticker = pos["ticker"]
@@ -1358,29 +1407,28 @@ async def get_portfolio():
         tech = _technicals_cache.get(ticker)
 
         # Re-evaluate exit trigger with current price.
-        # Per CLAUDE.md: MR positions use Hybrid21d (7d min + -3% trail + 21d cap),
-        # MOM positions use Fixed90d. _technicals_cache stores Hybrid21d for ALL
-        # tickers (it's strategy-agnostic) — so we MUST override the cached
-        # strategy with the position's actual strategy before evaluating, or
-        # MOM positions like APEI hit the 21d cap on day 25 by mistake.
+        # V3.2 (2026-06-02): MR/BOTH positions use Fixed30d (was Hybrid21d).
+        # MOM positions use Fixed90d. _technicals_cache stores Fixed30d for ALL
+        # tickers (strategy-agnostic) — so we override the cached strategy with
+        # the position's actual strategy before evaluating, so MOM positions
+        # don't hit the 30d cap when they should run to 90d.
         if tech and tech.get("exit_strategy"):
             df = _cache.get(ticker, 365)
             if df is not None and len(df) >= 10:
                 closes_live = df["Close"].dropna().tolist()
                 rsi_live = tech.get("rsi2", -1)
                 pos_strategy_eval = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
-                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Hybrid21d"
+                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Fixed30d"
                 # Use exit strategy cache if it matches the position's strategy;
                 # otherwise build a fresh exit_cached with the right strategy
-                # name so _evaluate_exit_trigger picks the correct hold target
-                # and (non-)trailing logic.
+                # name so _evaluate_exit_trigger picks the correct hold target.
                 exit_cached = _exit_strategy_cache.get(ticker)
                 if not exit_cached or exit_cached.get("strategy") != expected_exit_strat:
                     exit_cached = {
                         "strategy": expected_exit_strat,
                         "wr": tech.get("exit_strategy_wr", 0),
                         "avg_ret": tech.get("exit_strategy_ret", 0),
-                        "avg_hold": tech.get("exit_strategy_hold", 21 if expected_exit_strat == "Hybrid21d" else 90),
+                        "avg_hold": tech.get("exit_strategy_hold", 30 if expected_exit_strat == "Fixed30d" else 90),
                     }
                 live_exit = _evaluate_exit_trigger(
                     exit_cached,
@@ -1533,39 +1581,41 @@ async def get_portfolio():
                 # has a LOOSER veto chain, so it suggested vetoed-by-deep-scanner
                 # tickers (e.g. ANET below SMA50) that don't appear in entries tab.
                 opps = (_scan_cache or {}).get("opportunities", []) if _scan_cache else []
+                _held_set = {p.get("ticker") for p in positions}
                 _valid = [
                     o for o in opps
                     if not o.get("vetoed")
                     and o.get("ticker") != ticker
                     and (o.get("trades", 0) or 0) >= ROTATION_MIN_TARGET_TRADES
-                    and o.get("ticker") not in {p.get("ticker") for p in (_position_mgr._get_open_positions_sync() or [])}
+                    and o.get("ticker") not in _held_set
                 ]
-                if _valid:
+                if _valid and tech and tech.get("atr_pct") is not None:
                     _best = max(_valid, key=lambda o: o.get("composite_score", 0) or 0)
-                    # Use the holding's composite from holdings_scores to keep
-                    # both sides on the same scale (the entries tab's composite).
-                    h_score = (holdings_scores.get(ticker, {}).get("score", 0)
-                               if "holdings_scores" in dir() and isinstance(holdings_scores, dict)
-                               else 0)
-                    if h_score == 0:
-                        # Fallback: live recompute when holdings_scores not in scope
-                        h_inputs = {
-                            "price": tech.get("price", 0) if tech else 0,
-                            "rsi2": tech.get("rsi2", 50) if tech else 50,
-                            "atr_pct": tech.get("atr_pct", 0) if tech else 0,
-                            "sma50_buffer": tech.get("sma50_buffer", 0) if tech else 0,
-                            "volume_ratio": tech.get("volume_ratio", 0) if tech else 0,
-                            "win_rate": tech.get("win_rate", 0) if tech else 0,
-                            "avg_return": tech.get("avg_return", 0) if tech else 0,
-                            "trades": tech.get("total_trades", 0) if tech else 0,
-                            "zone_return": tech.get("zone_return", 0) if tech else 0,
-                            "zone_win_rate": tech.get("zone_wr", 0) if tech else 0,
-                            "zone_trades": tech.get("zone_trades", 0) if tech else 0,
-                            "analyst_consensus": tech.get("analyst_consensus", "") if tech else "",
-                            "analyst_upside": tech.get("analyst_upside", 0) if tech else 0,
-                            "sentiment_score": tech.get("sentiment_score", 0) if tech else 0,
-                        }
-                        h_score, _ = _compute_composite_score(h_inputs)
+                    # Composite-score the holding with the SAME inputs candidates
+                    # get (price/ATR/volume now provided by _get_technicals).
+                    # Skip the comparison entirely if technicals are missing —
+                    # a zero-input score of ~20 vs real candidates at 60+ used
+                    # to generate ROTATE on every healthy holding.
+                    h_inputs = {
+                        "price": live_price if live_price > 0 else tech.get("price", 0),
+                        "rsi2": tech.get("rsi2", 50),
+                        "atr_pct": tech.get("atr_pct", 0),
+                        "sma50_buffer": tech.get("sma50_buffer", 0),
+                        "volume_ratio": tech.get("volume_ratio", 0),
+                        "ret_20d": tech.get("ret_20d", 0),
+                        "win_rate": tech.get("win_rate", 0),
+                        "avg_return": tech.get("avg_return", 0),
+                        "trades": tech.get("total_trades", 0),
+                        "zone_return": tech.get("zone_return", 0),
+                        "zone_win_rate": tech.get("zone_wr", 0),
+                        "zone_trades": tech.get("zone_trades", 0),
+                        # Holdings carry no analyst/sentiment data; leave the
+                        # same neutral defaults unvalidated candidates get.
+                        "analyst_consensus": "",
+                        "analyst_upside": 0,
+                        "sentiment_score": 0,
+                    }
+                    h_score, _ = _compute_composite_score(h_inputs)
                     _best_comp = _best.get("composite_score", 0) or 0
                     _gap = _best_comp - h_score
                     if _gap > ROTATION_SCORE_GAP:
@@ -1576,17 +1626,16 @@ async def get_portfolio():
             except Exception:
                 pass
 
-        # Exit strategy: per CLAUDE.md, MR=Hybrid21d, MOM=Fixed90d.
-        # MR positions exit on Hybrid21d trail-from-peak (after 7d minimum, once
-        # profit > 5%, trail -3% from peak; hard cap 21 trading days).
-        # MOM positions exit on Fixed90d timer.
+        # Exit strategy V3.2 (2026-06-02): MR/BOTH=Fixed30d, MOM=Fixed90d.
+        # Switched MR from Hybrid21d after 10yr paired backtest showed trailing-
+        # stop logic chops winners; fixed-hold compounds better (+0.7%/mo edge).
         pos_strategy = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
         if pos_strategy == "MOMENTUM":
             exit_strat_name = "Fixed90d"
             exit_target_days = 90
         else:
-            exit_strat_name = "Hybrid21d"
-            exit_target_days = 21
+            exit_strat_name = "Fixed30d"
+            exit_target_days = 30
 
         # Exit targets based on regime
         regime = tech.get("regime", "BULL") if tech else "BULL"
@@ -1617,20 +1666,12 @@ async def get_portfolio():
             regime=regime,
             tier="NONE" if (tech and tech.get("exit_triggered", False)) else (tech.get("tier", "NONE") if tech else "NONE"),
             # For MOMENTUM positions, use momentum backtest stats (not MR)
-            win_rate=(lambda: (
-                _cache.conn.execute("SELECT mom_wr FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
-            )[0] if pos_strategy == "MOMENTUM" else tech.get("win_rate", 0) if tech else 0)(),
-            bayesian_wr=(lambda: (
-                _cache.conn.execute("SELECT mom_wr FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
-            )[0] if pos_strategy == "MOMENTUM" else tech.get("bayesian_wr", tech.get("win_rate", 0)) if tech else 0)(),
+            win_rate=_mom_stat(ticker, "mom_wr") if pos_strategy == "MOMENTUM" else (tech.get("win_rate", 0) if tech else 0),
+            bayesian_wr=_mom_stat(ticker, "mom_wr") if pos_strategy == "MOMENTUM" else (tech.get("bayesian_wr", tech.get("win_rate", 0)) if tech else 0),
             wilson_lower=tech.get("wilson_lower", 0) if tech else 0,
             trades_per_year=tech.get("trades_per_year", 0) if tech else 0,
-            total_trades=(lambda: (
-                _cache.conn.execute("SELECT mom_trades FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
-            )[0] if pos_strategy == "MOMENTUM" else tech.get("total_trades", 0) if tech else 0)(),
-            avg_return=(lambda: (
-                _cache.conn.execute("SELECT mom_avg_return FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone() or (0,)
-            )[0] if pos_strategy == "MOMENTUM" else tech.get("avg_return", 0) if tech else 0)(),
+            total_trades=_mom_stat(ticker, "mom_trades") if pos_strategy == "MOMENTUM" else (tech.get("total_trades", 0) if tech else 0),
+            avg_return=_mom_stat(ticker, "mom_avg_return") if pos_strategy == "MOMENTUM" else (tech.get("avg_return", 0) if tech else 0),
             zone_return=tech.get("zone_return", 0) if tech else 0,
             zone_wr=tech.get("zone_wr", 0) if tech else 0,
             zone_trades=tech.get("zone_trades", 0) if tech else 0,
@@ -1690,6 +1731,17 @@ async def get_portfolio():
             fh_prev = quote.get("prev_close", 0)
             if fh_prev > 0:
                 detail.day_change_pct = round(((quote["price"] - fh_prev) / fh_prev) * 100, 2)
+
+        # Upcoming events — next scheduled earnings + any biotech catalyst ahead.
+        _ne = next_earnings_map.get(ticker)
+        if _ne and _ne.get("date"):
+            detail.next_earnings_date = _ne["date"]
+            detail.days_to_earnings = _ne.get("days_to")
+        _cat_hit = catalyst_map.get(ticker)
+        if _cat_hit:
+            detail.next_catalyst = _cat_hit.get("title", "")
+            detail.next_catalyst_date = _cat_hit.get("date", "")
+            detail.next_catalyst_type = _cat_hit.get("catalyst_type", "other")
 
         details.append(detail)
 
@@ -1837,9 +1889,10 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
     # Backtest (30-day forward, V2.6: RSI<10, fee-adjusted)
     # Note: ILS Yahoo data has no Open column — use closes as entry proxy
     _FEE_PCT = 0.30
+    _HOLD = 30  # match live Fixed30d exit
     last_exit_day = -1
     trades = []
-    for i in range(50, len(closes) - 62):
+    for i in range(50, len(closes) - _HOLD - 2):
         if i <= last_exit_day:
             continue
         hist = closes[:i + 1]
@@ -1847,10 +1900,10 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
         h_sma = _entry.calc_sma(hist, 50)
         if h_rsi < 10 and hist[-1] > h_sma:
             entry_px = closes[i]  # ILS data has no opens — use close as proxy
-            exit_px = closes[i + 1 + 60]
+            exit_px = closes[i + 1 + _HOLD]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0, "rsi": h_rsi})
-            last_exit_day = i + 46
+            last_exit_day = i + 1 + _HOLD
 
     wr = sum(1 for t in trades if t["win"]) / len(trades) * 100 if trades else 0
     avg_ret = sum(t["return"] for t in trades) / len(trades) if trades else 0
@@ -1862,13 +1915,13 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
     zone_ret = sum(t["return"] for t in zt) / len(zt) if zt else 0
     zone_wr = sum(1 for t in zt if t["win"]) / len(zt) * 100 if zt else 0
 
-    # Exit zone analysis (all RSI values, fee-adjusted, V2.6: 30-day hold)
+    # Exit zone analysis (all RSI values, fee-adjusted, Fixed30d hold)
     exit_zt = []
-    for i in range(50, len(closes) - 62):
+    for i in range(50, len(closes) - _HOLD - 2):
         hist = closes[:i + 1]
         h_rsi = _entry.calc_rsi(hist, 2)
         if zone_lo <= h_rsi < zone_hi:
-            ret = ((closes[i + 1 + 60] - closes[i]) / closes[i]) * 100 - _FEE_PCT
+            ret = ((closes[i + 1 + _HOLD] - closes[i]) / closes[i]) * 100 - _FEE_PCT
             exit_zt.append({"return": ret, "win": ret > 0})
     exit_zone_ret = sum(t["return"] for t in exit_zt) / len(exit_zt) if exit_zt else 0
     exit_zone_wr = sum(1 for t in exit_zt if t["win"]) / len(exit_zt) * 100 if exit_zt else 0
@@ -2129,6 +2182,27 @@ async def get_opportunities():
         result["market_regime"] = _check_market_regime()
         opps = result.get("opportunities", [])
 
+        # Staleness guard — bars older than last trading-day close OR scan file
+        # from a prior day → kick off a background refresh (Tiingo bars →
+        # precompute → scanner). Non-blocking: this request still returns
+        # immediately with live overlays on the existing candidate list. The
+        # next poll will pick up the freshly written scan_YYYY-MM-DD.json.
+        freshness = result.get("data_freshness") or {}
+        latest_close = freshness.get("latest_close") or ""
+        bars_stale = _cache_is_stale(latest_close, max_trading_days=1) if latest_close else True
+        scan_file_old = (
+            _scan_cache_time is not None
+            and _scan_cache_time.date() < datetime.now().date()
+        )
+        result["cache_stale"] = bool(bars_stale or scan_file_old)
+        result["refreshing"] = _auto_refresh_running or _scan_running
+        if result["cache_stale"] and not _auto_refresh_running:
+            print(f"[Scan] cache_stale (bars_stale={bars_stale}, "
+                  f"scan_file_old={scan_file_old}, latest_close={latest_close}) "
+                  f"→ kicking off auto-refresh")
+            asyncio.create_task(_auto_refresh_stale_cache())
+            result["refreshing"] = True
+
         # Fetch live quotes for EVERY visible opportunity via Tiingo IEX batch.
         # _fetch_tiingo_iex_batch chunks into 100-ticker batches automatically,
         # so 200+ tickers is 2-3 HTTP calls (~200ms total). Force-refresh — don't
@@ -2171,6 +2245,12 @@ async def get_opportunities():
                     opp["quality_tier"] = _quality_tier(49)
                     opp["ranking_factors"] = (opp.get("ranking_factors") or "") + " EXPIRED:CAP49"
                 opp["meets_strict"] = _meets_strict_criteria(opp)
+
+        # Regime gate enforcement — these are all MR signals (deep scanner), so
+        # both pause_entries (DANGER/CRISIS) and pause_mr (WEAK) veto them.
+        # Self-correcting: the regime-gate veto is re-applied or cleared on every
+        # request, and never touches vetoes set by the scanner itself.
+        _apply_regime_gate(opps, result["market_regime"], mr_only=False)
         return result
 
     # No cache — trigger scan in subprocess (non-blocking)
@@ -2184,7 +2264,39 @@ async def get_opportunities():
         "opportunities": [], "holdings_scores": [],
         "worst_holding": "", "worst_score": 0,
         "last_scan": "", "scanning": True,
+        "cache_stale": True, "refreshing": True,
+        "market_regime": _check_market_regime(),
     }
+
+
+_REGIME_VETO_PREFIX = "Regime gate: "
+
+
+def _apply_regime_gate(opps: list, regime: dict, mr_only: bool) -> None:
+    """Enforce the regime pause flags on a signal list (mutates in place).
+
+    pause_entries (DANGER/CRISIS) vetoes everything; pause_mr (WEAK) vetoes
+    only MEAN_REVERSION (momentum and BOTH still qualify via the momentum leg).
+    Regime vetoes are tagged with _REGIME_VETO_PREFIX so they can be cleared
+    when the regime recovers, without un-vetoing scanner-set vetoes.
+    """
+    pause_all = bool(regime.get("pause_entries"))
+    pause_mr = bool(regime.get("pause_mr"))
+    for opp in opps:
+        strat = opp.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
+        if pause_all:
+            paused = True
+        elif pause_mr:
+            paused = (strat == "MEAN_REVERSION") if mr_only else True
+        else:
+            paused = False
+        already_regime_veto = str(opp.get("veto_reason", "")).startswith(_REGIME_VETO_PREFIX)
+        if paused and not opp.get("vetoed", False):
+            opp["vetoed"] = True
+            opp["veto_reason"] = _REGIME_VETO_PREFIX + str(regime.get("reason", "entries paused"))
+        elif not paused and opp.get("vetoed", False) and already_regime_veto:
+            opp["vetoed"] = False
+            opp["veto_reason"] = ""
 
 
 def _check_market_regime() -> dict:
@@ -2289,19 +2401,30 @@ def _check_market_regime() -> dict:
         # Key finding: the DANGER ZONE is -10% to -15% drawdown (26% WR, -6.17% avg).
         # Deep bears (-20%+) actually bounce well (67% WR, +7.34%).
         # SPY near SMA200 (0% to -2% gap) is worst for MR (37% WR, -3.83%).
+        if spy_price <= 0:
+            # No SPY data — all gap/drawdown inputs are 0 and the chain below
+            # would land in HEALTHY, silently disabling the safety gate.
+            # Stay UNKNOWN at reduced size instead.
+            result["position_size_pct"] = 50
+            result["reason"] = "No SPY data — regime unknown, half size"
+            return result
         drawdown = result.get("drawdown_pct", 0)
         sma200_gap = result.get("sma200_gap_pct", 0)
         sma50_gap = result.get("sma50_gap_pct", 0)
         spy_ret = result.get("spy_5d_return", 0)
 
-        # 1. DANGER ZONE: Drawdown -10% to -15% — WORST for MR (26% WR, -6.17%)
-        #    Also: SPY 0% to -2% below SMA200 is deadly (37% WR, -3.83%)
-        if -15 <= drawdown < -10:
+        # 1. DANGER ZONE: Drawdown -7% to -15% — extended per V3.3 35K-trade backtest.
+        #    Previously -10% to -15%. Widened on 2026-06-12 after dual-bucket
+        #    backtest showed CORRECTION regime (-7% to -15% drawdown) returns
+        #    +0.22% avg and 49% WR — below the 55% threshold required for entry.
+        #    Walk-forward validation (train pre-2022, test 2022+): A-skip-CORRECTION
+        #    returned +2.10%/trade vs +1.18% (always A), 78% bigger cumulative.
+        if -15 <= drawdown <= -7:
             result["regime"] = "DANGER"
             result["pause_entries"] = True
             result["position_size_pct"] = 0
-            result["reason"] = (f"DANGER ZONE — SPY {drawdown:+.1f}% from peak. "
-                                f"Backtest: 26% WR, -6.17% avg in this zone. PAUSE entries.")
+            result["reason"] = (f"DANGER — SPY {drawdown:+.1f}% from peak. "
+                                f"Backtest: 49% WR, +0.22% avg in this zone (-7% to -15%). PAUSE entries.")
 
         # 2. CRISIS: VIX >40
         elif vix > 40:
@@ -2353,13 +2476,25 @@ def _check_market_regime() -> dict:
             result["reason"] = (f"SPY below SMA50 ({sma50_gap:+.1f}%). "
                                 f"Backtest: 56% WR, +3.53% avg. FULL SIZE.")
 
-        # 8. DIP BUY SWEET SPOT: -3% to -10% drawdown (60% WR, +4.09%)
-        elif drawdown < -3:
+        # 8. DIP BUY: -7% to -3% drawdown — narrowed on 2026-06-12.
+        #    Previously -3% to -10%; -7% to -10% moved to DANGER per V3.3 backtest.
+        #    Remaining -3% to -7% range: still positive expectancy (60% WR, +4.09%).
+        elif drawdown <= -3:
             result["regime"] = "DIP_BUY"
             result["pause_entries"] = False
             result["position_size_pct"] = 100
             result["reason"] = (f"Dip buy zone — SPY {drawdown:+.1f}% from peak. "
                                 f"Backtest: 60% WR, +4.09% avg. FULL SIZE.")
+
+        # 8b. SHARP_DROP: 5d return < -2% but drawdown not yet in pause range.
+        #    Per V3.3 35K-trade backtest: Bucket A in SHARP_DROP returns +2.27% avg,
+        #    57% WR — positive expectancy. Reduce size for variance management.
+        elif spy_ret < -2:
+            result["regime"] = "SHARP_DROP"
+            result["pause_entries"] = False
+            result["position_size_pct"] = 70
+            result["reason"] = (f"SHARP_DROP — SPY {spy_ret:+.1f}% over 5d. "
+                                f"Backtest: 57% WR, +2.27% avg. 70% size for risk mgmt.")
 
         # 9. FEAR: VIX elevated but structure OK
         elif vix > 30:
@@ -2530,99 +2665,84 @@ async def _full_refresh_pipeline():
 async def get_best_replacement(sell_ticker: str):
     """Find the best validated replacement for a stock we want to sell.
 
-    Architecture:
-    1. Load pre-ranked backtested candidates from cache (instant)
-    2. Pick top N that beat the stock being sold
-    3. Run full validation (analyst + sentiment + earnings) ONLY on those
-    4. Return the best validated replacement
+    V3.3 SSOT: reads from the SAME entries source as /scan/combined
+    (strategy_evaluator's entries_YYYY-MM-DD.json). No more dual-pipeline
+    rotation that could disagree with the Entries tab.
+
+    Logic:
+      1. Load today's entries cache (already passes V3.3 gates: trades>=10/15,
+         WR>=55%, not vetoed, earnings>7d, analyst not Hold/Sell, etc.)
+      2. Filter to non-vetoed entries that aren't already held
+      3. Score each candidate via _ev_score on the SAME numbers shown in UI
+      4. Pick the best replacement that beats the selling stock's EV
     """
     sell_ticker = sell_ticker.upper()
 
-    # Get the score of the stock we're selling
+    # Get the EV of the stock we're selling (matches Entries tab math)
     holdings_scores, _, _ = _get_holdings_scores()
     sell_score = holdings_scores.get(sell_ticker, {}).get("score", 0)
     if sell_score == 0:
-        # Not a current holding — just use 0 as baseline
         bt = _backtest_mr(sell_ticker)
         sell_score = _ev_score(bt.get("avg_return", 0), bt.get("win_rate", 0), bt.get("total_trades", 0))
 
-    # Load all backtested candidates from today's scan cache
-    today = datetime.now().strftime('%Y-%m-%d')
-    cache_path = os.path.join(os.path.dirname(__file__), "data", f"scan_{today}.json")
-    if not os.path.exists(cache_path):
-        raise HTTPException(404, "No scan data for today. Run /scan/refresh first.")
+    # Load TODAY's entries cache — the same file /scan/combined serves from.
+    # This is the SSOT for entries; rotation must use the same dataset.
+    from strategy_evaluator import load_cache
+    cached = load_cache()
+    if not cached:
+        raise HTTPException(404, "No entries cache for today. Run /scan/refresh-all first.")
 
-    with open(cache_path) as f:
-        all_candidates = json.load(f)
-
-    # Filter: price >= $20, not held, score beats the selling stock
+    # Filter: non-vetoed, not already held, price >= MIN_PRICE.
+    # The strategy_evaluator cache already enforces V3.3 gates (trades>=10/15,
+    # WR>=55%, ret>=3%/2%, signal not expired). All listed candidates are
+    # validated entries; we just need to find the best EV improvement.
     candidates = []
-    for r in all_candidates:
-        price = r.get("price", 0)
+    for r in cached:
+        if r.get("vetoed"): continue
         ticker = r.get("ticker", "")
-        if price < MIN_PRICE or ticker in holdings_scores or r.get("vetoed"):
-            continue
-        score = _ev_score(r.get("avg_return", 0), r.get("win_rate", 0), r.get("trades", 0))
-        if score > sell_score:
-            r["_score"] = score
+        price = r.get("price", 0)
+        if price < MIN_PRICE or ticker in holdings_scores: continue
+        # EV calculation identical to the entries-tab sort key
+        ev = _ev_score(r.get("expected_return", 0), r.get("confidence", 0), r.get("trades", 0))
+        if ev > sell_score:
+            r["_ev"] = ev
             candidates.append(r)
 
-    # Sort by zone_return (best replacement first)
-    candidates.sort(key=lambda x: x.get("zone_return", 0), reverse=True)
-    top_n = candidates[:10]  # Validate top 10
+    # Sort by EV (best replacement first) — same sort as the Entries tab
+    candidates.sort(key=lambda x: x.get("_ev", 0), reverse=True)
+    top_n = candidates[:10]
 
     if not top_n:
-        return {"replacement": None, "message": f"No stock beats {sell_ticker} (score={sell_score:.2f})"}
+        return {"replacement": None, "message": f"No entries beat {sell_ticker} (EV={sell_score:.2f})"}
 
-    # Run full validation on these candidates
-    from deep_scanner import DeepScanner, ScanResult as SR
-    from dataclasses import asdict, fields as dc_fields
-    scanner = DeepScanner()
-
-    # Convert cache dicts back to ScanResult dataclasses for phase3_validate
-    scan_results = []
-    for r in top_n:
-        kwargs = {}
-        for f in dc_fields(SR):
-            if f.name in r:
-                kwargs[f.name] = r[f.name]
-        scan_results.append(SR(**kwargs))
-
-    validated = await scanner.phase3_validate(scan_results, top_n=len(scan_results))
-
-    # Find best non-vetoed result
-    best = None
-    for r in validated:
-        rd = asdict(r)
-        if rd.get("vetoed"):
-            continue
-        if not rd.get("analyst_consensus") and not rd.get("sentiment_label"):
-            continue  # Validation failed (no data)
-        opp = _dict_to_opportunity(rd, holdings_scores)
-        if opp.vetoed:
-            continue
-        if best is None or opp.score > best.score:
-            best = opp
-
-    if best:
-        # Fetch live price
-        live = _price_cache.get(best.ticker)
-        if live and live.get("price", 0) > 0:
-            best.price = round(live["price"], 2)
-        return {
-            "replacement": best.model_dump(),
-            "sell_ticker": sell_ticker,
-            "sell_score": round(sell_score, 2),
-            "candidates_checked": len(top_n),
-            "message": f"Best replacement for {sell_ticker}: {best.ticker} (score={best.score:.2f} vs {sell_score:.2f})"
-        }
-    else:
-        return {
-            "replacement": None,
-            "sell_ticker": sell_ticker,
-            "candidates_checked": len(top_n),
-            "message": f"All {len(top_n)} candidates were vetoed (earnings/sentiment/analyst)"
-        }
+    # Pick the top candidate. It's already passed all V3.3 gates including
+    # earnings/analyst/sentiment vetoes from validate_top_signals.
+    best = top_n[0]
+    # Live price overlay
+    live = _price_cache.get(best["ticker"])
+    if live and live.get("price", 0) > 0:
+        best["price"] = round(live["price"], 2)
+    return {
+        "replacement": {
+            "ticker": best["ticker"],
+            "price": best["price"],
+            "strategy": best.get("strategy"),
+            "strategy_label": best.get("strategy_label"),
+            "score": round(best.get("_ev", 0), 2),  # EV — matches Entries tab
+            "expected_return": best.get("expected_return"),
+            "confidence": best.get("confidence"),
+            "trades": best.get("trades"),
+            "rsi2": best.get("rsi2"),
+            "atr_pct": best.get("atr_pct"),
+            "sma50_buffer": best.get("sma50_buffer"),
+            "analyst_consensus": best.get("analyst_consensus", ""),
+            "sentiment_label": best.get("sentiment_label", ""),
+        },
+        "sell_ticker": sell_ticker,
+        "sell_score": round(sell_score, 2),
+        "candidates_checked": len(top_n),
+        "message": f"Best replacement for {sell_ticker}: {best['ticker']} (EV={best['_ev']:.2f} vs {sell_score:.2f})"
+    }
 
 
 def _backtest_mr(ticker: str) -> dict:
@@ -2639,20 +2759,21 @@ def _backtest_mr(ticker: str) -> dict:
         return {}
 
     _FEE_PCT = 0.30
+    _HOLD = 30  # match live Fixed30d exit
     opens = df["Open"].tolist() if "Open" in df.columns else closes
     rsi_arr = _rsi2_array(closes)
     sma_arr = _sma_array(closes, 50)
     last_exit_day = -1
     trades = []
-    for i in range(50, len(closes) - 62):
+    for i in range(50, len(closes) - _HOLD - 2):
         if i <= last_exit_day:
             continue
         if rsi_arr[i] < 10 and closes[i] > sma_arr[i]:
             entry_px = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-            exit_px = closes[i + 1 + 60]
+            exit_px = closes[i + 1 + _HOLD]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0})
-            last_exit_day = i + 46
+            last_exit_day = i + 1 + _HOLD
 
     if len(trades) < 10:
         return {}
@@ -2754,20 +2875,25 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
     """Compute 0-100 composite ranking score from multiple factors.
     Returns (score, factors_str) for display.
 
-    2026-04-24 audit — reweighted based on walk-forward validation:
-    Per-stock prior WR does NOT persist out-of-sample (r=-0.033 with future
-    return across 25,720 signals). EV/WR-tier carried 55/100 pts; that's been
-    cut to 10/5. ATR is the only factor with consistent out-of-sample edge
-    (MR +2.83% / MOM +5.00% avg return gap between ATR>=5 and ATR<5).
+    2026-05-18 audit — 376-signal walk-forward across 4 anchors confirmed:
+    EV (Spearman ρ=-0.009, inverted in 3/4 anchors) and WR-tier (bucket Pearson
+    r=-0.310) are anti-predictive. Both were dropped from the points contribution
+    (computations retained for the factors string only). Volume reshaped from
+    linear ramp to U-shape after backtest showed vol<0.5 delivers +11.58% / 57%
+    WR (highest return) and vol 1.0-1.5 delivers +7.7% / 71% WR (best WR), while
+    the "uncommitted" middle (0.5-1.0) underperforms.
 
-    Weights (new):
-      - ATR% (45pts)  — validated in every era and strategy
-      - Analyst (15pts) — +1.19% edge, external signal
-      - Sentiment (10pts) — informational
-      - Volume (10pts), Price (10pts) — point-in-time liquidity
-      - EV (10pts)   — shrunk toward universe prior, ranking tiebreaker
-      - WR tier (5pts) — small nudge only; not a gate
+    Active weights:
+      - ATR% (15-40pts)    — RECAL 2026-06-02: peak 8-10% (was 5-8%), -5 cap >15%
+      - Analyst (15pts)    — +1.19% edge on 95K signals
+      - BOTH bonus (0-12)  — NEW 2026-06-02: ret_20d>5% + atr>=4 (10yr +4.14%/trd)
+      - Sentiment (10pts)  — informational
+      - Volume (0-10pts U-shape) — extremes reward, middle penalized
+      - Price (10pts)      — sweet spot $10-25
       - RSI depth (3pts), SMA buffer (2pts) — minor
+      - EV (0pts), WR-tier (0pts) — dropped 2026-05-18 audit
+
+    Caps: only the absolute floor remains — lost money on 10+ trades caps at 49.
     """
     pts = 0.0
     factors = []
@@ -2786,50 +2912,55 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
     sentiment_score = r.get("sentiment_score", 0)
     price = r.get("price", 0)
 
-    # 1. EV (10 pts) — kept small for tiebreaking on stocks with real history.
-    # Walk-forward found prior WR × prior return has near-zero correlation with
-    # future return (r=-0.033). So this is informational, not load-bearing.
+    # 1. EV (0 pts — informational only). Walk-forward audit 2026-05-18 on
+    # 376 historical signals across 4 anchors showed EV is anti-predictive:
+    # Spearman ρ=-0.009 overall, top-EV quartile UNDERPERFORMED bottom-EV
+    # quartile in 3 of 4 anchors. Kept the computation for the factors string
+    # so debugging output is unchanged; dropped the pts contribution.
     if zone_trades >= 3 and zone_wr > 0:
         ev = _ev_score(zone_ret, zone_wr, zone_trades)
     else:
         ev = _ev_score(r.get("avg_return", 0), wr, total_trades)
-    ev_pts = min(10, max(0, ev * 1.25))  # 8% shrunk EV saturates at 10 pts
-    pts += ev_pts
     factors.append(f"EV:{ev:.1f}")
 
-    # 2. WR tier (5 pts) — small nudge; not a gate. Historical WR doesn't
-    # persist, but very high WR (70%+) across many trades still reflects a
-    # quality-of-business signal, so tiny weight retained.
+    # 2. WR tier (0 pts — informational only). Same 2026-05-18 audit: bucket
+    # Pearson r=-0.310 with future return at decile level (counter-predictive).
+    # Computation retained for the UNVALIDATED:CAP49 logic below (which still
+    # uses eff_wr) and factors string.
     if zone_trades >= 5 and zone_wr > 0:
         eff_wr = _bayesian_wr(int(round(zone_wr * zone_trades / 100)), zone_trades)
     elif total_trades >= 5 and wr > 0:
         eff_wr = _bayesian_wr(int(round(wr * total_trades / 100)), total_trades)
     else:
         eff_wr = 0
-    if eff_wr >= 70:
-        wr_pts = 5
-    elif eff_wr >= 65:
-        wr_pts = 3
-    elif eff_wr >= 60:
-        wr_pts = 1
-    else:
-        wr_pts = 0
-    pts += wr_pts
     factors.append(f"WR:{eff_wr:.0f}")
 
-    # 3. ATR% volatility (40 pts max) — #1 predictor, validated in every backtest
-    # slice. 10yr walk-forward: ATR>=5 returns +4.60% avg MR / +7.13% MOM,
-    # ATR<5 returns +1.77% / +2.13%. 2016-2020 MOM ATR>=5 was +21.48% / 78% WR.
-    if atr_pct >= 8:
-        atr_pts = 30  # very high vol — real edge but wider swings
+    # 3. ATR% volatility (max 40 pts) — RECALIBRATED 2026-06-02 from 10-year
+    # OOS backtest (9,919 signals, 39 quarterly anchors). True sweet spot is
+    # 8-10% (not 5-8% as previously claimed):
+    #   ATR [3,4): MR +1.90%/mo (n=1047)
+    #   ATR [5,6): MR +2.11%/mo (n=237)
+    #   ATR [7,8): MR +2.34%/mo (n= 62)
+    #   ATR [8,10): MR +5.78%/mo (n= 65) ★ peak
+    #   ATR [10,15): MR +3.46%/mo (n= 65)  good
+    #   ATR [15+):  MR -13.04%/mo (n= 17) ★ catastrophic — cap to negative
+    # BOTH cohort even more skewed: [8,10) +10.95%/mo, [10,15) +33.38%/mo.
+    if atr_pct >= 15:
+        atr_pts = -5    # extreme — historical losers, push out of top
+    elif atr_pct >= 10:
+        atr_pts = 35    # still strong (especially BOTH)
+    elif atr_pct >= 8:
+        atr_pts = 40    # ★ peak sweet spot
+    elif atr_pct >= 6:
+        atr_pts = 35    # near-peak
     elif atr_pct >= 5:
-        atr_pts = 40  # sweet spot, max points
+        atr_pts = 30    # decent (was 40 — recalibrated down)
     elif atr_pct >= 4:
-        atr_pts = 25  # good
+        atr_pts = 20    # ok (was 25 — data shows [4,5) WORSE than [3,4))
     elif atr_pct >= 3:
-        atr_pts = 15  # minimum acceptable
+        atr_pts = 15    # minimum acceptable
     else:
-        atr_pts = max(0, atr_pct * 4)  # <3%: weak
+        atr_pts = max(0, atr_pct * 4)
     pts += atr_pts
     factors.append(f"ATR:{atr_pct:.1f}")
 
@@ -2842,6 +2973,28 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
     buf_pts = 2 if sma50_buffer >= 5 else (1 if sma50_buffer >= 0 else 0)
     pts += buf_pts
     factors.append(f"BUF:{sma50_buffer:.0f}")
+
+    # 5b. BOTH-strategy bonus (0-12 pts) — NEW 2026-06-02. The 10-year backtest
+    # showed stocks qualifying for BOTH mean-reversion AND momentum entry
+    # produce +4.14%/trade @ 30d vs MR's +2.62% and MOM's +1.60%. Top-25%-ATR
+    # BOTH cohort produced +9.08%/mo (the strongest single-cohort return found).
+    # Proxy for BOTH detection from /scan/opportunities (no strategy field):
+    #   In MR scanner already → MR side qualified
+    #   ret_20d > 5% AND atr_pct >= 4% → momentum side likely qualified
+    # +8 pts for standard BOTH, +12 for strong BOTH (ret>10% + atr>=5%).
+    ret_20d = r.get("ret20", 0) or r.get("ret_20d", 0)
+    # Gate BOTH bonus on ATR sanity — catastrophic vol (>15%) already disqualifies
+    if atr_pct >= 15:
+        both_pts = 0  # don't reward "BOTH" when the vol is too extreme to trade
+    elif ret_20d > 10 and atr_pct >= 5:
+        both_pts = 12
+        factors.append(f"BOTH+:{ret_20d:.0f}/{atr_pct:.0f}:+12")
+    elif ret_20d > 5 and atr_pct >= 4:
+        both_pts = 8
+        factors.append(f"BOTH:{ret_20d:.0f}/{atr_pct:.0f}:+8")
+    else:
+        both_pts = 0
+    pts += both_pts
 
     # 6. Analyst consensus + upside (15 pts) — backtest: +1.19% edge on 95K
     # signals, genuinely external signal that isn't captured by price history.
@@ -2866,8 +3019,22 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
         s_pts = -10
     pts += s_pts
 
-    # 8. Volume ratio (10 pts) — backtested: vol>=1.0x = +6.88% avg
-    v_pts = 10 if vol_ratio >= 1.5 else (7 if vol_ratio >= 1.0 else 0)
+    # 8. Volume ratio (0-10 pts) — RESHAPED 2026-05-18 audit. Old linear ramp
+    # gave +10/+7 for vol>=1.5 / >=1.0 and 0 otherwise based on a +6.88% claim
+    # that doesn't reproduce. Actual 21d realized returns by bucket:
+    #   vol<0.5: +11.58% / 57% WR    (quiet accumulation — best return)
+    #   0.5-1.0: +5.4%  / 62% WR    (uncommitted — penalize)
+    #   1.0-1.5: +7.7%  / 71% WR    (confirmation — best WR + good return)
+    #   1.5+:    +5.4%  / 66% WR    (over-extended — neutral)
+    # New U-shape: reward extremes (accumulation or confirmation), penalize middle.
+    if vol_ratio < 0.5:
+        v_pts = 8   # quiet accumulation
+    elif vol_ratio < 1.0:
+        v_pts = 0   # uncommitted
+    elif vol_ratio < 1.5:
+        v_pts = 10  # active confirmation
+    else:
+        v_pts = 5   # over-extended but still ok
     pts += v_pts
 
     # 9. Price factor (10 pts) — backtested: $10-25 = +8.83%, $200+ = +0.20%
@@ -2914,31 +3081,18 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
         composite = 50
         factors.append("VOL<1x:CAP50")
 
-    # Validated-stats cap — NARROWED 2026-05-13 after audit on 8 holdings showed
-    # the prior cap (WR<55% OR avg<=0) was inverting our biggest winners. IREN
-    # (97.6→49) and AMSC (100→49) had prior WR ~50% but ATR≥7.5%, Strong Buy/Buy
-    # analyst, positive sentiment, vol≥1.1× — all the operational signals were
-    # green. The cap penalized them on a stat the April 2026 audit already
-    # proved doesn't predict forward returns (r=-0.033). Both went on to +16%
-    # and +32%, while uncapped low-WR + high-ATR stocks like CLS scored 100
-    # and lost money.
-    #
-    # New rule: only cap when MULTIPLE conviction signals fail together:
-    #   prior WR < 55%  AND  ATR < 5%  AND  analyst not in {Buy, Strong Buy,
-    #   Outperform, Overweight}  → CAP49
-    # Plus the absolute floor: avg_return <= 0 with >=10 trades still caps
-    # (a stock that LOST money historically on 10+ samples shouldn't be top
-    # of the entries list regardless of other factors).
+    # Floor cap only — keep the absolute "lost money on 10+ trades" guard.
+    # 2026-05-18 audit dropped the broader UNVALIDATED:CAP49 rule (which capped
+    # weak_combo = prior_WR<55 + ATR<5 + analyst not supportive). Walk-forward
+    # showed the strict-pass proxy (WR≥65 + trades≥10 + avg≥3 + ATR≥3) actually
+    # UNDERPERFORMS non-strict by -0.80% at 21d / -2.09% at 14d, so capping
+    # non-strict signals was the wrong direction. Only the unambiguous "lost
+    # money historically on 10+ samples" floor remains.
     val_trades = max(zone_trades, total_trades)
-    val_wr = zone_wr if zone_trades >= 5 and zone_wr > 0 else wr
     val_ret = zone_ret if zone_trades >= 5 else r.get("avg_return", 0)
-    if val_trades >= 10:
-        analyst_supportive = analyst_cons in ("Buy", "Strong Buy", "Outperform", "Overweight")
-        weak_combo = (val_wr < 55 and atr_pct < 5 and not analyst_supportive)
-        clearly_losing = val_ret <= 0
-        if (weak_combo or clearly_losing) and composite >= 50:
-            composite = 49
-            factors.append("UNVALIDATED:CAP49")
+    if val_trades >= 10 and val_ret <= 0 and composite >= 50:
+        composite = 49
+        factors.append("LOSING:CAP49")
     return round(composite, 1), " ".join(factors)
 
 
@@ -2957,7 +3111,12 @@ def _quality_tier(score: float) -> str:
 
 
 def _meets_strict_criteria(r: dict) -> bool:
-    """Check if stock passes ALL original strict ATLAS V2.5 entry criteria."""
+    """Check if stock passes ALL original strict ATLAS V2.5 entry criteria.
+    Bug 5 fix (2026-06-03): vetoed stocks NEVER meet strict criteria, regardless
+    of underlying metrics. Previously APP could be vetoed=True + meets_strict=True
+    simultaneously which was misleading."""
+    if r.get("vetoed"):
+        return False
     rsi2 = r.get("rsi2", 99)
     atr_pct = r.get("atr_pct", 0)
     sma50_buffer = r.get("sma50_buffer", 0)
@@ -3380,11 +3539,45 @@ def _calc_trade_fee(ticker: str) -> float:
 
 @router.post("/positions/buy", response_model=TradeResult)
 async def buy_position(req: BuyRequest):
-    """Record a buy and create position + transaction."""
+    """Record a buy and create position + transaction.
+
+    V3.3 (2026-06-12): If the buy is being made in a regime where pause_entries
+    is set (DANGER zone -7% to -15% drawdown, CRISIS, etc.) the trade is
+    allowed (user agency) but a `regime_warning` is attached to the response so
+    the UI can flag it. Walk-forward backtest showed skipping DANGER trades
+    improves per-trade return from +1.18% to +2.10%.
+    """
     ticker = req.ticker.upper()
     total = req.price * req.shares
     fee = _calc_trade_fee(ticker)
     currency = "ILS" if ticker.endswith(".TA") else "USD"
+
+    # Regime gate — informational warning if buying in a pause zone.
+    regime = _check_market_regime()
+    regime_warning = None
+    if regime.get("pause_entries"):
+        regime_warning = (
+            f"⚠ Regime {regime.get('regime')}: entries are statistically paused. "
+            f"{regime.get('reason','')} Trade allowed but backtest discourages it."
+        )
+    elif regime.get("position_size_pct", 100) < 100:
+        # Soft size warning — check if this position exceeds the suggested cap
+        try:
+            positions = _position_mgr._get_open_positions_sync()
+            current_value = sum(
+                (p.get("entry_price", 0) * p.get("shares", 0)) for p in positions
+            ) if positions else 0
+            # Approximate portfolio total (positions + this new buy as proxy)
+            portfolio_estimate = current_value + total
+            if portfolio_estimate > 0:
+                max_per_position = portfolio_estimate * 0.12 * regime["position_size_pct"] / 100
+                if total > max_per_position * 1.05:  # 5% tolerance
+                    regime_warning = (
+                        f"⚠ Position size ${total:.0f} exceeds regime-adjusted cap "
+                        f"${max_per_position:.0f} ({regime['position_size_pct']}% sizing in {regime.get('regime')})."
+                    )
+        except Exception:
+            pass
 
     # Add position
     result = _position_mgr._add_position_sync(
@@ -3431,9 +3624,12 @@ async def buy_position(req: BuyRequest):
         _scan_running = True
         asyncio.create_task(_background_scan())
 
+    message = f"Bought {req.shares} shares of {ticker} @ ${req.price:.2f}"
+    if regime_warning:
+        message = f"{message} | {regime_warning}"
     return TradeResult(
         success=True,
-        message=f"Bought {req.shares} shares of {ticker} @ ${req.price:.2f}",
+        message=message,
         transaction_id=tx.get("transaction_id"),
         ticker=ticker,
         shares=req.shares,
@@ -3695,20 +3891,20 @@ async def get_sectors():
         ytd_idx = next((i for i, d in enumerate(dates) if d >= '2026-01-02'), 0)
         ret_ytd = ((closes[-1] / closes[ytd_idx]) - 1) * 100 if ytd_idx > 0 and ytd_idx < len(closes) else 0
 
-        # MR backtest on the ETF itself
+        # MR backtest on the ETF itself (Fixed30d — matches live exit)
         rsi_arr = _rsi2_array(closes)
         sma_arr = _sma_array(closes, 50)
         trades = []
         le = -1
-        for i in range(50, len(closes) - 62):
+        for i in range(50, len(closes) - 32):
             if i <= le:
                 continue
             if rsi_arr[i] < 10 and closes[i] > sma_arr[i]:
                 ep = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-                if i + 1 + 60 < len(closes):
-                    ret = ((closes[i + 1 + 60] - ep) / ep) * 100 - 0.30
+                if i + 1 + 30 < len(closes):
+                    ret = ((closes[i + 1 + 30] - ep) / ep) * 100 - 0.30
                     trades.append(ret)
-                    le = i + 46
+                    le = i + 1 + 30
 
         mr_wr = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
         mr_avg = sum(trades) / len(trades) if trades else 0
@@ -4033,6 +4229,38 @@ async def get_data_status():
     # news endpoint costs us API calls we don't want to burn on every poll.
     earnings_status = await _portfolio_earnings_cached(holding_tickers)
 
+    # 6b. Portfolio biotech catalyst warnings — Tiingo News regex for clinical
+    # trial readouts, FDA decisions, PDUFA dates, NDA/BLA filings. Built after
+    # 2026-06-02 when we held CELC through a Phase 3 readout (-24.6%) that the
+    # earnings detector couldn't see. Same UI shape as earnings: upcoming
+    # (WARN) vs reported (INFO).
+    catalysts_status = await _portfolio_catalysts_cached(holding_tickers)
+
+    # 7. Backtest cache freshness — this is the WR/zone_return source for every
+    # ranking decision. We discovered on 2026-05-27 it can sit 9 days stale
+    # during quiet market periods (cache_refresh_loop skips precompute when
+    # `stale_tickers` is empty even after-close). Surface its age prominently
+    # so users see when ranking is operating on old data.
+    backtest_cache_age_hours = None
+    backtest_cache_last_computed = None
+    backtest_cache_rows = 0
+    try:
+        import sqlite3
+        _sc_db = os.path.join(os.path.dirname(__file__), "data", "stock_cache.db")
+        _bt_conn = sqlite3.connect(_sc_db)
+        _bt_cur = _bt_conn.cursor()
+        _bt_cur.execute("SELECT MAX(last_computed), COUNT(*) FROM backtest_cache")
+        _row = _bt_cur.fetchone()
+        _bt_conn.close()
+        if _row and _row[0]:
+            backtest_cache_last_computed = _row[0]
+            backtest_cache_rows = _row[1] or 0
+            # last_computed is YYYY-MM-DD; treat as midnight ET on that date
+            _last = datetime.fromisoformat(_row[0] + "T00:00:00")
+            backtest_cache_age_hours = round((datetime.now() - _last).total_seconds() / 3600, 1)
+    except Exception:
+        pass
+
     return {
         "timestamp": datetime.now().isoformat(),
         "today": today_str,
@@ -4053,14 +4281,47 @@ async def get_data_status():
         },
         "market_regime": regime,
         "scan_cache_age_min": round(scan_age_min, 1) if scan_age_min else None,
+        "backtest_cache": {
+            "last_computed": backtest_cache_last_computed,
+            "age_hours": backtest_cache_age_hours,
+            "rows": backtest_cache_rows,
+        },
         "system": _system_status,
         "portfolio_earnings": earnings_status,
+        "portfolio_catalysts": catalysts_status,
     }
 
 
 # Cache for portfolio earnings — 30 min TTL, keyed by sorted ticker tuple.
 _earnings_cache: Dict[tuple, tuple] = {}  # (tickers,) -> (result_dict, datetime)
+_catalysts_cache: Dict[tuple, tuple] = {}  # same shape, biotech catalyst hits
+_next_earnings_cache: Dict[tuple, tuple] = {}  # {ticker: {date, days_to}} per held set
 _EARNINGS_CACHE_TTL_SEC = 1800  # 30 min
+
+
+async def _portfolio_next_earnings_cached(tickers: list) -> dict:
+    """Forward-looking NEXT-earnings date per holding (Finnhub calendar), cached 30 min.
+
+    Powers the positions-table "Next Event" column — answers "when does this
+    stock next report?" even when the date is weeks out (the ±14d earnings
+    warning helper above can't see that far). Returns {ticker: {date, days_to}}.
+    """
+    if not tickers:
+        return {}
+    key = tuple(sorted(tickers))
+    cached = _next_earnings_cache.get(key)
+    if cached:
+        result, ts = cached
+        if (datetime.now() - ts).total_seconds() < _EARNINGS_CACHE_TTL_SEC:
+            return result
+    try:
+        from tiingo_earnings import next_earnings_batch
+        async with aiohttp.ClientSession() as ses:
+            result = await next_earnings_batch(ses, list(tickers), forward_days=80)
+    except Exception:
+        result = {}
+    _next_earnings_cache[key] = (result, datetime.now())
+    return result
 
 
 async def _portfolio_earnings_cached(tickers: list) -> dict:
@@ -4112,6 +4373,60 @@ async def _portfolio_earnings_cached(tickers: list) -> dict:
     except Exception as e:
         result = {"count": 0, "upcoming": [], "reported": [], "error": str(e)}
     _earnings_cache[key] = (result, datetime.now())
+    return result
+
+
+async def _portfolio_catalysts_cached(tickers: list) -> dict:
+    """Tiingo News biotech-catalyst check for portfolio holdings, cached 30 min.
+
+    Same shape as `_portfolio_earnings_cached` so the frontend can render both
+    pills identically:
+      - upcoming: scheduled trial readouts, conference calls, PDUFA dates ahead.
+        These should fire the EXIT trigger on held biotechs (binary risk ahead).
+      - reported: just-disclosed trial results or FDA decisions. Informational;
+        the binary event has already happened.
+
+    Built after the CELC -24.6% Phase 3 readout on 2026-06-02 and PRAX trial
+    setback on 2026-06-01 — both class events that our earnings detector
+    couldn't see. See `tiingo_biotech_catalyst.py` for the regex specifics.
+    """
+    if not tickers:
+        return {"count": 0, "upcoming": [], "reported": []}
+    key = tuple(sorted(tickers))
+    cached = _catalysts_cache.get(key)
+    if cached:
+        result, ts = cached
+        if (datetime.now() - ts).total_seconds() < _EARNINGS_CACHE_TTL_SEC:
+            return result
+    try:
+        from tiingo_biotech_catalyst import catalyst_window_batch
+        async with aiohttp.ClientSession() as ses:
+            hits = await catalyst_window_batch(ses, list(tickers), days=14)
+        upcoming = []
+        reported = []
+        for tk, h in sorted(hits.items()):
+            entry = {
+                "ticker": tk,
+                "kind": h.get("kind", ""),
+                "direction": h.get("direction", ""),
+                "age_hours": h.get("age_hours", 0),
+                "title": h.get("title", ""),
+                "url": h.get("url", ""),
+                "date": h.get("date", ""),
+                "catalyst_type": h.get("catalyst_type", "other"),
+            }
+            if entry["kind"] == "upcoming":
+                upcoming.append(entry)
+            else:
+                reported.append(entry)
+        result = {
+            "count": len(upcoming) + len(reported),
+            "upcoming": upcoming,
+            "reported": reported,
+        }
+    except Exception as e:
+        result = {"count": 0, "upcoming": [], "reported": [], "error": str(e)}
+    _catalysts_cache[key] = (result, datetime.now())
     return result
 
 
@@ -4267,6 +4582,11 @@ async def get_combined_opportunities():
                 }
 
     if cached:
+        # Regime gate enforcement (over the FULL cached list so a recovered
+        # regime can clear its own vetoes): DANGER/CRISIS pause everything,
+        # WEAK pauses MEAN_REVERSION only — momentum and BOTH still qualify.
+        _regime_now = _check_market_regime()
+        _apply_regime_gate(cached, _regime_now, mr_only=True)
         valid = [s for s in cached if not s.get("vetoed")]
 
         # Step 4: Fetch live prices via Tiingo IEX batch, then overlay + recompute technicals
@@ -4289,11 +4609,98 @@ async def get_combined_opportunities():
                 live_count += 1
         valid = [s for s in valid if not s.get("vetoed")]
 
+        # NOTE: tiingo_earnings.earnings_window_combined returns ANY news article
+        # mentioning the ticker — not actual earnings reports (verified 2026-06-03:
+        # AAPL flagged for WWDC article, APP for unrelated app news, etc — 94% FP).
+        # The earnings VETO must run at cache-write time via validate_top_signals
+        # which uses a different (stricter) check. The per-request re-check is
+        # too noisy. Bug 4 needs a different fix (real earnings calendar query).
+
+        # ═══ V3.2 SINGLE SOURCE OF TRUTH (2026-06-03) ═══
+        # Enrich every signal with composite_score / quality_tier / meets_strict /
+        # beats_holdings / is_upgrade — same fields that /scan/opportunities returns.
+        # Frontend Entries tab can now consume ONLY /scan/combined and get a fully
+        # ranked list. No more dual-endpoint merge, no scale-mixing bug.
+        try:
+            holdings_scores, worst_h, worst_s = _get_holdings_scores()
+        except Exception as _e:
+            holdings_scores = {}; worst_h = ""; worst_s = 0
+        for s in valid:
+            # Build the dict shape _compute_composite_score expects. Map the
+            # EntrySignal fields to the opp-style keys (avg_return ← expected_return,
+            # win_rate ← confidence). Zone fields are absent in /scan/combined,
+            # so the composite_score logic falls back to the per-stock backtest
+            # numbers (which is the right behavior).
+            score_input = {
+                "rsi2": s.get("rsi2", 0),
+                "atr_pct": s.get("atr_pct", 0),
+                "sma50_buffer": s.get("sma50_buffer", 0),
+                "volume_ratio": s.get("volume_ratio", 0),
+                "analyst_consensus": s.get("analyst_consensus", ""),
+                "analyst_upside": s.get("analyst_upside", 0),  # not currently populated
+                "sentiment_label": s.get("sentiment_label", ""),
+                "sentiment_score": s.get("sentiment_score", 0),  # not currently populated
+                "price": s.get("price", 0),
+                # Per-stock backtest stats from the cached signal
+                "avg_return": s.get("expected_return", 0),
+                "win_rate": s.get("confidence", 0),
+                "trades": s.get("trades", 0),
+                # Zone fields absent here — composite_score will skip zone-specific paths
+                "zone_return": 0,
+                "zone_win_rate": 0,
+                "zone_trades": 0,
+                # BOTH-strategy bonus needs ret_20d (already in EntrySignal as ret_20d)
+                "ret_20d": s.get("ret_20d", 0),
+                "ret20": s.get("ret_20d", 0),
+            }
+            composite, factors = _compute_composite_score(score_input)
+            s["composite_score"] = composite
+            s["ranking_factors"] = factors
+            s["quality_tier"] = _quality_tier(composite)
+            s["meets_strict"] = _meets_strict_criteria(score_input)
+            # Holdings comparison: does this candidate's EV beat any current holding?
+            if holdings_scores:
+                cand_ev = _ev_score(score_input["avg_return"], score_input["win_rate"], score_input["trades"])
+                beats = []
+                for h_tkr, h_data in holdings_scores.items():
+                    h_score = h_data.get("score", 0) or 0
+                    if h_score > 0 and cand_ev > h_score * 1.10:  # 10% margin
+                        beats.append(h_tkr)
+                s["beats_holdings"] = beats
+                s["is_upgrade"] = bool(beats) and not s.get("vetoed", False)
+            else:
+                s["beats_holdings"] = []
+                s["is_upgrade"] = False
+
         mr = sum(1 for s in valid if s.get("strategy") == "MEAN_REVERSION")
         mom = sum(1 for s in valid if s.get("strategy") == "MOMENTUM")
         both = sum(1 for s in valid if s.get("strategy") == "BOTH")
+        passed = sum(1 for s in valid if s.get("meets_strict"))
+        upgrades = sum(1 for s in valid if s.get("is_upgrade"))
         data_date = cached[0].get("data_date", "") if cached else ""
         stale_left = len(_cache.get_stale_tickers())
+
+        # Quality tier counts (for header chips) — V3.3 SSOT
+        tier_counts = {"BEST": 0, "GOOD": 0, "FAIR": 0, "WEAK": 0, "POOR": 0}
+        for s in valid:
+            t = s.get("quality_tier", "POOR")
+            if t in tier_counts:
+                tier_counts[t] += 1
+
+        # Holdings scores + worst holding (was previously only on /scan/opportunities).
+        # Embed here so the frontend never has to call two endpoints.
+        try:
+            holdings_scores_dict, worst_h_tkr, worst_h_score = _get_holdings_scores()
+            holdings_scores_list = [
+                {"ticker": tkr, "score": d.get("score", 0),
+                 "zone_return": d.get("zone_return", 0), "win_rate": d.get("win_rate", 0),
+                 "exit_triggered": d.get("exit_triggered", False),
+                 "signal": d.get("signal", "HOLD")}
+                for tkr, d in (holdings_scores_dict or {}).items()
+            ]
+        except Exception as _e:
+            print(f"[Combined] holdings_scores error: {_e}")
+            holdings_scores_list = []; worst_h_tkr = ""; worst_h_score = 0
 
         # Auto-refresh guard: if bars are >1 trading day stale, kick off a background
         # refresh. Non-blocking — this request returns now; next request gets fresh data.
@@ -4303,15 +4710,25 @@ async def get_combined_opportunities():
         return {
             "timestamp": datetime.now().isoformat(),
             "total": len(valid), "mean_reversion": mr, "momentum": mom, "both": both,
+            "passed": passed,            # meets_strict count for header chip
+            "upgrades": upgrades,        # is_upgrade count
+            "tier_counts": tier_counts,  # V3.3 SSOT — BEST/GOOD/FAIR/WEAK/POOR
+            "ranked_count": len(valid),  # V3.3 SSOT — alias for "total" (frontend reads either)
+            "total_scanned": len(cached) if cached else 0,  # V3.3 SSOT — universe size
+            "holdings_scores": holdings_scores_list,  # V3.3 SSOT — was on /scan/opportunities only
+            "worst_holding": worst_h_tkr,             # V3.3 SSOT
+            "worst_score": worst_h_score,             # V3.3 SSOT
             "data_date": data_date,
             "cache_age_min": round(cache_age_min, 1),
             "cache_stale": cache_stale,
             "cache_date": cache_date_str,
+            "refreshing": _auto_refresh_running or _scan_running,  # V3.3 SSOT
+            "scanning": _scan_running,                              # V3.3 SSOT
             "live_prices": live_count,
             "stale_tickers": stale_left,
             "signals": valid,
             "system_status": _system_status,
-            "market_regime": _check_market_regime(),
+            "market_regime": _regime_now,
         }
 
 @router.post("/scan/refresh-all")
@@ -4816,7 +5233,7 @@ def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
 
     # Track last exit day per zone to prevent overlapping trades
     zone_last_exit = {key: -1 for key in zones}
-    for i in range(50, len(closes) - 62):  # -32 to ensure room for i+1+30
+    for i in range(50, len(closes) - 32):  # room for i+1+30
         hist_closes = closes[:i + 1]
         hist_rsi = _entry.calc_rsi(hist_closes, 2)
         hist_sma = _entry.calc_sma(hist_closes, 50)
@@ -4829,16 +5246,16 @@ def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
         recent_high = max(closes[max(0, i - 10):i + 1])
         pct_drop = ((closes[i] - recent_high) / recent_high) * 100
 
-        # V2.6: 30-day forward return, next-day open entry, fee-adjusted
+        # 30-day forward return, next-day open entry, fee-adjusted (Fixed30d)
         entry_px = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-        exit_px = closes[i + 1 + 60]  # True 30-day hold from entry
+        exit_px = closes[i + 1 + 30]  # True 30-trading-day hold from entry
         ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
 
         for key, z in zones.items():
             if z["rsi_lo"] <= hist_rsi < z["rsi_hi"] and i > zone_last_exit[key]:
                 z["trades"].append({"return": ret, "win": ret > 0})
                 z["drops"].append(pct_drop)
-                zone_last_exit[key] = i + 1 + 60
+                zone_last_exit[key] = i + 1 + 30
 
     # Calculate price targets from current 10-day high
     recent_10d_high = max(closes[-10:]) if len(closes) >= 10 else closes[-1]
@@ -4931,14 +5348,34 @@ async def analyze_stock(ticker: str):
                 prev_close = float(df_fallback["Close"].iloc[-2])
                 day_chg = round(((live_price - prev_close) / prev_close) * 100, 2) if prev_close > 0 else 0
 
-        # 4. Earnings check
+        # 4. Earnings check — only upcoming (forward-event) hits set the VETO.
+        # Reported earnings stay informational; setting earnings_date here would
+        # mis-fire HELD→EXIT and NEW→WAIT signals after the event has cleared.
         earnings_date = None
         try:
             from deep_scanner import DeepScanner
             ds = DeepScanner()
             earnings = await ds._check_earnings(session, ticker)
-            if earnings:
+            if earnings and earnings.get("kind") == "upcoming":
                 earnings_date = earnings["date"]
+        except Exception:
+            pass
+
+        # 4b. Biotech-catalyst check — Phase 1/2/3 readouts, PDUFA dates, FDA
+        # decisions, NDA/BLA filings. Same VETO/EXIT semantics as earnings:
+        # only `kind == "upcoming"` blocks new entries / triggers HELD exits.
+        # Built after CELC -24.6% Phase 3 readout (2026-06-02) and PRAX trial
+        # setback (2026-06-01) — both events the earnings detector missed.
+        catalyst_warning = None
+        try:
+            from tiingo_biotech_catalyst import catalyst_window
+            cat = await catalyst_window(session, ticker, days=14)
+            if cat and cat.get("kind") == "upcoming":
+                catalyst_warning = {
+                    "date": cat.get("date"),
+                    "title": cat.get("title"),
+                    "catalyst_type": cat.get("catalyst_type", "other"),
+                }
         except Exception:
             pass
 
@@ -4994,6 +5431,10 @@ async def analyze_stock(ticker: str):
         issues.append(f"Low WR ({wr:.1f}% < {MIN_WR}%)")
     if earnings_date:
         issues.append(f"Earnings on {earnings_date}")
+    if catalyst_warning:
+        # Biotech catalyst — same priority/UI as earnings. Always surface as a
+        # critical issue since trial readouts have wiped 25-50% in a session.
+        issues.append(f"Biotech catalyst: {catalyst_warning['title'][:80]}")
     # Sentiment and analyst-target flags removed from issues — backtest (95K
     # signals, PIT data) shows both filters HURT edge on RSI(2)<10 entries.
     if exit_zt >= 5 and exit_zr < 1.0 and exit_zwr < 55:
@@ -5112,6 +5553,12 @@ async def analyze_stock(ticker: str):
                 issues.append(f"Exit suppressed: RSI oversold ({rsi2:.0f}), zone +{zone_ret:.1f}% > exit +{exit_strat_ret:.1f}%")
             else:
                 signal = "EXIT"
+        elif catalyst_warning:
+            # Biotech catalyst overrides everything else for HELD positions —
+            # this is the same severity as earnings ahead. CELC -24.6% on
+            # 2026-06-02 happened because we held through this exact scenario.
+            signal = "EXIT"
+            issues.insert(0, f"EXIT: Biotech catalyst ({catalyst_warning['catalyst_type']}) — {catalyst_warning['title'][:60]}")
         elif earnings_date:
             signal = "EXIT"
             issues.insert(0, f"EXIT: Earnings on {earnings_date} — binary event risk")
@@ -5126,6 +5573,11 @@ async def analyze_stock(ticker: str):
             signal = "AVOID"
         elif has_critical:
             signal = "CAUTION"
+        elif catalyst_warning:
+            # Same VETO for new entries — block any buy when a biotech catalyst
+            # is scheduled within the next 14 days. Mirrors earnings VETO logic.
+            signal = "WAIT"
+            issues.insert(0, f"WAIT: Biotech catalyst ahead ({catalyst_warning['catalyst_type']})")
         elif earnings_date:
             signal = "WAIT"
         elif sentiment_label == "NEGATIVE":
@@ -5211,6 +5663,7 @@ async def analyze_stock(ticker: str):
         "analyst_target": round(analyst_target, 2),
         "analyst_upside": analyst_upside,
         "earnings_date": earnings_date,
+        "catalyst_warning": catalyst_warning,
         "signal": signal,
         "issues": issues,
         "stop_loss": stop_loss,
@@ -5385,10 +5838,18 @@ async def get_cache_stats():
     """Get data cache statistics."""
     stats = _cache.stats()
     stale = _cache.get_stale_tickers()
+    last_updated = ""
+    try:
+        row = _cache.conn.execute(
+            "SELECT MAX(last_updated) FROM cache_meta"
+        ).fetchone()
+        last_updated = (row[0] or "") if row else ""
+    except Exception:
+        pass
     return CacheStats(
-        total_tickers=stats.get("tickers", 0),
-        total_rows=stats.get("rows", 0),
-        last_updated=stats.get("last_updated", ""),
+        total_tickers=stats.get("total_tickers", 0),
+        total_rows=stats.get("total_rows", 0),
+        last_updated=last_updated,
         stale_count=len(stale) if stale else 0,
     )
 
@@ -6034,50 +6495,52 @@ async def cache_refresh_loop():
             positions = _position_mgr._get_open_positions_sync()
             holding_tickers = [p["ticker"] for p in positions] if positions else []
 
+            # VIX fetcher — defined outside `first_run` so subsequent loops can re-fetch
+            # (Tiingo doesn't carry ^VIX; Yahoo's chart endpoint is the working source on Fly.io)
+            def _fetch_vix():
+                import requests as _req
+                try:
+                    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=60d&interval=1d"
+                    r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+                    if r.status_code == 200:
+                        chart = r.json().get("chart", {}).get("result", [{}])[0]
+                        ts = chart.get("timestamp", [])
+                        q = chart.get("indicators", {}).get("quote", [{}])[0]
+                        if ts and q.get("close") and len(ts) >= 5:
+                            from datetime import datetime as _dt
+                            dates = [_dt.utcfromtimestamp(t).strftime('%Y-%m-%d') for t in ts]
+                            df = pd.DataFrame({"Date": dates, "Open": q["open"], "High": q["high"],
+                                               "Low": q["low"], "Close": q["close"], "Volume": q.get("volume", [0]*len(ts))})
+                            df["Date"] = pd.to_datetime(df["Date"])
+                            df = df.set_index("Date").sort_index().dropna(subset=["Close"])
+                            if len(df) >= 5:
+                                _cache.store("VIX", df)
+                                return len(df)
+                except Exception:
+                    pass
+                return 0
+
+            # SPY (Tiingo) + VIX (Yahoo) — refresh whenever stale, not just on first_run.
+            # Previously VIX was inside `if first_run:` and could stay stale for days if the
+            # boot-time Yahoo call failed (observed: VIX cache 12 days behind regime calc).
+            if not _cache.is_fresh("SPY"):
+                try:
+                    async with aiohttp.ClientSession() as _sess:
+                        _spy_df = await _cache._fetch_tiingo(_sess, "SPY", days=400)
+                        if _spy_df is not None:
+                            _cache.store("SPY", _spy_df)
+                            print(f"[CacheRefresh] SPY: {len(_spy_df)} bars via Tiingo")
+                except Exception as _e:
+                    print(f"[CacheRefresh] SPY fetch failed: {_e}")
+
+            if not _cache.is_fresh("VIX"):
+                try:
+                    n = await asyncio.wait_for(asyncio.to_thread(_fetch_vix), timeout=15)
+                    if n: print(f"[CacheRefresh] VIX: {n} bars via Yahoo")
+                except (asyncio.TimeoutError, Exception) as _e:
+                    print(f"[CacheRefresh] VIX fetch failed: {_e}")
+
             if first_run:
-                # Fetch SPY via Tiingo, VIX via Yahoo (Tiingo doesn't have ^VIX)
-                def _fetch_vix():
-                    """VIX only — Yahoo chart API (Tiingo doesn't support index tickers)."""
-                    import requests as _req
-                    try:
-                        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=60d&interval=1d"
-                        r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-                        if r.status_code == 200:
-                            chart = r.json().get("chart", {}).get("result", [{}])[0]
-                            ts = chart.get("timestamp", [])
-                            q = chart.get("indicators", {}).get("quote", [{}])[0]
-                            if ts and q.get("close") and len(ts) >= 5:
-                                from datetime import datetime as _dt
-                                dates = [_dt.utcfromtimestamp(t).strftime('%Y-%m-%d') for t in ts]
-                                df = pd.DataFrame({"Date": dates, "Open": q["open"], "High": q["high"],
-                                                   "Low": q["low"], "Close": q["close"], "Volume": q.get("volume", [0]*len(ts))})
-                                df["Date"] = pd.to_datetime(df["Date"])
-                                df = df.set_index("Date").sort_index().dropna(subset=["Close"])
-                                if len(df) >= 5:
-                                    _cache.store("VIX", df)
-                                    return len(df)
-                    except Exception:
-                        pass
-                    return 0
-
-                # SPY: Use Tiingo (same as all other stocks)
-                if not _cache.is_fresh("SPY"):
-                    try:
-                        async with aiohttp.ClientSession() as _sess:
-                            _spy_df = await _cache._fetch_tiingo(_sess, "SPY", days=400)
-                            if _spy_df is not None:
-                                _cache.store("SPY", _spy_df)
-                                print(f"[CacheRefresh] SPY: {len(_spy_df)} bars via Tiingo")
-                    except Exception as _e:
-                        print(f"[CacheRefresh] SPY fetch failed: {_e}")
-
-                # VIX: Yahoo only (Tiingo doesn't have ^VIX)
-                if not _cache.is_fresh("VIX"):
-                    try:
-                        n = await asyncio.wait_for(asyncio.to_thread(_fetch_vix), timeout=15)
-                        if n: print(f"[CacheRefresh] VIX: {n} bars via Yahoo")
-                    except (asyncio.TimeoutError, Exception) as _e:
-                        print(f"[CacheRefresh] VIX fetch failed: {_e}")
 
                 # FIRST RUN: Populate holdings with NO data, refresh stale ones
                 empty_holdings = [t for t in holding_tickers if _cache.get(t, 365) is None]
@@ -6170,8 +6633,60 @@ async def cache_refresh_loop():
                     await _cache.populate(batch)
                     await asyncio.sleep(5)
 
+            # V3.3.1 (2026-06-03): backtest_cache freshness check moved OUT of
+            # the "all bars fresh" branch. Previously stale tickers would block
+            # this check forever (16-day cache staleness observed in production).
+            # Now: if backtest_cache is >24h old, ALWAYS run precompute, even
+            # if some bars are still stale — better stale-but-recent than nothing.
+            try:
+                import sqlite3 as _sql3
+                _bt_db_check = os.path.join(os.path.dirname(__file__), "data", "stock_cache.db")
+                _bt_c = _sql3.connect(_bt_db_check)
+                _row = _bt_c.execute("SELECT MAX(last_computed) FROM backtest_cache").fetchone()
+                _bt_c.close()
+                if _row and _row[0]:
+                    _age_h_global = (datetime.now() - datetime.fromisoformat(_row[0] + "T00:00:00")).total_seconds() / 3600
+                    if _age_h_global > 24:
+                        print(f"[CacheRefresh] backtest_cache is {_age_h_global:.1f}h old — forcing precompute")
+                        _held = set(p["ticker"] for p in positions) if positions else set()
+                        _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                        _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="StalenessGuard")
+                        print(f"[CacheRefresh] Staleness-guard precompute: {_valid} valid entries")
+            except Exception as _stale_err:
+                print(f"[CacheRefresh] Staleness guard error: {_stale_err}")
+
             if not stale and not uncached:
-                print(f"[CacheRefresh] All {len(cached_set)} tickers up to date")
+                # All bars are fresh — but the backtest_cache (WR / zone_return
+                # source for entries-tab ranking) is a SEPARATE derived table
+                # that needs its own staleness check. Discovered 2026-05-27:
+                # cache stayed 9 days behind because this branch always took
+                # the fast path. If backtest_cache is older than 24h, force a
+                # precompute run against the existing (fresh) bars so rankings
+                # stay current with whatever recent moves changed the WR.
+                _bt_stale = False
+                try:
+                    import sqlite3 as _sql3
+                    _bt_db = os.path.join(os.path.dirname(__file__), "data", "stock_cache.db")
+                    _bt_c = _sql3.connect(_bt_db)
+                    _row = _bt_c.execute("SELECT MAX(last_computed) FROM backtest_cache").fetchone()
+                    _bt_c.close()
+                    if _row and _row[0]:
+                        _age_h = (datetime.now() - datetime.fromisoformat(_row[0] + "T00:00:00")).total_seconds() / 3600
+                        _bt_stale = _age_h > 24
+                except Exception:
+                    pass
+
+                if _bt_stale:
+                    print(f"[CacheRefresh] Bars fresh but backtest_cache stale — re-running precompute")
+                    try:
+                        _held = set(p["ticker"] for p in positions) if positions else set()
+                        _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                        _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="BacktestRefresh")
+                        print(f"[CacheRefresh] Backtest precompute: {_valid} valid entries")
+                    except Exception as _bt_err:
+                        print(f"[CacheRefresh] Backtest precompute error: {_bt_err}")
+                else:
+                    print(f"[CacheRefresh] All {len(cached_set)} tickers up to date, backtest cache fresh")
                 await asyncio.sleep(14400)  # 4 hours
                 continue
 
@@ -6197,8 +6712,8 @@ async def cache_refresh_loop():
             # cycles (~10min subprocess on shared-1x Fly). Only run heavy work
             # when daily-bar refresh actually fetched new rows OR we're past the
             # post-close window where Tiingo has the day's final close.
-            from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
-            _et_now = _dt2.now(_tz2(_td2(hours=-4)))
+            from datetime import datetime as _dt2
+            _et_now = _now_et()
             _et_hour = _et_now.hour
             _is_after_close = _et_hour >= 16 or _et_hour < 4  # 16 ET–04 ET next day
             _refresh_made_progress = (result.get("refreshed", 0) > 0) if 'result' in dir() else False
@@ -6245,8 +6760,7 @@ async def cache_refresh_loop():
         #   Overnight 18-4 ET:    long sleep until 5pm ET next day
         # Target: refresh at ~5pm ET daily for final close + hourly during the
         # trading day so the user doesn't see yesterday's data midday.
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        _now = _dt.now(_tz(_td(hours=-4)))  # ET
+        _now = _now_et()
         _hour = _now.hour
         _wday = _now.weekday()  # 0=Mon, 6=Sun
         if _wday >= 5:
@@ -6270,3 +6784,44 @@ async def cache_refresh_loop():
             _sleep = 3600
         print(f"[CacheRefresh] Next refresh in {_sleep//60}min (ET {_hour}:00 {'wkd' if _wday<5 else 'wknd'})")
         await asyncio.sleep(_sleep)
+
+
+async def signal_tracker_loop():
+    """Daily snapshot of top-20 Entries-tab picks + backfill stale forward returns.
+
+    Runs every 4 hours. Real work only fires after market close (>= 16:30 ET) so
+    today's entries snapshot is finalized. Idempotent — re-snapshot just overwrites
+    today's row; backfill skips rows that already have returns.
+
+    Persists to backend/data/signal_tracker.db (queryable, survives deploys via mount).
+    """
+    await asyncio.sleep(180)  # let other loops boot first
+
+    while True:
+        try:
+            _et = _now_et()
+            _et_hour = _et.hour
+            _wday = _et.weekday()
+
+            # Only do real work after market close on weekdays
+            if _wday < 5 and _et_hour >= 17:
+                import signal_tracker_update as _stu
+                try:
+                    inserted = await asyncio.to_thread(_stu.snapshot_today)
+                    print(f"[SignalTracker] Snapshot: {inserted} top-{_stu.TOP_N} picks captured for today")
+                except Exception as _e:
+                    print(f"[SignalTracker] Snapshot error: {_e}")
+                try:
+                    updated = await asyncio.to_thread(_stu.backfill_returns)
+                    print(f"[SignalTracker] Backfilled forward returns on {updated} rows")
+                except Exception as _e:
+                    print(f"[SignalTracker] Backfill error: {_e}")
+            else:
+                print(f"[SignalTracker] ET {_et_hour}:00 — outside snapshot window, skipping")
+        except Exception as e:
+            import traceback
+            print(f"[SignalTracker] Error: {e}")
+            traceback.print_exc()
+
+        # Every 4 hours — catches the post-close window without thrashing
+        await asyncio.sleep(4 * 3600)
