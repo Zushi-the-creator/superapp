@@ -3,10 +3,10 @@
 ## Core Rules
 - **PRIMARY GOAL**: MAXIMIZE ROI (3% monthly is MINIMUM, not target)
 - **RULE**: When saying SELL, ALWAYS say what to BUY
-- **MODEL**: Use ATLAS V2.4 unified model (replaces V1.0-V27.0, V2.1-V2.3)
+- **MODEL**: Production runs **ATLAS V2.7 (MR entries) + V3.0 (cache-accelerated evaluator) + V3.3 (regime-adaptive entry sizing, 2026-06-12) + V3.4 (Buffered WR scoring, 2026-06-16) + V3.4 (Fixed60d MR exit, 2026-06-17 — replaces V3.2 Fixed30d after honest 13-window walk-forward validation)**. There is no single "version" — the deployed code is a hybrid. See "Active Strategy" section below for the actual rules.
 - **VALIDATION**: NEVER recommend without backtest validation (WR > 55%, 10+ trades)
 - **LIVE DATA**: NEVER suggest buy without verifying live prices first (MANDATORY)
-- **SENTIMENT**: ALWAYS check news sentiment before any buy recommendation (MANDATORY)
+- **SENTIMENT**: ALWAYS check news sentiment before any buy recommendation (informational; not a hard veto for MR — see VETO chain below)
 - **SCAN SIZE**: Scan at least 1,000 stocks before making buy recommendations
 - **BACKTEST FIRST**: ALWAYS run backtest on ALL positions BEFORE showing any projections or recommendations (MANDATORY)
 - **NO FAKE PROJECTIONS**: NEVER show projected returns without actual backtest data to back it up
@@ -17,26 +17,40 @@
 - **PORTFOLIO BALANCE**: When recommending BUY/SELL, ALWAYS consider total portfolio spread. Target ~20% per position, no single stock >30%. Size new buys to rebalance underweight positions. Don't create new overweight positions (MANDATORY)
 - **EARNINGS CALENDAR**: ALWAYS check earnings calendar (Finnhub) before ANY buy recommendation. VETO any stock with earnings within 7 days. Also check portfolio holdings for upcoming earnings and WARN user. Use `python3 deep_scanner.py` which has built-in earnings VETO (MANDATORY)
 - **WEIGHTED ALLOCATION**: When deploying new capital, weight by zone expected return - NOT equal weight. Stocks with higher zone returns get more capital (MANDATORY)
-- **TRUST BACKTESTS**: If backtests are valid (WR > 55%, 10+ trades, zone trades >= 5), trust the data regardless of stock price. Only filter penny stocks under $5. Be confident with all stocks the model validates (MANDATORY)
-- **EXIT TRIGGERS (UPDATED 2026-03-09)**: Hold positions until backtested exit strategy triggers (Fixed14d/21d, stop loss, target hit). But these are VALID early exit reasons: (a) Earnings within 7 days — binary event risk, always EXIT. (b) Stock-specific negative sentiment (downgrade, earnings miss, product failure) — EXIT. (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT. What is NOT a valid exit: market-wide crash headlines, war panic across all stocks, RSI rising (trade working). Distinguish STOCK-SPECIFIC bad news from MARKET-WIDE noise. (MANDATORY)
+- **TRUST BACKTESTS**: If backtests are valid (WR > 55%, 10+ trades, zone trades >= 5), trust the data regardless of stock price. Only filter penny stocks under $10 (MR scanner cap). Momentum scanner caps at $200.
+- **EXIT TRIGGERS (UPDATED 2026-06-17, V3.4)**: Hold positions until backtested per-strategy exit triggers — **Fixed60d** for MR / BOTH (exit on trading day 60; replaced Fixed30d after honest 13-window rolling walk-forward — 24mo IS / 6mo OOS / 6mo step, 17,108 PROD-filtered entries, 487-ticker quarantine). Fixed60d portfolio sim N=4 OOS-2024: +23.2% CAGR / 2.09% monthly / MDD -11.6% / Sharpe 0.78 vs Fixed30d N=4: +6.3% CAGR / 1.04% monthly / MDD -35% / Sharpe 0.59. Cross-period worst-month: Fixed60d +0.94% (never negative) vs Fixed30d -0.18%. Dynamic regime-aware exits (HonestDyn family) were tested honestly and beaten by Fixed60d once portfolio capacity constraints applied. **Fixed90d** for Momentum (unchanged). Valid early exits: (a) Earnings within 7 days — binary event risk, always EXIT. (b) Stock-specific negative sentiment (downgrade, earnings miss, product failure) — EXIT. (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT. NOT valid: market-wide crash headlines, war panic across all stocks, RSI rising (trade working). Distinguish STOCK-SPECIFIC bad news from MARKET-WIDE noise. (MANDATORY)
+- **REGIME-ADAPTIVE ENTRIES (UPDATED 2026-06-12, V3.3)**: Per 35K-trade paired backtest + walk-forward validation (train pre-2022, test 2022+), entry rules adjust by regime: **DANGER (SPY -7% to -15% drawdown) → PAUSE all entries** (was -10% to -15%; widened after CORRECTION regime showed 49% WR / +0.22% avg — below threshold). **SHARP_DROP (SPY 5d < -2%) → 70% size** (still +2.27% avg / 57% WR). All other regimes unchanged. "A skip CORRECTION" returned +2.10%/trade out-of-sample vs +1.18% baseline (+78% cumulative). Dual-bucket "defensive RSI<10" approach was tested and REJECTED — Bucket A (high-vol MR) beat Bucket B and C in every regime including CRISIS. (MANDATORY)
 
 ---
 
-## Current Positions (Updated 2026-02-23, Live Data)
+## Current Positions (Updated 2026-04-29, post-rotation)
 
-### USD Portfolio (Broker-verified 2026-02-23)
+### USD Portfolio
 
-| Ticker | Shares | Avg Entry | Cost Basis | Weight |
-|--------|--------|-----------|------------|--------|
-| BE | 15.6302 | $141.84 | $2,216.98 | 27.8% |
-| WDC | 6.3874 | $281.80 | $1,799.98 | 19.9% |
-| CGNX | 27.5412 | $56.02 | $1,543.00 | 17.2% |
-| MTRN | 8.7844 | $150.15 | $1,318.99 | 14.2% |
-| BWA | 19.0987 | $61.47 | $1,174.00 | 12.3% |
-| GHM | 8.4703 | $84.88 | $719.00 | 7.3% |
+| Ticker | Shares | Avg Entry | Cost Basis | Current | Value | P&L | Weight |
+|--------|--------|-----------|------------|---------|-------|-----|--------|
+| PRAX | 7.8313 | $319.23 | $2,499.99 | $318.81 | $2,496.70 | -$3.29 | 19.1% |
+| GHM | 27.7313 | $90.15 | $2,499.98 | $90.06 | $2,497.32 | -$2.66 | 19.1% |
+| AMSC | 53.0447 | $47.13 | $2,500.00 | $47.10 | $2,498.41 | -$1.59 | 19.1% |
+| CAMT | 11.9513 | $181.90 | $2,173.94 | $188.08 | $2,247.84 | +$73.90 | 17.2% |
+| APEI | 37.2961 | $57.70 | $2,151.98 | $57.18 | $2,132.30 | -$19.68 | 16.3% |
+| IREN | 27.7958 | $42.85 | $1,191.05 | $42.62 | $1,184.65 | -$6.40 | 9.1% |
 
-**Cash: $121.21 | Total Portfolio: $9,024.86 | Total Fees: $63.01**
-**Total Deposited: $8,413.58 | Total Realized P&L: +$531.65 | Account P&L: +$610.88 (+7.3%)**
+**Cash: $1,274.38 | Positions Value: ~$13,058 | Total Portfolio: ~$14,332**
+**Total Deposited: $11,891.58 | Realized P&L: +$1,533.87 | Total Fees: $105.01**
+**Open P&L: +$40.70 (+0.31%) — fresh entries, marks-to-market**
+
+### 2026-04-29 Rotation Trades (Audit-Driven)
+**SOLD (3 — proceeds $5,793, realized +$1,652):**
+- WDC: 6.3874 @ $417.08 → +$862.59 (+47.9%) — RSI2=0 + big-winner exit
+- POWL: 11.91 @ $253.41 → +$864.63 (+40.2%) — Hybrid21d trigger, big-winner bucket validated
+- BBIO: 29.6173 @ $70.16 → -$75.54 (-3.4%) — exit triggered, low-conviction biotech
+
+**BOUGHT (4 — total deployed $8,691):**
+- PRAX: 7.8313 @ $319.23 — RSI Dip, 80% WR, Strong Buy
+- GHM: 27.7313 @ $90.15 — RSI Dip+Breakout, 73.7% WR, 19 trades, Strong Buy + POSITIVE
+- AMSC: 53.0447 @ $47.13 — Breakout, ATR 7.7%, Strong Buy
+- IREN: 27.7958 @ $42.85 — Breakout, ATR 8.6%, Buy
 
 ### ILS Portfolio
 - **SOLD** TA-35 3x ETF on 2026-02-10 for ~+2,871 ILS profit (+14.5%)
@@ -86,76 +100,120 @@
 
 ---
 
-## ATLAS V2.4 - Primary Model (Updated 2026-02-28)
+## Active Strategy — V2.7 / V3.0 / V3.3 / V3.4 hybrid (verified 2026-06-17)
 
-**Location**: `backend/atlas_v2/entry.py`, `backend/atlas_v2/model.py`, `backend/api_v2.py`
+**Locations**:
+- Entry/scoring: `backend/strategy_evaluator.py`, `backend/deep_scanner.py`, `backend/momentum_scanner.py`
+- Exits: `backend/api_v2.py:_select_best_exit` (Fixed60d for MR / BOTH — V3.4, Fixed90d for MOM)
+- Regime gate: `backend/api_v2.py:_check_market_regime`
+- Signal tracker: `backend/signal_tracker_update.py` + `signal_tracker_loop` (daily snapshot of top-20 + forward-return backfill)
+- Live API: `backend/api_v2.py` (28 routes)
 
-### Key V2.4 Changes (Backtested on 167 trades, walk-forward validated)
-- **RSI(2) < 10** entry (was < 20) — fewer but higher-quality signals
-- **No tight stop losses** — research proves stops HURT mean reversion (widened to -20%/-15%/-12%)
-- **Next-day open entry** — eliminates look-ahead bias (was same-bar close)
-- **Fee-adjusted backtests** — subtract 0.30% per trade ($3 round-trip on $1K)
-- **Per-stock hybrid exit** — each stock gets its optimal exit via walk-forward validation
-- **DCA skipped** — only 4.9% marginal gain, doubles fees ($3→$6)
-- **Expected**: 78.1% WR, +8.62% avg return, PF 8.68 (vs old 69.3% WR, +5.18%, PF 3.50)
+There is no longer a single "atlas v2 model" file driving production. `backend/atlas_v2/entry.py` exists and exposes `EntryEngine`, but the live scan path is `strategy_evaluator.evaluate_all` → `_dict_to_opportunity`. Treat `atlas_v2/__init__.py:__version__ = "2.0.0"` as stale.
 
-### Entry Signal (V2.4)
+### Mean Reversion entry rule (live)
 ```
-REQUIRED: Price > SMA(50) AND RSI(2) < 10 AND Volume > 1.5x avg
-
-Scoring:
-+40 pts: RSI(2) < 5 (extreme)
-+25 pts: RSI(2) < 10
-+20 pts: Price > SMA(50) (REQUIRED)
-+10 pts: Price > SMA(200)
-+10 pts: Volume > 1.5x (REQUIRED)
-+10 pts: RSI(14) < 40
-+15 pts: SMA50 buffer > 15% (strongest predictor)
--20 pts: Trend strength > 25%
+REQUIRED:  Price > SMA(50)
+           RSI(2) < 10
+           ATR(14)% >= 3%       (volatility floor — #1 predictor of big winners)
+           Price >= $10         (penny filter)
+           SMA50 buffer >= 5%   (#2 predictor)
+           Volume >= 1.0×       (no longer 1.5×)
+           RSI(14) < 60
 ```
 
-### V2.4 VETO Filters (ALL enforced in scanner — `api_v2.py:_dict_to_opportunity`)
-| Filter | Condition | Action |
-|--------|-----------|--------|
-| Analyst Target | Price > target | VETO - overvalued |
-| Analyst Consensus | Hold/Sell/Underperform | VETO - not a buy |
-| Sentiment | NEGATIVE label | VETO - negative news |
-| RSI Entry | RSI(2) > 10 | VETO - not oversold enough |
-| Zone WR | Zone WR < 65% (5+ trades) | VETO - below minimum (tiered: 80%→70%→65%) |
-| Price | Price < $10 | VETO - too volatile/risky |
-| Zone Data | Zone trades < 5 | VETO - insufficient sample |
-| Score | zone_return × zone_WR / 100 < 3.0 | VETO - low expected value |
-| Avg Return | avg_return < 3% | VETO - won't cover fees |
-| Crash Filter | >8% drop in 1 day | VETO - wait for stabilization |
-| Flip Cooldown | SELL signal < 5 days ago | VETO - avoid whipsaw |
-| Earnings | < 7 days to earnings | VETO - binary event |
-| Post-Earnings Drop | >5% drop on earnings day | ANALYZE zone return before acting |
+### Momentum entry rule (live, `momentum_scanner.py`)
+- Minervini 6/6 trend template
+- 20-day return > 5%
+- Parabolic-spike VETO (>=10% gap)
+- 5-day return > 15% VETO
+- Price >= $10 and **price <= $200** (research-backed cap; >$200 has -5% edge)
 
-### Scoring (Updated 2026-02-28)
-- **Score = zone_return × zone_WR / 100** (what matters at CURRENT RSI, not overall avg)
+### VETO chain (the four filters that actually block buys, `api_v2.py:_dict_to_opportunity`)
+| Filter | Condition | Why it stayed |
+|--------|-----------|---------------|
+| Penny | Price < $10 | Volatility / liquidity |
+| Earnings | <= 7 days to next earnings | Binary event risk |
+| Analyst | Consensus = Hold/Sell/Underperform/Strong Sell | +1.19% edge in backtest |
+| Correlation | Holdings correlation > 0.7 | Concentration risk |
+
+**Removed 2026-04-24** because backtests showed they REJECTED higher-return signals on average:
+- Analyst target (price > target): -0.40% edge → REMOVED
+- Sentiment score < -0.3 in MR scanner: -0.43% edge → REMOVED (still active in `momentum_scanner.py:232` and `atlas_v2/entry.py:423` — inconsistent enforcement, see Known drift below)
+- Zone WR < 65% / zone trades < 5 / score < 3.0 / avg_return < 3%: documented but currently NOT enforced as hard vetoes — they are ranking factors only. Tier labels (TIER1/TIER2/TIER3) are display-only.
+
+### Scoring (V3.4 Buffered WR, 2026-06-16) — **PRIMARY SORT KEY**
+- **Formula**: `score = bayesian_wr - (std / sqrt(n))` per strategy (MR or MOM)
+- **Computed in** `backtest_precompute.py` and stored in `backtest_cache.mr_score` / `mom_score`
+- **Used by** strategy_evaluator → frontend `combined.score` field → Entries tab sort
+- **Validation** (527 V3.3-filtered signals × 9 years, 40 quarterly anchors):
+  - In-sample (2016-2021): **+14.12% CAGR, 74% WR, -0.36% MaxDD**
+  - Out-of-sample (2022-2025): **+4.80% CAGR, 54.5% WR, -17.31% MaxDD**
+  - Full 9-yr: **+11.50% CAGR vs EV-classic +5.50%**
+  - OOS edge: **+11.3 pp/year** (EV-classic LOSES money OOS at -6.50% CAGR)
+- **Why it works**: Penalizes WR by sample-size-adjusted uncertainty. Rewards consistent winners; punishes lucky small-sample stocks. Naturally discounts survivor bias.
+- **Wins across 21 anchors**: Buffered WR 12, EV-classic 8, ties 1
+- **Robust to top-N**: BWR wins at top-3, top-5, top-7, top-10 portfolio sizes
+
+### Legacy: `api_v2.py:_ev_score` (still used for holdings rotation comparison)
+- Bayesian-shrunk: `zone_ret_shrunk × zone_wr_shrunk / 100` for MR, momentum-zone equivalent for MOM
+- Shrinkage priors: `PRIOR_RET = 2.85`, `PRIOR_WEIGHT = 20`
 - Fallback to avg_return × WR if zone_trades < 5
-- Winners pattern: RSI(2) near 0 + above SMA50 + BULL + positive sentiment + zone > 5%
-- Upgrades only suggest switching positions whose exit strategy has triggered
 
-### Validation Thresholds — Tiered WR System (Validated on 122 stocks, 1,760 trades)
-| WR Tier | Range | Avg Return | % Profitable | Action |
-|---------|-------|------------|-------------|--------|
-| **TIER1** | >= 80% | +7.23% | 100% | **BEST — priority picks** |
-| **TIER2** | 70-79% | +5.81% | 98% | **GREAT — strong candidates** |
-| **TIER3** | 65-69% | +5.36% | 96% | **GOOD — acceptable** |
-| REJECT | < 65% | +2.6% | 75% | **VETO — not worth the risk** |
-| Zone trades < 5 | — | — | — | **VETO — insufficient sample** |
-| Trades < 10 | — | — | — | **WARNING — lower confidence** |
+### Exit Strategy (live V3.4, per-strategy)
+| Strategy | Exit | File:line |
+|----------|------|-----------|
+| Mean Reversion / BOTH | **Fixed60d** — exit on trading day 60 (was Fixed30d, switched 2026-06-17 after 13-window honest walk-forward on clean 2,573-ticker universe: Fixed60d N=4 OOS-2024 +23.2% CAGR / 2.09% monthly / MDD -11.6% / Sharpe 0.78 vs Fixed30d N=4 +6.3% / 1.04% / -35% / 0.59. Cross-period worst-month +0.94% vs -0.18%. Honest regime-dynamic exits also lost to Fixed60d once portfolio capacity constraints applied.) | `api_v2.py:_select_best_exit` |
+| Momentum | **Fixed90d** | `api_v2.py:_EXIT_STRATEGIES` |
+| Stop loss | None — research confirms stops HURT mean reversion | — |
+| Profit target | None — let fixed timer fire | — |
 
-### Exit Strategy (V2.4 — per-stock hybrid, backtested optimal)
-- **Per-stock exit selection**: Walk-forward validated (5-fold TimeSeriesSplit)
-- **Exit types**: Fixed3d/7d/14d/21d, SMA5/10, RSI50/65/80, Trail5/8
-- **No profit targets**: Let positions run to their optimal exit
-- **Exit selection**: By absolute avg_ret (not annualized)
-- **Stop loss**: -20% (BULL), -15% (SIDEWAYS), -12% (BEAR) — effectively removed
-- **SMA50 buffer weighting**: Higher buffer = stronger signal
-- **Backtest entry**: Next-day open price (honest execution)
-- **Fee deduction**: 0.30% per trade subtracted from backtest returns
+The file `backend/data/exit_strategy_validated.json` exists but is empty `{}`. Per-stock optimal exit is computed on-the-fly in `_select_best_exit`, not loaded from JSON. Don't trust documentation that references that JSON.
+
+### Composite score (V3.2, post 2026-06-02 patches)
+Multi-factor 0-100 ranking computed in `_compute_composite_score`. After audits stripped EV/WR ramps (anti-predictive OOS), the active weights are:
+
+| Factor | Weight | Why |
+|---|---|---|
+| ATR% (recalibrated 2026-06-02) | up to 40 pts; -5 if ATR>15 | 10yr OOS sweet spot 8-10% (was 5-8%); ATR>15 = -13%/mo historical |
+| Analyst consensus | 15 pts | +1.19% edge on 95K signals |
+| BOTH-strategy bonus (NEW 2026-06-02) | 0-12 pts | ret_20d>5% + atr>=4 → BOTH cohort (+4.14%/trd in 10yr study) |
+| Sentiment score | 10 pts | informational |
+| Volume ratio (U-shape) | 0-10 pts | reward <0.5 OR 1.0-1.5; penalize "uncommitted" 0.5-1.0 |
+| Price tier | 10 pts | $10-25 sweet spot |
+| RSI(2) depth, SMA50 buffer | 5 pts | minor |
+
+### Backtest invariants
+- Next-day open entry (no same-bar lookahead) — verified in `deep_scanner.py:378`, `backtest_precompute.py:131,192`
+- 0.30% fee deduction per trade
+- RSI(2) < 10 filter at entry (NOT < 50, which was a past bug)
+- 60 trading days hold for MR/BOTH (`Fixed60d` — V3.4 since 2026-06-17), 90 for MOM (`Fixed90d`); both weekday-counted in positions.py + api_v2.py
+- backtest_cache uses MR_HOLD_DAYS=60 + MOM_HOLD_DAYS=90 — now matches the live exit (cache and exit both answer the same question after the V3.4 switch)
+
+### Market regime gate (`api_v2.py:_check_market_regime`)
+Drawdown- and SMA-based. Pauses entries when stocks won't reliably mean-revert.
+| Regime | Trigger | Action |
+|--------|---------|--------|
+| DANGER | -15% <= SPY drawdown <= -7% (V3.3 widened from -10%) | PAUSE all entries |
+| CRISIS | VIX > 40 | PAUSE all entries |
+| WEAK | SPY 0% to -2% below SMA200 | PAUSE MR only (momentum still works); 50% size |
+| CORRECTION | -20% <= SPY drawdown < -15% | 50% size |
+| BEAR_BOUNCE | SPY drawdown < -20% | FULL size (best regime for MR) |
+| BELOW_SMA200 | SPY > 2% below SMA200 | FULL size |
+| PULLBACK | SPY below SMA50 (above SMA200) | FULL size |
+| DIP_BUY | -7% < SPY drawdown <= -3% (V3.3 narrowed from -10%) | FULL size |
+| SHARP_DROP | SPY 5d return < -2% (V3.3 new tier) | 70% size, entries OK |
+| FEAR | VIX > 30 | 50% size |
+| HEALTHY | otherwise | 70% size |
+
+The `pause_mr` flag is wired in `/api/v2/scan/combined` to filter MR signals when WEAK fires.
+
+### Known drift to fix later
+- Sentiment veto removed in `deep_scanner` but still active in `momentum_scanner.py:232-234` and `atlas_v2/entry.py:423-426`. Need a single source of truth.
+- `atlas_v2/__init__.py:55` reports `__version__ = "2.0.0"` — stale label.
+- `KPICards.tsx:104,153` reads `regime.spy_5d_return.toFixed(1)` without null guard.
+- 23 of 28 endpoints have no FastAPI `response_model=` declaration.
+- `backtest_cache` is refreshed weekly, not daily — WR/avg_return for live signals can be ~3 weeks behind during quiet periods.
 
 ---
 

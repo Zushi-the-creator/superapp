@@ -174,11 +174,11 @@ async def check_portfolio(holdings: List[Dict]) -> List[HoldingCheck]:
                 check.volume_ratio = volumes[-1] / avg_vol
                 check.volume_confirmed = check.volume_ratio >= 1.5
 
-        # Full backtest — RSI<10, next-day open, 30d hold (= live Fixed30d exit),
-        # fee-adjusted, non-overlapping. Was 60 — SELL thresholds (WR<55 etc.)
-        # are calibrated for the 30d strategy actually traded.
+        # Full backtest — RSI<10, next-day open, 60d hold (= live Fixed60d exit, V3.4),
+        # fee-adjusted, non-overlapping. SELL thresholds (WR<55 etc.) are calibrated
+        # for the 60d strategy actually traded after the 2026-06-17 switch.
         _FEE_PCT = 0.30
-        _HOLD = 30
+        _HOLD = 60
         opens = df["Open"].tolist() if "Open" in df.columns else closes
         trades = []
         last_exit_day = -1

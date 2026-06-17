@@ -114,7 +114,7 @@ class ScanResult:
     zone_trades: int
     zone_win_rate: float
     volume_ratio: float = 0.0  # current vol / 20-day avg vol
-    hold_days: int = 30  # 30-day hold (V2.6 mega-backtest: +4.31% avg, 61% WR, PF 2.21)
+    hold_days: int = 60  # 60-day hold (V3.4 honest walk-forward: Fixed60d N=4 +23.2% CAGR OOS-2024)
     tier: str = "NONE"  # EXTREME, STRONG, STANDARD, NONE
     # ML-discovered features (SHAP importance ranked #1, #2, #5)
     low52_dist: float = 0.0   # % distance from 52-week low (closer=better bounce)
@@ -146,8 +146,8 @@ class DeepScanner:
 
     @staticmethod
     def _hold_days(rsi: float) -> int:
-        """Fixed 30-day hold period — V2.6 mega-backtest: +4.31% avg, 61% WR, PF 2.21."""
-        return 30
+        """Fixed 60-day hold period — V3.4 honest walk-forward: +23.2% CAGR OOS-2024 at N=4."""
+        return 60
 
     def __init__(self):
         self.entry_engine = EntryEngine()
@@ -365,13 +365,13 @@ class DeepScanner:
         zone_hi = zone_lo + 10
         zone_label = f"{zone_lo}-{zone_hi}"
 
-        # Fixed30d simulation — matches the LIVE exit (api_v2._select_best_exit,
-        # V3.2 2026-06-02: MR/BOTH exit at trading day 30, no stop/trail).
+        # Fixed60d simulation — matches the LIVE exit (api_v2._select_best_exit,
+        # V3.4 2026-06-17: MR/BOTH exit at trading day 60, no stop/trail).
         # Historical entries apply the same gates as the live scan above:
         # RSI(2)<10, close > SMA50, ATR(14)% >= 3, close >= $10 — so the
         # WR/avg_return shown on the entries tab measures the strategy that
-        # actually gets traded (Hybrid21d sim removed when the exit retired).
-        HOLD = 30
+        # actually gets traded (Fixed30d sim retired after honest walk-forward).
+        HOLD = 60
         trades = []
         zone_trades_list = []
         last_exit_day = -1

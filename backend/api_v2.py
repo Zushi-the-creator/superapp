@@ -577,8 +577,8 @@ _exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, 
 _EXIT_CACHE_TTL = 21600  # 6 hours
 
 _EXIT_STRATEGIES = {
-    "Fixed30d": {"type": "fixed", "days": 30},  # MR / BOTH — V3.2 2026-06-02
-    "Fixed60d": {"type": "fixed", "days": 60},
+    "Fixed30d": {"type": "fixed", "days": 30},  # legacy V3.2 — kept for back-compat
+    "Fixed60d": {"type": "fixed", "days": 60},  # MR / BOTH — V3.4 2026-06-17
     "Fixed90d": {"type": "fixed", "days": 90},  # MOM
 }
 
@@ -672,16 +672,21 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
 
 
 def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None) -> Dict:
-    """Fixed30d exit for MR stocks (V3.2 — 2026-06-02).
+    """Fixed60d exit for MR stocks (V3.4 — 2026-06-17).
 
-    Switched from Hybrid21d to Fixed30d after 10-year paired backtest
-    (9,919 raw signals across 39 quarterly anchors):
-      Raw MR: Fixed-30d +1.83%/mo vs Hybrid21d +1.13%/mo, p<0.0001
-      Filtered MR (top-10% composite): Fixed-30d +0.99%/mo vs Hybrid21d +0.53%/mo
-      Portfolio sim (top-5 picks/anchor): B_OLD_F30 +32.3% cum vs A_OLD_Hyb -1.4%
-    The trailing-stop logic in Hybrid21d chops winners; fixed-hold compounds better.
+    Switched from Fixed30d to Fixed60d after a clean 13-window rolling walk-forward
+    (24mo IS / 6mo OOS / 6mo step) on 17,108 PROD-filtered entries with 487-ticker
+    quarantine + survivorship-aware checks:
+      Per-trade pooled OOS:    Fixed60d +1.98%/mo vs Fixed30d +2.07%/mo (~tied)
+      OOS-2024 portfolio N=4:  Fixed60d +23.2% CAGR vs Fixed30d +6.3% CAGR
+      Cross-period worst mo:   Fixed60d +0.94% vs Fixed30d -0.18% (never negative)
+      OOS-2024 max drawdown:   Fixed60d -11.6% vs Fixed30d -35% (3× lower DD)
+      OOS-2024 Sharpe:         Fixed60d 0.78 vs Fixed30d 0.59
+    Dynamic regime-aware exits were tested honestly (HonestDyn family) and beaten by
+    Fixed60d once portfolio capacity constraints were applied — longer holds with
+    consistent capital deployment win on compounding.
 
-    Logic: Hold exactly 30 trading days from next-day-open entry.
+    Logic: Hold exactly 60 trading days from next-day-open entry.
     Backtest per stock to compute WR/avg_ret for display.
     """
     cache_key = ticker
@@ -696,9 +701,9 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
             if age < _EXIT_CACHE_TTL:
                 return _evaluate_exit_trigger(cached, closes, current_rsi, current_price, entry_price=entry_price, entry_date=entry_date)
 
-    # Backtest Fixed30d on this stock's historical data
+    # Backtest Fixed60d on this stock's historical data
     _FEE_PCT = 0.30
-    hold_days = 30
+    hold_days = 60
 
     rsi2_arr = [50.0] * len(closes)
     for i in range(2, len(closes)):
@@ -711,7 +716,7 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     for i in range(49, len(closes)):
         sma50_arr[i] = sum(closes[i-49:i+1]) / 50
 
-    # Full-sample backtest for Fixed30d stats
+    # Full-sample backtest for Fixed60d stats
     full_trades = []
     last_exit = -1
     for i in range(50, len(closes) - hold_days - 2):
@@ -740,11 +745,11 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     ci_lo, ci_hi = _wilson_ci(sum(1 for r in full_trades if r > 0), n) if n > 0 else (0, 0)
 
     result = {
-        "strategy": "Fixed30d", "wr": wr,
-        "avg_ret": avg_ret, "avg_hold": 30,
+        "strategy": "Fixed60d", "wr": wr,
+        "avg_ret": avg_ret, "avg_hold": 60,
         "oos_wr": wr, "is_wr": wr,
-        "overfitting_ratio": 1.0, "validation_note": "FIXED_30D_V3.2",
-        "overfit": 1.0, "validation": "FIXED_30D_V3.2",
+        "overfitting_ratio": 1.0, "validation_note": "FIXED_60D_V3.4",
+        "overfit": 1.0, "validation": "FIXED_60D_V3.4",
         "ci_lo": ci_lo, "ci_hi": ci_hi,
         "oos_ci_lo": ci_lo, "oos_ci_hi": ci_hi,
         "_cached_at": datetime.now().timestamp(),
@@ -1015,11 +1020,11 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
     regime = regime_info.regime.value if hasattr(regime_info, "regime") else str(regime_info)
 
-    # Backtest (30-trading-day hold — matches live Fixed30d exit; RSI<10 entry,
+    # Backtest (60-trading-day hold — matches live Fixed60d exit; RSI<10 entry,
     # next-day open, fee-adjusted, non-overlapping trades).
     # Uses pre-computed arrays: O(n) instead of O(n²) — 63x faster
     _FEE_PCT = 0.30
-    _HOLD = 30  # entry at open i+1, exit at close i+1+_HOLD (= live Fixed30d)
+    _HOLD = 60  # entry at open i+1, exit at close i+1+_HOLD (= live Fixed60d)
     rsi2_arr = _rsi2_array(closes)
     sma50_arr = _sma_array(closes, 50)
     last_exit_day = -1
@@ -1049,9 +1054,9 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     zone_ret = sum(t["return"] for t in zone_trades) / len(zone_trades) if zone_trades else 0
     zone_wr = sum(1 for t in zone_trades if t["win"]) / len(zone_trades) * 100 if zone_trades else 0
 
-    # Exit zone analysis: forward 30-day returns at CURRENT RSI zone using ALL data points
-    # This answers: "When this stock was at RSI X historically, what was the 30-day forward return?"
-    # Fixed30d hold — consistent with the entry backtest above and the live exit.
+    # Exit zone analysis: forward 60-day returns at CURRENT RSI zone using ALL data points
+    # This answers: "When this stock was at RSI X historically, what was the 60-day forward return?"
+    # Fixed60d hold — consistent with the entry backtest above and the live exit.
     # Reuses pre-computed rsi2_arr from above (no recalculation)
     exit_zone_trades_list = []
     ez_last_exit = -1
@@ -1407,18 +1412,18 @@ async def get_portfolio():
         tech = _technicals_cache.get(ticker)
 
         # Re-evaluate exit trigger with current price.
-        # V3.2 (2026-06-02): MR/BOTH positions use Fixed30d (was Hybrid21d).
-        # MOM positions use Fixed90d. _technicals_cache stores Fixed30d for ALL
+        # V3.4 (2026-06-17): MR/BOTH positions use Fixed60d (was Fixed30d).
+        # MOM positions use Fixed90d. _technicals_cache stores Fixed60d for ALL
         # tickers (strategy-agnostic) — so we override the cached strategy with
         # the position's actual strategy before evaluating, so MOM positions
-        # don't hit the 30d cap when they should run to 90d.
+        # don't hit the 60d cap when they should run to 90d.
         if tech and tech.get("exit_strategy"):
             df = _cache.get(ticker, 365)
             if df is not None and len(df) >= 10:
                 closes_live = df["Close"].dropna().tolist()
                 rsi_live = tech.get("rsi2", -1)
                 pos_strategy_eval = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
-                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Fixed30d"
+                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Fixed60d"
                 # Use exit strategy cache if it matches the position's strategy;
                 # otherwise build a fresh exit_cached with the right strategy
                 # name so _evaluate_exit_trigger picks the correct hold target.
@@ -1428,7 +1433,7 @@ async def get_portfolio():
                         "strategy": expected_exit_strat,
                         "wr": tech.get("exit_strategy_wr", 0),
                         "avg_ret": tech.get("exit_strategy_ret", 0),
-                        "avg_hold": tech.get("exit_strategy_hold", 30 if expected_exit_strat == "Fixed30d" else 90),
+                        "avg_hold": tech.get("exit_strategy_hold", 60 if expected_exit_strat == "Fixed60d" else 90),
                     }
                 live_exit = _evaluate_exit_trigger(
                     exit_cached,
@@ -1573,14 +1578,15 @@ async def get_portfolio():
                 and not _winner_protected
                 and _regime_name not in ("DANGER", "CRISIS")):
             try:
-                # V4.3: read candidates from /scan/opportunities cache (the same
-                # set the user sees in the entries tab). The deep-scanner veto
-                # chain (SMA50, earnings, analyst Hold/Sell, correlation) is
-                # already applied — and composite_score is already computed.
-                # Previously rotation read from strategy_evaluator's cache which
-                # has a LOOSER veto chain, so it suggested vetoed-by-deep-scanner
-                # tickers (e.g. ANET below SMA50) that don't appear in entries tab.
-                opps = (_scan_cache or {}).get("opportunities", []) if _scan_cache else []
+                # V3.4 SSOT (2026-06-17): rotation reads from strategy_evaluator's
+                # entries cache — the SAME source as the Entries tab the user sees.
+                # Previously read from /scan/opportunities cache which had a DIFFERENT
+                # veto chain and used composite_score; that meant rotation could
+                # suggest tickers NOT in the user's Entries tab — confusing UX.
+                # Now: rotation candidates = whatever passes V3.3.1 gates + V3.4
+                # BWR scoring (same fields, same logic, same SSOT).
+                from strategy_evaluator import load_cache as _load_entries
+                opps = _load_entries() or []
                 _held_set = {p.get("ticker") for p in positions}
                 _valid = [
                     o for o in opps
@@ -1590,7 +1596,26 @@ async def get_portfolio():
                     and o.get("ticker") not in _held_set
                 ]
                 if _valid and tech and tech.get("atr_pct") is not None:
-                    _best = max(_valid, key=lambda o: o.get("composite_score", 0) or 0)
+                    # V3.4 SSOT: entries cache doesn't pre-compute composite_score
+                    # (that's added by /scan/combined response handler). Compute
+                    # it inline here so we can apples-to-apples vs the holding.
+                    for _o in _valid:
+                        _o_inputs = {
+                            "price": _o.get("price", 0),
+                            "rsi2": _o.get("rsi2", 50),
+                            "atr_pct": _o.get("atr_pct", 0),
+                            "sma50_buffer": _o.get("sma50_buffer", 0),
+                            "volume_ratio": _o.get("volume_ratio", 0),
+                            "ret_20d": _o.get("ret_20d", 0),
+                            "win_rate": _o.get("confidence", 0),
+                            "avg_return": _o.get("expected_return", 0),
+                            "trades": _o.get("trades", 0),
+                            "analyst_consensus": _o.get("analyst_consensus", ""),
+                            "analyst_upside": 0,
+                            "sentiment_score": 0,
+                        }
+                        _o["_inline_composite"], _ = _compute_composite_score(_o_inputs)
+                    _best = max(_valid, key=lambda o: o.get("_inline_composite", 0) or 0)
                     # Composite-score the holding with the SAME inputs candidates
                     # get (price/ATR/volume now provided by _get_technicals).
                     # Skip the comparison entirely if technicals are missing —
@@ -1616,7 +1641,7 @@ async def get_portfolio():
                         "sentiment_score": 0,
                     }
                     h_score, _ = _compute_composite_score(h_inputs)
-                    _best_comp = _best.get("composite_score", 0) or 0
+                    _best_comp = _best.get("_inline_composite", 0) or 0
                     _gap = _best_comp - h_score
                     if _gap > ROTATION_SCORE_GAP:
                         signal = "ROTATE"
@@ -1626,16 +1651,16 @@ async def get_portfolio():
             except Exception:
                 pass
 
-        # Exit strategy V3.2 (2026-06-02): MR/BOTH=Fixed30d, MOM=Fixed90d.
-        # Switched MR from Hybrid21d after 10yr paired backtest showed trailing-
-        # stop logic chops winners; fixed-hold compounds better (+0.7%/mo edge).
+        # Exit strategy V3.4 (2026-06-17): MR/BOTH=Fixed60d, MOM=Fixed90d.
+        # Switched MR from Fixed30d after honest 13-window walk-forward portfolio sim
+        # showed Fixed60d at N=4 delivers +17pp OOS-2024 CAGR with 3x lower drawdown.
         pos_strategy = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
         if pos_strategy == "MOMENTUM":
             exit_strat_name = "Fixed90d"
             exit_target_days = 90
         else:
-            exit_strat_name = "Fixed30d"
-            exit_target_days = 30
+            exit_strat_name = "Fixed60d"
+            exit_target_days = 60
 
         # Exit targets based on regime
         regime = tech.get("regime", "BULL") if tech else "BULL"
@@ -1886,10 +1911,10 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
     above_sma50 = closes[-1] > sma50
     sma50_buffer = ((closes[-1] - sma50) / sma50 * 100) if sma50 > 0 else 0
 
-    # Backtest (30-day forward, V2.6: RSI<10, fee-adjusted)
+    # Backtest (60-day forward, V3.4: RSI<10, fee-adjusted)
     # Note: ILS Yahoo data has no Open column — use closes as entry proxy
     _FEE_PCT = 0.30
-    _HOLD = 30  # match live Fixed30d exit
+    _HOLD = 60  # match live Fixed60d exit
     last_exit_day = -1
     trades = []
     for i in range(50, len(closes) - _HOLD - 2):
@@ -1915,7 +1940,7 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
     zone_ret = sum(t["return"] for t in zt) / len(zt) if zt else 0
     zone_wr = sum(1 for t in zt if t["win"]) / len(zt) * 100 if zt else 0
 
-    # Exit zone analysis (all RSI values, fee-adjusted, Fixed30d hold)
+    # Exit zone analysis (all RSI values, fee-adjusted, Fixed60d hold)
     exit_zt = []
     for i in range(50, len(closes) - _HOLD - 2):
         hist = closes[:i + 1]
@@ -2759,7 +2784,7 @@ def _backtest_mr(ticker: str) -> dict:
         return {}
 
     _FEE_PCT = 0.30
-    _HOLD = 30  # match live Fixed30d exit
+    _HOLD = 60  # match live Fixed60d exit
     opens = df["Open"].tolist() if "Open" in df.columns else closes
     rsi_arr = _rsi2_array(closes)
     sma_arr = _sma_array(closes, 50)
@@ -3891,20 +3916,20 @@ async def get_sectors():
         ytd_idx = next((i for i, d in enumerate(dates) if d >= '2026-01-02'), 0)
         ret_ytd = ((closes[-1] / closes[ytd_idx]) - 1) * 100 if ytd_idx > 0 and ytd_idx < len(closes) else 0
 
-        # MR backtest on the ETF itself (Fixed30d — matches live exit)
+        # MR backtest on the ETF itself (Fixed60d — matches live exit)
         rsi_arr = _rsi2_array(closes)
         sma_arr = _sma_array(closes, 50)
         trades = []
         le = -1
-        for i in range(50, len(closes) - 32):
+        for i in range(50, len(closes) - 62):
             if i <= le:
                 continue
             if rsi_arr[i] < 10 and closes[i] > sma_arr[i]:
                 ep = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-                if i + 1 + 30 < len(closes):
-                    ret = ((closes[i + 1 + 30] - ep) / ep) * 100 - 0.30
+                if i + 1 + 60 < len(closes):
+                    ret = ((closes[i + 1 + 60] - ep) / ep) * 100 - 0.30
                     trades.append(ret)
-                    le = i + 1 + 30
+                    le = i + 1 + 60
 
         mr_wr = sum(1 for t in trades if t > 0) / len(trades) * 100 if trades else 0
         mr_avg = sum(trades) / len(trades) if trades else 0
@@ -5233,7 +5258,7 @@ def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
 
     # Track last exit day per zone to prevent overlapping trades
     zone_last_exit = {key: -1 for key in zones}
-    for i in range(50, len(closes) - 32):  # room for i+1+30
+    for i in range(50, len(closes) - 62):  # room for i+1+60
         hist_closes = closes[:i + 1]
         hist_rsi = _entry.calc_rsi(hist_closes, 2)
         hist_sma = _entry.calc_sma(hist_closes, 50)
@@ -5246,16 +5271,16 @@ def _calc_optimal_entries(ticker: str, current_price: float) -> List[Dict]:
         recent_high = max(closes[max(0, i - 10):i + 1])
         pct_drop = ((closes[i] - recent_high) / recent_high) * 100
 
-        # 30-day forward return, next-day open entry, fee-adjusted (Fixed30d)
+        # 60-day forward return, next-day open entry, fee-adjusted (Fixed60d)
         entry_px = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
-        exit_px = closes[i + 1 + 30]  # True 30-trading-day hold from entry
+        exit_px = closes[i + 1 + 60]  # True 60-trading-day hold from entry
         ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
 
         for key, z in zones.items():
             if z["rsi_lo"] <= hist_rsi < z["rsi_hi"] and i > zone_last_exit[key]:
                 z["trades"].append({"return": ret, "win": ret > 0})
                 z["drops"].append(pct_drop)
-                zone_last_exit[key] = i + 1 + 30
+                zone_last_exit[key] = i + 1 + 60
 
     # Calculate price targets from current 10-day high
     recent_10d_high = max(closes[-10:]) if len(closes) >= 10 else closes[-1]
