@@ -2947,7 +2947,7 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
     the "uncommitted" middle (0.5-1.0) underperforms.
 
     Active weights:
-      - ATR% (15-40pts)    — RECAL 2026-06-02: peak 8-10% (was 5-8%), -5 cap >15%
+      - ATR% (15-40pts)    — high-ATR rewarded (tail/skew = ROI); >=15% hard-vetoed (2026-06-19)
       - Analyst (15pts)    — +1.19% edge on 95K signals
       - BOTH bonus (0-12)  — NEW 2026-06-02: ret_20d>5% + atr>=4 (10yr +4.14%/trd)
       - Sentiment (10pts)  — informational
@@ -2998,28 +2998,30 @@ def _compute_composite_score(r: dict) -> Tuple[float, str]:
         eff_wr = 0
     factors.append(f"WR:{eff_wr:.0f}")
 
-    # 3. ATR% volatility (max 40 pts) — RECALIBRATED 2026-06-02 from 10-year
-    # OOS backtest (9,919 signals, 39 quarterly anchors). True sweet spot is
-    # 8-10% (not 5-8% as previously claimed):
-    #   ATR [3,4): MR +1.90%/mo (n=1047)
-    #   ATR [5,6): MR +2.11%/mo (n=237)
-    #   ATR [7,8): MR +2.34%/mo (n= 62)
-    #   ATR [8,10): MR +5.78%/mo (n= 65) ★ peak
-    #   ATR [10,15): MR +3.46%/mo (n= 65)  good
-    #   ATR [15+):  MR -13.04%/mo (n= 17) ★ catastrophic — cap to negative
-    # BOTH cohort even more skewed: [8,10) +10.95%/mo, [10,15) +33.38%/mo.
+    # 3. ATR% volatility (max 40 pts). NOTE on the "peak": a 2026-06-19 per-trade
+    # study (32,653 non-overlap MR trades) found that by WIN RATE/MEDIAN the band
+    # 4-8% looks best and 8-10% is a WR trough (~46%). BUT a head-to-head A/B of
+    # the composite as a RANKING function (top-10, 60d hold, 232 anchors,
+    # _composite_ab_test.py) showed demoting the 8-15% band REDUCES realized
+    # top-10 return: OLD +3.82% vs reweight-to-4-8% +2.54-3.06% (worse OOS too).
+    # Reason: this strategy's edge is positive-skew/tail-driven, and the tail
+    # lives in high-ATR names — so rewarding 8-15% ATR is correct for the
+    # maximize-ROI objective even though its per-trade WR is lower. The weights
+    # below are therefore KEPT as tuned; only the catastrophic >=15% cohort
+    # (29% WR / -12.6% avg, no tail benefit) is removed, now via a HARD VETO in
+    # _dict_to_opportunity (this -5 is just a backstop).
     if atr_pct >= 15:
-        atr_pts = -5    # extreme — historical losers, push out of top
+        atr_pts = -5    # backstop — hard-vetoed upstream in _dict_to_opportunity
     elif atr_pct >= 10:
-        atr_pts = 35    # still strong (especially BOTH)
+        atr_pts = 35    # high skew — tail winners that carry a concentrated book
     elif atr_pct >= 8:
-        atr_pts = 40    # ★ peak sweet spot
+        atr_pts = 40    # strong (per-trade WR dips here but top-10 ROI is best)
     elif atr_pct >= 6:
-        atr_pts = 35    # near-peak
+        atr_pts = 35    # best per-trade RETURN band (+7-9%)
     elif atr_pct >= 5:
-        atr_pts = 30    # decent (was 40 — recalibrated down)
+        atr_pts = 30
     elif atr_pct >= 4:
-        atr_pts = 20    # ok (was 25 — data shows [4,5) WORSE than [3,4))
+        atr_pts = 20
     elif atr_pct >= 3:
         atr_pts = 15    # minimum acceptable
     else:
@@ -3195,9 +3197,9 @@ def _meets_strict_criteria(r: dict) -> bool:
             and atr_pct >= 3
             and sma50_buffer >= 5
             and effective_wr >= 65
-            and trades >= 6
-            and zone_ret > 0
-            and avg_ret >= 3)
+            and trades >= 10  # align with the live MR gate + CLAUDE.md 10-trade mandate
+            and zone_ret > 0  # (was 6 — a 6-trade stock got a "strict BUY" badge but
+            and avg_ret >= 3)  # was vetoed on the entries tab; 2026-06-19 consistency fix
 
 
 def _check_correlation(ticker: str, existing_tickers: list, threshold: float = 0.7) -> dict:
@@ -3289,6 +3291,15 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     if not vetoed and price < 10:
         vetoed = True
         veto_reason = f"Price too low (${price:.2f} < $10)"
+    # 1b. Catastrophic volatility (point-in-time). 2026-06-19 validation on
+    #     32,653 non-overlap MR trades (10.5yr, IS+OOS consistent): ATR>=15%
+    #     entries return 29% WR / -12.6% avg (-4.0% even OOS) — the worst cohort
+    #     by a wide margin. The composite's soft -5pt penalty was too weak (a
+    #     high-prior-return stock could still surface). Hard veto instead.
+    atr_pct_v = r.get("atr_pct", 0)
+    if not vetoed and atr_pct_v >= 15:
+        vetoed = True
+        veto_reason = f"Volatility too high (ATR {atr_pct_v:.0f}% ≥ 15 — 29% WR, -12.6% avg)"
     # 2. Earnings veto (set in Phase 3 if applicable — binary event risk)
     # 3. Analyst consensus Hold/Sell (backtested +1.19% edge, stays)
     analyst_con = r.get("analyst_consensus", "")
@@ -3308,13 +3319,21 @@ def _dict_to_opportunity(r: dict, holdings_scores: dict) -> ScanOpportunity:
     # before recommending any entry. Apply Bayesian-shrunk WR so single-sample
     # noise doesn't game the gate. Stocks failing this fall to the "Vetoed"
     # section and don't pollute the main entries list.
+    # Require BOTH conditions (the mandate is conjunctive): >=10 trades AND WR>55.
+    # Previously the WR check only ran when trades>=10, so a 6-9 trade stock with a
+    # terrible WR skipped validation entirely and was emitted as a clean entry —
+    # insufficient sample must FAIL, not get a free pass (2026-06-19 fix).
     _trades_n = trades_count
-    if not vetoed and _trades_n >= 10:
-        _wins_n = int(round(r.get("win_rate", 0) * _trades_n / 100))
-        _bwr = _bayesian_wr(_wins_n, _trades_n)
-        if _bwr <= 55:
+    if not vetoed:
+        if _trades_n < 10:
             vetoed = True
-            veto_reason = f"V2.7 validation: WR {_bwr:.0f}% ≤ 55 (need > 55)"
+            veto_reason = f"V2.7 validation: {_trades_n} trades < 10 (insufficient sample)"
+        else:
+            _wins_n = int(round(r.get("win_rate", 0) * _trades_n / 100))
+            _bwr = _bayesian_wr(_wins_n, _trades_n)
+            if _bwr <= 55:
+                vetoed = True
+                veto_reason = f"V2.7 validation: WR {_bwr:.0f}% ≤ 55 (need > 55)"
 
     # Composite ranking score
     composite, ranking_factors = _compute_composite_score(r)
@@ -6408,8 +6427,13 @@ async def quote_refresh_loop():
                         updated = {}
                         for d in data:
                             ticker = d.get("ticker", "").upper()
-                            last = d.get("last") or d.get("tngoLast") or d.get("prevClose") or 0
-                            prev = d.get("prevClose") or last
+                            # Prefer the real intraday price (tngoLast); never fall back
+                            # to prevClose as a "live" price — with ts=today that stamps
+                            # yesterday's close as today's quote and manufactures phantom
+                            # oversold (RSI2=0) signals. Mirrors _fetch_tiingo_iex_batch
+                            # (2026-06-19 fix — this path had re-introduced the bug).
+                            last = d.get("tngoLast") or d.get("last") or 0
+                            prev = d.get("prevClose") or 0
                             if last and last > 0:
                                 result = {
                                     "price": round(float(last), 2),
@@ -6760,9 +6784,15 @@ async def cache_refresh_loop():
                 rest = [t for t in stale if t not in priority]
                 ordered = priority + rest
 
-                result = await _cache.refresh(ordered)
-                print(f"[CacheRefresh] Done: {result.get('refreshed', 0)} refreshed, "
-                      f"{result.get('failed', 0)} failed")
+                try:
+                    # Bound the refresh (was unbounded — could run for many minutes if
+                    # the whole universe is flagged stale). Holdings are refreshed first
+                    # so they always complete even if the tail times out. (2026-06-19)
+                    result = await asyncio.wait_for(_cache.refresh(ordered), timeout=900)
+                    print(f"[CacheRefresh] Done: {result.get('refreshed', 0)} refreshed, "
+                          f"{result.get('failed', 0)} failed")
+                except asyncio.TimeoutError:
+                    print(f"[CacheRefresh] Refresh timed out (>900s) over {len(ordered)} stale tickers")
 
             # Invalidate signal + exit strategy caches so next request uses fresh data
             _signal_cache.clear()

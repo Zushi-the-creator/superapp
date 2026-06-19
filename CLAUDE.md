@@ -125,10 +125,11 @@ REQUIRED:  Price > SMA(50)
 - 5-day return > 15% VETO
 - Price >= $10 and **price <= $200** (research-backed cap; >$200 has -5% edge)
 
-### VETO chain (the four filters that actually block buys, `api_v2.py:_dict_to_opportunity`)
+### VETO chain (the filters that actually block buys, `api_v2.py:_dict_to_opportunity`)
 | Filter | Condition | Why it stayed |
 |--------|-----------|---------------|
 | Penny | Price < $10 | Volatility / liquidity |
+| Volatility (NEW 2026-06-19) | ATR(14)% >= 15% | 29% WR / -12.6% avg on 32K-trade validation — worst cohort, no tail benefit. Was a soft -5pt composite penalty; now a hard veto. |
 | Earnings | <= 7 days to next earnings | Binary event risk |
 | Analyst | Consensus = Hold/Sell/Underperform/Strong Sell | +1.19% edge in backtest |
 | Correlation | Holdings correlation > 0.7 | Concentration risk |
@@ -173,7 +174,7 @@ Multi-factor 0-100 ranking computed in `_compute_composite_score`. After audits 
 
 | Factor | Weight | Why |
 |---|---|---|
-| ATR% (recalibrated 2026-06-02) | up to 40 pts; -5 if ATR>15 | 10yr OOS sweet spot 8-10% (was 5-8%); ATR>15 = -13%/mo historical |
+| ATR% | up to 40 pts; ATR>=15 now HARD-VETOED (2026-06-19) | Per-trade WR/return sweet spot is 4-8% (8-10% is a WR trough), BUT a top-10 ranking A/B (`_composite_ab_test.py`) showed demoting 8-15% LOWERS realized ROI — the edge is tail/skew-driven and the tail lives in high ATR, so high-ATR weights are kept. Only the catastrophic >=15% band (29% WR / -12.6%) is removed. |
 | Analyst consensus | 15 pts | +1.19% edge on 95K signals |
 | BOTH-strategy bonus (NEW 2026-06-02) | 0-12 pts | ret_20d>5% + atr>=4 → BOTH cohort (+4.14%/trd in 10yr study) |
 | Sentiment score | 10 pts | informational |
@@ -206,12 +207,26 @@ Drawdown- and SMA-based. Pauses entries when stocks won't reliably mean-revert.
 
 The `pause_mr` flag is wired in `/api/v2/scan/combined` to filter MR signals when WEAK fires.
 
-### Known drift to fix later
-- Sentiment veto removed in `deep_scanner` but still active in `momentum_scanner.py:232-234` and `atlas_v2/entry.py:423-426`. Need a single source of truth.
-- `atlas_v2/__init__.py:55` reports `__version__ = "2.0.0"` — stale label.
-- `KPICards.tsx:104,153` reads `regime.spy_5d_return.toFixed(1)` without null guard.
-- 23 of 28 endpoints have no FastAPI `response_model=` declaration.
-- `backtest_cache` is refreshed weekly, not daily — WR/avg_return for live signals can be ~3 weeks behind during quiet periods.
+### Fixed in 2026-06-19 full-system QA
+- **Universe staleness (CRITICAL)**: `data_cache.get_stale_tickers`/`is_fresh` now key on `data_end` (latest bar), not `last_updated` (refresh-touch timestamp) — the bug that hid genuinely-oversold names by leaving their bars stale while flagged fresh. AND `_newest_bar_date` now excludes VIX (Yahoo intraday bar = today) + crypto (`*USD`, 7-day week) so they don't poison the equity baseline and flag the whole universe stale → refresh storms.
+- **Phantom-oversold (HIGH)**: `quote_refresh_loop` no longer falls back to `prevClose` as a "live" price (mirrors `_fetch_tiingo_iex_batch`); `_fresh_live_px()` + live-overlay `ts` guard.
+- **WR-gate bypass (HIGH)**: `_dict_to_opportunity` now vetoes `<10 trades` (was a free pass); `_meets_strict_criteria` trades floor 6→10.
+- **Zone-stat bias (HIGH)**: `deep_scanner` zone-return loop now applies the same ATR≥3 + price≥10 filters as the tradable cohort.
+- **KPICards (HIGH)**: `spy_5d_return` null-guarded; regime label/color now driven by `pause_entries`/`position_size_pct` + the actual emitted regime name (DANGER/CRISIS now correctly show "ENTRIES PAUSED"; the never-emitted BEAR/DECLINING/CAUTION branches removed).
+- **Robustness**: atomic `save_cache` (tmp+os.replace, no half-written JSON); `busy_timeout=5000` on all `positions.py` connections; bounded (900s) subsequent-run cache refresh.
+- **Stale-DOC items confirmed ALREADY FIXED in code** (do not "re-fix"): sentiment veto is removed in momentum_scanner + atlas_v2 (informational only); `atlas_v2/__init__.py` is `2.7.0` not `2.0.0`; `backtest_cache` is refreshed when >24h old (not weekly).
+
+### Open items needing a backtest decision (NOT changed — would alter live exit behavior)
+- **Momentum trailing-stop override on MR/Fixed60d** (`api_v2.py:_evaluate_exit_trigger` ~871): an 8%-trailing override currently lets profitable trending MR winners run *past* day 60, contradicting "no stops / let the Fixed60d timer fire." Gating it to MOM-only would force day-60 exits — needs a backtest before changing.
+- **`_select_best_exit` hardcodes Fixed60d for all strategies**: the second held-position endpoint (~5543) evaluates MOMENTUM on a 60d timer instead of Fixed90d (premature). Fix needs the position strategy threaded through.
+- **Per-stock exit backtest off-by-one**: `_select_best_exit` holds 60 bars; precompute + live timer hold 61. Align the convention.
+- **Earnings<7d / sentiment early-exit not wired into the live holdings exit path** — only "model EXIT" is. Decide whether to wire the Finnhub-calendar (not the false-positive news detector) into the exit ladder.
+
+### Lower-priority (cosmetic / non-blocking)
+- 27 of 31 endpoints have no FastAPI `response_model=` (no output validation on `/scan/combined`, `/analyze`, etc. — guardrail gap, not a live bug).
+- `AllocationChart.tsx` appears unused (dead bundle weight or a missing Portfolio-tab feature).
+- `SectorsTab` has no error/retry state (a failed first load shows "No sector data" until remount).
+- `OpportunitiesTab` force-refresh can stack 5s pollers if clicked repeatedly (use a ref).
 
 ---
 

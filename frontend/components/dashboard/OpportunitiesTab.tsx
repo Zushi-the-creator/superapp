@@ -233,6 +233,7 @@ export function OpportunitiesTab() {
             vetoReason?: string;
             isMR: boolean;
             qualityTier?: string;
+            priceIsLive?: boolean;
           };
 
           const unified: UnifiedEntry[] = [];
@@ -269,6 +270,7 @@ export function OpportunitiesTab() {
               volumeRatio: sig.volume_ratio,
               isMR: sig.strategy !== "MOMENTUM",
               qualityTier: (sig as unknown as { quality_tier?: string }).quality_tier,
+              priceIsLive: (sig as unknown as { price_is_live?: boolean }).price_is_live,
             });
           }
 
@@ -329,7 +331,12 @@ export function OpportunitiesTab() {
                             "bg-blue-500/20 text-blue-400"
                           )}>{entry.typeLabel}</span>
                         </div>
-                        <span className="text-neutral-300 font-medium">{formatCurrency(entry.price)}</span>
+                        <span className="text-neutral-300 font-medium flex items-center gap-1">
+                          {formatCurrency(entry.price)}
+                          {entry.priceIsLive === false && (
+                            <span title="Cached close — not a live intraday price" className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-400 font-normal">stale</span>
+                          )}
+                        </span>
                       </div>
 
                       {/* Metrics — V3.5: headline "Score" is composite_score (the sort

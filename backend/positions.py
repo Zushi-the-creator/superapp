@@ -24,9 +24,19 @@ class PositionManager:
         # Initialize database
         self._init_database()
 
+    def _connect(self):
+        """Open a connection with busy_timeout set. busy_timeout is PER-CONNECTION
+        (unlike journal_mode=WAL which is persistent), so every connection must set
+        it — otherwise concurrent access from the 5 background loops + request
+        handlers + precompute subprocess raises 'database is locked' immediately
+        instead of waiting up to 5s (2026-06-19 fix)."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
     def _init_database(self):
         """Create database tables if they don't exist"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
@@ -132,7 +142,7 @@ class PositionManager:
     def _add_position_sync(self, ticker: str, entry_date: str, entry_price: float,
                            shares: float, notes: str, currency: str = "USD") -> Dict:
         """Synchronous version of add_position"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -182,7 +192,7 @@ class PositionManager:
 
     def _close_position_sync(self, position_id: int, exit_date: str, exit_price: float) -> Dict:
         """Synchronous version of close_position"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -237,7 +247,7 @@ class PositionManager:
 
     def _get_open_positions_sync(self, currency: str = None) -> List[Dict]:
         """Synchronous version of get_open_positions"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -290,7 +300,7 @@ class PositionManager:
     def _get_position_performance_sync(self, position_id: int, current_price: float,
                                        current_signal: Optional[Dict]) -> Dict:
         """Synchronous version of get_position_performance"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -424,7 +434,7 @@ class PositionManager:
     def _update_position_snapshot_sync(self, position_id: int, current_price: float,
                                        signal: str, signal_strength: int, rsi: float):
         """Synchronous version of update_position_snapshot"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -474,7 +484,7 @@ class PositionManager:
 
     def _get_all_positions_sync(self, include_closed: bool) -> List[Dict]:
         """Synchronous version of get_all_positions"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -509,7 +519,7 @@ class PositionManager:
 
     def _delete_position_sync(self, position_id: int) -> Dict:
         """Synchronous version of delete_position"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -535,7 +545,7 @@ class PositionManager:
                         fee: float = 1.50, realized_pnl: float = None,
                         notes: str = "", position_id: int = None) -> Dict:
         """Record a buy/sell transaction."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
             total = price * shares
@@ -577,7 +587,7 @@ class PositionManager:
 
     def get_transactions(self, ticker: str = None, limit: int = 100) -> List[Dict]:
         """Get transaction history, optionally filtered by ticker."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
@@ -607,26 +617,32 @@ class PositionManager:
             conn.close()
 
     def get_transaction_summary(self) -> Dict:
-        """Get total fees paid and realized P&L.
-        Uses actual fees recorded per transaction (broker-verified).
+        """Get total fees paid, total tax paid, and realized P&L.
+        Uses actual amounts recorded per transaction (broker-verified).
+        TAX rows are excluded from fees/trade_count and surfaced separately.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         try:
             cursor = conn.cursor()
 
             cursor.execute("SELECT COALESCE(SUM(realized_pnl), 0) FROM transactions WHERE realized_pnl IS NOT NULL")
             total_pnl = cursor.fetchone()[0]
 
-            # Use actual fees from transactions (broker-verified)
-            cursor.execute("SELECT COALESCE(SUM(fee), 0), COUNT(*) FROM transactions")
+            # Trading fees + count exclude TAX rows
+            cursor.execute("SELECT COALESCE(SUM(fee), 0), COUNT(*) FROM transactions WHERE action != 'TAX'")
             row = cursor.fetchone()
             total_fees = row[0]
             count = row[1]
+
+            # TAX rows carry their amount in `total`, fee=0
+            cursor.execute("SELECT COALESCE(SUM(total), 0) FROM transactions WHERE action='TAX'")
+            total_tax = cursor.fetchone()[0]
         finally:
             conn.close()
 
         return {
             "total_fees": total_fees,
+            "total_tax": total_tax,
             "total_realized_pnl": total_pnl,
             "trade_count": count,
         }

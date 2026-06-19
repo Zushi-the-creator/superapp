@@ -408,7 +408,12 @@ class DeepScanner:
                 trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i], "hold": HOLD})
                 last_exit_day = ex_idx
 
-            if zone_lo <= rsi2_arr[i] < zone_hi and i > zone_last_exit:
+            # Zone cohort MUST use the same tradability filters as the main trades
+            # loop (ATR>=3, price>=10) — otherwise zone_return/zone_wr are computed
+            # over low-ATR / sub-$10 bars the live scanner would never enter, biasing
+            # ml_score (the primary sort key) with untradable stats (2026-06-19 fix).
+            if (zone_lo <= rsi2_arr[i] < zone_hi and i > zone_last_exit
+                    and closes[i] >= 10 and atr_pct_arr[i] >= 3.0):
                 zone_trades_list.append({"return": ret, "win": ret > 0})
                 zone_last_exit = ex_idx
 

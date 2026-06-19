@@ -121,9 +121,18 @@ class DataCache:
         return [r[0] for r in rows]
 
     def _newest_bar_date(self) -> Optional[str]:
-        """Most recent bar date across the whole cache. Self-calibrates to the
-        market calendar (handles weekends / intraday-before-today's-bar)."""
-        row = self.conn.execute('SELECT MAX(data_end) FROM cache_meta').fetchone()
+        """Most recent EQUITY bar date — the freshness baseline. Self-calibrates to
+        the equity market calendar (handles weekends / intraday-before-today's-bar).
+
+        Excludes VIX (Yahoo returns an intraday in-progress bar dated TODAY, ahead of
+        Tiingo's after-close stock bars) and crypto (*USD, trades 7 days/week). If
+        included, MAX(data_end) would sit a day ahead of every equity, flagging the
+        ENTIRE universe stale every cycle → full-universe refresh storms that defeat
+        the staleness optimization and burn compute/bandwidth (2026-06-19 fix)."""
+        row = self.conn.execute(
+            "SELECT MAX(data_end) FROM cache_meta "
+            "WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD'"
+        ).fetchone()
         return row[0] if row and row[0] else None
 
     def is_fresh(self, ticker: str) -> bool:

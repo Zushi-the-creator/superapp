@@ -1,20 +1,18 @@
 "use client";
 
-import { DollarSign, TrendingUp, Calendar, Layers, Target, Banknote, Activity, HeartPulse } from "lucide-react";
+import { DollarSign, TrendingUp, Calendar, Banknote, Activity, ArrowLeftRight, Clock } from "lucide-react";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
-import type { PortfolioSummary, MarketRegime, StrategyHealth } from "@/lib/types";
+import type { PortfolioSummary, MarketRegime } from "@/lib/types";
 import { CardSkeleton } from "@/components/shared/Skeleton";
 
 export function KPICards({
   summary,
   loading,
   marketRegime,
-  strategyHealth,
 }: {
   summary: PortfolioSummary | null;
   loading: boolean;
   marketRegime?: MarketRegime | null;
-  strategyHealth?: StrategyHealth | null;
 }) {
   if (loading || !summary) {
     return (
@@ -26,8 +24,10 @@ export function KPICards({
     );
   }
 
-  // Total P&L = realized + unrealized - all fees (commissions + broker tax)
-  const totalPnl = (summary.realized_pnl ?? 0) + summary.total_pnl - summary.total_fees;
+  // Total P&L = current portfolio value (positions + cash) − everything deposited.
+  // This is the ground truth: it implicitly accounts for realized + unrealized − fees − tax,
+  // and stays correct regardless of how those flows get accounted for in the ledger.
+  const totalPnl = summary.total_value - (summary.total_deposited ?? 0);
   const totalPnlPct = (summary.total_deposited ?? 0) > 0
     ? (totalPnl / summary.total_deposited) * 100 : 0;
 
@@ -49,60 +49,70 @@ export function KPICards({
       bg: "bg-blue-500/10",
     },
     {
-      label: "Today's P&L",
+      label: "Today",
       value: `${formatCurrency(summary.day_pnl)} (${summary.day_pnl_pct >= 0 ? "+" : ""}${summary.day_pnl_pct.toFixed(2)}%)`,
-      icon: Calendar,
+      icon: Clock,
       color: pnlColor(summary.day_pnl),
       bg: summary.day_pnl >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
     {
-      label: "Realized P&L",
-      value: `${formatCurrency(summary.realized_pnl ?? 0)}`,
-      sub: `Fees: ${formatCurrency(summary.total_fees)}`,
-      icon: Banknote,
-      color: pnlColor(summary.realized_pnl ?? 0),
-      bg: (summary.realized_pnl ?? 0) >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
+      label: "Yesterday",
+      value: `${(summary.yesterday_pnl ?? 0) >= 0 ? "+" : ""}${formatCurrency(summary.yesterday_pnl ?? 0)}`,
+      sub: `${(summary.yesterday_pnl_pct ?? 0) >= 0 ? "+" : ""}${(summary.yesterday_pnl_pct ?? 0).toFixed(2)}%`,
+      icon: Calendar,
+      color: pnlColor(summary.yesterday_pnl ?? 0),
+      bg: (summary.yesterday_pnl ?? 0) >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
     {
-      label: `${summary.position_count}/${summary.max_positions ?? 5} Positions`,
-      value: `WR ${summary.avg_win_rate.toFixed(0)}% · ${summary.slots_available ?? 0} slots`,
-      icon: Target,
-      color: summary.avg_win_rate >= 80 ? "text-signal-buy" : summary.avg_win_rate >= 65 ? "text-amber-400" : "text-signal-sell",
-      bg: summary.avg_win_rate >= 80 ? "bg-signal-buy/10" : summary.avg_win_rate >= 65 ? "bg-amber-500/10" : "bg-signal-sell/10",
+      label: "Last 7 Days",
+      value: `${(summary.week_pnl ?? 0) >= 0 ? "+" : ""}${formatCurrency(summary.week_pnl ?? 0)}`,
+      sub: `${(summary.week_pnl_pct ?? 0) >= 0 ? "+" : ""}${(summary.week_pnl_pct ?? 0).toFixed(2)}%`,
+      icon: ArrowLeftRight,
+      color: pnlColor(summary.week_pnl ?? 0),
+      bg: (summary.week_pnl ?? 0) >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
+    },
+    {
+      // Gross profit = portfolio value − total deposited.
+      // Equivalent to realized + unrealized − fees − tax (within rounding noise).
+      // This is the bottom-line "what did I actually make" number.
+      label: "Gross Profit",
+      value: formatCurrency(totalPnl),
+      sub: `Closed: ${formatCurrency(summary.realized_pnl ?? 0)} · Open: ${formatCurrency(summary.total_pnl)} · Fees ${formatCurrency(-summary.total_fees)} · Tax ${formatCurrency(-(summary.total_tax ?? 0))}`,
+      icon: Banknote,
+      color: pnlColor(totalPnl),
+      bg: totalPnl >= 0 ? "bg-signal-buy/10" : "bg-signal-sell/10",
     },
   ];
 
   // VIX regime card
   const regime = marketRegime;
+  // Drive color/label off the backend's actual fields (pause_entries,
+  // position_size_pct) and the emitted regime NAME — not a hardcoded list of
+  // regime strings, several of which (BEAR/DECLINING/CAUTION) the backend never
+  // emits, so DANGER/CRISIS previously showed no "PAUSED" warning (2026-06-19 fix).
+  const _sizePct = regime?.position_size_pct ?? 100;
+  const _spy5d = regime?.spy_5d_return ?? 0;
   const regimeColor = !regime || regime.regime === "UNKNOWN"
     ? "text-neutral-400"
-    : regime.regime === "HEALTHY"
-    ? "text-signal-buy"
-    : regime.regime === "CAUTION"
+    : regime.pause_entries
+    ? "text-signal-sell"
+    : _sizePct < 100
     ? "text-amber-400"
-    : "text-signal-sell";
+    : "text-signal-buy";
   const regimeBg = !regime || regime.regime === "UNKNOWN"
     ? "bg-neutral-700/10"
-    : regime.regime === "HEALTHY"
-    ? "bg-signal-buy/10"
-    : regime.regime === "CAUTION"
+    : regime.pause_entries
+    ? "bg-signal-sell/10"
+    : _sizePct < 100
     ? "bg-amber-500/10"
-    : "bg-signal-sell/10";
-  const regimeLabel = regime
-    ? regime.regime === "BEAR"
-      ? `SPY < SMA200 — BEAR MARKET`
-      : regime.regime === "CRISIS"
-      ? `VIX ${regime.vix} — PAUSED`
-      : regime.regime === "DECLINING"
-      ? `SPY ${regime.spy_5d_return >= 0 ? "+" : ""}${regime.spy_5d_return.toFixed(1)}% — ENTRIES PAUSED`
-      : regime.regime === "FEAR"
-      ? `VIX ${regime.vix} — ${regime.position_size_pct}% Size`
-      : regime.regime === "CAUTION"
-      ? `VIX ${regime.vix} — ${regime.position_size_pct}% Size`
-      : regime.regime === "HEALTHY"
-      ? `VIX ${regime.vix} — Full Size`
-      : `VIX ${regime.vix}`
-    : "No Data";
+    : "bg-signal-buy/10";
+  const regimeLabel = !regime || regime.regime === "UNKNOWN"
+    ? "No Data"
+    : regime.pause_entries
+    ? `${regime.regime} — ENTRIES PAUSED`
+    : _sizePct < 100
+    ? `${regime.regime} — ${_sizePct}% Size`
+    : `${regime.regime} — Full Size`;
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-7 gap-3">
@@ -143,65 +153,8 @@ export function KPICards({
         </div>
         {regime && (
           <div className="text-[10px] text-neutral-500 mt-0.5">
-            SPY 5d: {regime.spy_5d_return >= 0 ? "+" : ""}{regime.spy_5d_return.toFixed(1)}%
+            SPY 5d: {_spy5d >= 0 ? "+" : ""}{_spy5d.toFixed(1)}%
             {regime.pause_entries && " · Entries paused"}
-          </div>
-        )}
-      </div>
-      {/* Strategy Health Card */}
-      <div
-        className={cn(
-          "rounded-xl border border-neutral-800 p-4",
-          !strategyHealth || strategyHealth.status === "INSUFFICIENT"
-            ? "bg-neutral-700/10"
-            : strategyHealth.status === "OUTPERFORMING"
-            ? "bg-signal-buy/10"
-            : strategyHealth.status === "HEALTHY"
-            ? "bg-signal-buy/10"
-            : strategyHealth.status === "WARNING"
-            ? "bg-amber-500/10"
-            : "bg-signal-sell/10",
-          strategyHealth?.status === "DEGRADED" && "animate-pulse"
-        )}
-      >
-        <div className="flex items-center gap-2 mb-2">
-          <HeartPulse className={cn("h-4 w-4",
-            !strategyHealth || strategyHealth.status === "INSUFFICIENT"
-              ? "text-neutral-400"
-              : strategyHealth.status === "OUTPERFORMING"
-              ? "text-emerald-400"
-              : strategyHealth.status === "HEALTHY"
-              ? "text-signal-buy"
-              : strategyHealth.status === "WARNING"
-              ? "text-amber-400"
-              : "text-signal-sell"
-          )} />
-          <span className="text-xs text-neutral-400">Strategy Health</span>
-        </div>
-        <div className={cn("text-lg font-semibold",
-          !strategyHealth || strategyHealth.status === "INSUFFICIENT"
-            ? "text-neutral-400"
-            : strategyHealth.status === "OUTPERFORMING"
-            ? "text-emerald-400"
-            : strategyHealth.status === "HEALTHY"
-            ? "text-signal-buy"
-            : strategyHealth.status === "WARNING"
-            ? "text-amber-400"
-            : "text-signal-sell"
-        )}>
-          {!strategyHealth || strategyHealth.status === "INSUFFICIENT"
-            ? "No Data"
-            : strategyHealth.status === "OUTPERFORMING"
-            ? `Strong — WR ${strategyHealth.rolling_wr.toFixed(0)}%`
-            : strategyHealth.status === "HEALTHY"
-            ? `Strategy OK — WR ${strategyHealth.rolling_wr.toFixed(0)}%`
-            : strategyHealth.status === "WARNING"
-            ? `Watch — WR ${strategyHealth.rolling_wr.toFixed(0)}%`
-            : `DEGRADED — WR ${strategyHealth.rolling_wr.toFixed(0)}%`}
-        </div>
-        {strategyHealth && strategyHealth.status !== "INSUFFICIENT" && (
-          <div className="text-[10px] text-neutral-500 mt-0.5">
-            {strategyHealth.trades_analyzed} trades · Expected {strategyHealth.expected_wr}% · Gap {strategyHealth.gap_pp > 0 ? "+" : ""}{strategyHealth.gap_pp}pp
           </div>
         )}
       </div>

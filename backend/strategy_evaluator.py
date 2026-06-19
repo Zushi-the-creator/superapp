@@ -483,10 +483,14 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
 
 
 def save_cache(signals: List[EntrySignal]):
-    """Save evaluated signals to disk."""
+    """Save evaluated signals to disk. Atomic write (tmp + os.replace) so a reader
+    in the async process never sees a half-written file mid-dump — that produced
+    intermittent JSONDecodeError / empty-entries-tab flakes (2026-06-19 fix)."""
     path = os.path.join(CACHE_DIR, f"entries_{datetime.now().strftime('%Y-%m-%d')}.json")
-    with open(path, "w") as f:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
         json.dump([asdict(s) for s in signals], f, indent=2)
+    os.replace(tmp, path)  # atomic on POSIX
     print(f"[Evaluator] Saved {len(signals)} entries to {path}")
     return path
 
