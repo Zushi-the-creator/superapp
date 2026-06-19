@@ -216,11 +216,13 @@ The `pause_mr` flag is wired in `/api/v2/scan/combined` to filter MR signals whe
 - **Robustness**: atomic `save_cache` (tmp+os.replace, no half-written JSON); `busy_timeout=5000` on all `positions.py` connections; bounded (900s) subsequent-run cache refresh.
 - **Stale-DOC items confirmed ALREADY FIXED in code** (do not "re-fix"): sentiment veto is removed in momentum_scanner + atlas_v2 (informational only); `atlas_v2/__init__.py` is `2.7.0` not `2.0.0`; `backtest_cache` is refreshed when >24h old (not weekly).
 
-### Open items needing a backtest decision (NOT changed — would alter live exit behavior)
-- **Momentum trailing-stop override on MR/Fixed60d** (`api_v2.py:_evaluate_exit_trigger` ~871): an 8%-trailing override currently lets profitable trending MR winners run *past* day 60, contradicting "no stops / let the Fixed60d timer fire." Gating it to MOM-only would force day-60 exits — needs a backtest before changing.
-- **`_select_best_exit` hardcodes Fixed60d for all strategies**: the second held-position endpoint (~5543) evaluates MOMENTUM on a 60d timer instead of Fixed90d (premature). Fix needs the position strategy threaded through.
-- **Per-stock exit backtest off-by-one**: `_select_best_exit` holds 60 bars; precompute + live timer hold 61. Align the convention.
-- **Earnings<7d / sentiment early-exit not wired into the live holdings exit path** — only "model EXIT" is. Decide whether to wire the Finnhub-calendar (not the false-positive news detector) into the exit ladder.
+### Exit-logic items RESOLVED in 2026-06-19 QA (backtested where behavior changed)
+- **MR trailing-stop override REMOVED** (`_evaluate_exit_trigger`): the 8%-trailing override is now gated to `strategy=="Fixed90d"` (momentum only). A 32,607-trade backtest (`_exit_policy_bt.py`) proved it HURTS MR — cuts the median affected trade -3.0% (5,649 worse vs 3,147 better), OOS median +0.20%→-0.22%, OOS WR 51%→49%; only a tail-driven mean bump. Confirms "stops hurt mean reversion." MR/BOTH now let the Fixed60d timer fire.
+- **`_select_best_exit` is now strategy-aware**: Fixed90d/90-day hold for MOMENTUM, Fixed60d/60 for MR/BOTH; cache key includes strategy (was returning the MR result for MOM positions). The 2nd held-position endpoint now passes the position strategy + uses the right target_hold_days (90 for MOM).
+- **Off-by-one fixed**: `_select_best_exit` now holds `ed+hold` bars (was `ed+hold-1`), matching the live timer + precompute cache.
+- **Earnings<7d exit WIRED** into the live holdings exit ladder (Priority 2) using the forward Finnhub/Tiingo calendar (`next_earnings_map`), NOT the false-positive news detector. The documented "always EXIT on earnings <7d" rule now actually fires.
+- **2nd-endpoint `days_held`** now weekday-counted (was calendar — ran the days-remaining counter ~40% fast).
+- Note: `_is_true_bear` bear-exit branches remain inert (regime never emits "BEAR") — left inert intentionally; activating panic-sells would contradict the "don't sell into market-wide crashes" strategy.
 
 ### Lower-priority (cosmetic / non-blocking)
 - 27 of 31 endpoints have no FastAPI `response_model=` (no output validation on `/scan/combined`, `/analyze`, etc. — guardrail gap, not a live bug).

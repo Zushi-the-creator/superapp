@@ -709,8 +709,10 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
 
 
 
-def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None) -> Dict:
-    """Fixed60d exit for MR stocks (V3.4 — 2026-06-17).
+def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None, strategy: str = "MEAN_REVERSION") -> Dict:
+    """Fixed60d exit for MR stocks, Fixed90d for MOMENTUM (V3.4 — 2026-06-17).
+    strategy-aware as of 2026-06-19 (was hardcoded Fixed60d for all — MOM positions
+    at the held-position endpoint were wrongly evaluated on a 60d timer).
 
     Switched from Fixed30d to Fixed60d after a clean 13-window rolling walk-forward
     (24mo IS / 6mo OOS / 6mo step) on 17,108 PROD-filtered entries with 487-ticker
@@ -727,7 +729,9 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
     Logic: Hold exactly 60 trading days from next-day-open entry.
     Backtest per stock to compute WR/avg_ret for display.
     """
-    cache_key = ticker
+    # Key by ticker AND strategy — Fixed60d (MR/BOTH) and Fixed90d (MOM) are
+    # different backtests; a shared key returned the MR result for a MOM position.
+    cache_key = f"{ticker}:{strategy}"
     current_price = closes[-1] if closes else 0
 
     # Check cache with TTL
@@ -739,9 +743,9 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
             if age < _EXIT_CACHE_TTL:
                 return _evaluate_exit_trigger(cached, closes, current_rsi, current_price, entry_price=entry_price, entry_date=entry_date)
 
-    # Backtest Fixed60d on this stock's historical data
+    # Backtest the strategy's fixed hold on this stock's historical data
     _FEE_PCT = 0.30
-    hold_days = 60
+    hold_days = 90 if strategy == "MOMENTUM" else 60
 
     rsi2_arr = [50.0] * len(closes)
     for i in range(2, len(closes)):
@@ -768,7 +772,10 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
         ep = opens[ed] if opens and ed < len(opens) and opens[ed] > 0 else closes[i]
         if ep <= 0:
             continue
-        exit_idx = ed + hold_days - 1
+        # exit on the hold_days-th trading bar after the entry open — matches the
+        # live timer (_evaluate_exit_trigger fires at trading_days_held >= hold) and
+        # the precompute cache (i+1+hold). Was ed+hold-1 (one bar short) (2026-06-19).
+        exit_idx = ed + hold_days
         ret = ((closes[exit_idx] - ep) / ep) * 100 - _FEE_PCT
         full_trades.append(ret)
         last_exit = exit_idx
@@ -782,12 +789,13 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
         avg_ret = round(sum(full_trades) / n, 2)
     ci_lo, ci_hi = _wilson_ci(sum(1 for r in full_trades if r > 0), n) if n > 0 else (0, 0)
 
+    _strat_label = "Fixed90d" if strategy == "MOMENTUM" else "Fixed60d"
     result = {
-        "strategy": "Fixed60d", "wr": wr,
-        "avg_ret": avg_ret, "avg_hold": 60,
+        "strategy": _strat_label, "wr": wr,
+        "avg_ret": avg_ret, "avg_hold": hold_days,
         "oos_wr": wr, "is_wr": wr,
-        "overfitting_ratio": 1.0, "validation_note": "FIXED_60D_V3.4",
-        "overfit": 1.0, "validation": "FIXED_60D_V3.4",
+        "overfitting_ratio": 1.0, "validation_note": f"{_strat_label}_V3.4",
+        "overfit": 1.0, "validation": f"{_strat_label}_V3.4",
         "ci_lo": ci_lo, "ci_hi": ci_hi,
         "oos_ci_lo": ci_lo, "oos_ci_hi": ci_hi,
         "_cached_at": datetime.now().timestamp(),
@@ -868,13 +876,18 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
         except Exception:
             triggered = False
 
-    # ── MOMENTUM OVERRIDE (for Fixed60d positions) ──
-    # If 60d exit triggers but stock is profitable (>5%) AND
-    # trending up (price > SMA5), switch to -8% trailing stop from peak.
+    # ── MOMENTUM OVERRIDE (MOMENTUM/Fixed90d positions ONLY) ──
+    # If the timer triggers but the stock is profitable (>5%) AND trending up
+    # (price > SMA5), switch to an 8% trailing stop from peak to let it run.
+    # GATED TO MOMENTUM (2026-06-19): a 32,607-trade backtest showed applying this
+    # to MR/Fixed60d HURTS — it cuts the median affected MR trade by -3.0% (5,649
+    # worse vs 3,147 better) and turns the OOS median negative (-0.22% vs +0.20%
+    # pure Fixed60d), with only a tail-driven mean bump. Confirms "stops hurt mean
+    # reversion." MR/BOTH now let the Fixed60d timer fire, as the strategy requires.
     MOMENTUM_PNL_THRESHOLD = 5.0
     TRAILING_STOP_PCT = 8.0
 
-    if triggered and pnl_pct >= MOMENTUM_PNL_THRESHOLD and current_price > sma5 > 0:
+    if strategy == "Fixed90d" and triggered and pnl_pct >= MOMENTUM_PNL_THRESHOLD and current_price > sma5 > 0:
         trail_level = round(peak_price * (1 - TRAILING_STOP_PCT / 100), 2)
         if current_price > trail_level:
             momentum_override = True
@@ -1526,8 +1539,15 @@ async def get_portfolio():
             signal = "EXIT"
             issues.append(f"Exit triggered ({tech.get('exit_strategy', '')}: {tech.get('exit_label', '')})")
 
-        # Priority 2: Earnings within 7 days (checked via Finnhub in background)
-        # (already handled by exit_triggered if earnings check ran)
+        # Priority 2: Earnings within 7 days — binary event risk, always EXIT
+        # (CLAUDE.md MANDATORY). Uses the FORWARD Finnhub/Tiingo calendar
+        # (next_earnings_map ← next_earnings_batch), NOT the news-tag detector
+        # which false-positives on ~all tickers. Wired 2026-06-19 (was only a
+        # comment; the documented earnings exit never actually fired).
+        elif ((next_earnings_map.get(ticker) or {}).get("days_to") is not None
+              and 0 <= next_earnings_map[ticker]["days_to"] <= 7):
+            signal = "EXIT"
+            issues.append(f"Earnings in {next_earnings_map[ticker]['days_to']}d — exit before binary event")
 
         # Priority 3: TRUE bear market crash exit (only when regime = BEAR, not CORRECTION/CAUTION)
         # Backtested: 1,005 trades, 500 stocks, 5yr
@@ -5542,7 +5562,13 @@ async def analyze_stock(ticker: str):
             pnl_pct = round(((live_price - pos_entry_price) / pos_entry_price) * 100, 2) if pos_entry_price > 0 else 0
             from datetime import date as _date
             try:
-                days_held = (_date.today() - _date.fromisoformat(pos_entry_date)).days if pos_entry_date else 0
+                # Weekday-count to match the trading-day exit target (was calendar
+                # days, which ran the days-remaining counter ~40% fast) (2026-06-19).
+                _ed = _date.fromisoformat(pos_entry_date) if pos_entry_date else _date.today()
+                days_held = sum(
+                    1 for n in range((_date.today() - _ed).days)
+                    if (_ed + timedelta(days=n + 1)).weekday() < 5
+                )
             except Exception:
                 days_held = 0
 
@@ -5563,7 +5589,7 @@ async def analyze_stock(ticker: str):
             if df_hist is not None and len(df_hist) >= 50:
                 closes_list = df_hist["Close"].dropna().tolist()
                 bt_data = _backtest_mr(ticker)
-                best_exit = _select_best_exit(ticker, closes_list, bt_data.get("trades", 0) if bt_data else 0, rsi2)
+                best_exit = _select_best_exit(ticker, closes_list, bt_data.get("trades", 0) if bt_data else 0, rsi2, strategy=pos_strategy)
                 if best_exit:
                     triggered = _evaluate_exit_trigger(
                         best_exit, closes_list, rsi2, live_price,
@@ -5582,8 +5608,9 @@ async def analyze_stock(ticker: str):
                     }
                     held_position_info["exit_triggered"] = triggered.get("triggered", False)
                     held_position_info["exit_label"] = triggered.get("label", "")
-                    held_position_info["target_hold_days"] = 60  # Fixed60d
-                    held_position_info["days_remaining"] = max(0, 60 - days_held) if days_held < 60 else 0
+                    _tgt = 90 if pos_strategy == "MOMENTUM" else 60  # Fixed90d for MOM, Fixed60d else
+                    held_position_info["target_hold_days"] = _tgt
+                    held_position_info["days_remaining"] = max(0, _tgt - days_held)
                     if triggered.get("triggered", False):
                         issues.append(f"Exit triggered ({best_exit.get('strategy', '')}: {triggered.get('label', '')})")
         else:
