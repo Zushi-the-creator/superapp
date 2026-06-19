@@ -61,6 +61,26 @@ _auto_refresh_running = False
 _price_cache: Dict[str, Dict] = {}   # ticker -> last known good quote (persistent)
 _quote_cache: Dict[str, tuple] = {}  # ticker -> (result, timestamp) — 30s TTL
 
+
+def _fresh_live_px() -> Dict[str, float]:
+    """Return {ticker: price} for quotes captured TODAY only.
+
+    Stale-price fix (2026-06-18): _price_cache is persistent, so an entry left
+    over from a prior session/day must NOT feed signal detection — a yesterday's
+    close fed into evaluate_all manufactures phantom RSI2<10 dips (MOD/IMAX bug).
+    Entries with no 'ts' (e.g. SQLite-seeded bar closes) are excluded — they are
+    not intraday quotes and shouldn't drive 'today is oversold' decisions.
+    """
+    _today = datetime.now().date()
+    out = {}
+    for t, q in _price_cache.items():
+        if q.get("price", 0) <= 0:
+            continue
+        ts = q.get("ts")
+        if isinstance(ts, datetime) and ts.date() == _today:
+            out[t] = q["price"]
+    return out
+
 # ── Technicals Cache (background-computed, never blocks event loop) ──
 _technicals_cache: Dict[str, Dict] = {}  # ticker -> full _get_technicals() result
 # Evicted when positions close or after 1 hour of staleness
@@ -266,6 +286,7 @@ async def _get_tiingo_quote(session: aiohttp.ClientSession, ticker: str) -> Opti
                             "price": float(last),
                             "prev_close": float(prev),
                             "day_chg": (float(last) - float(prev)) / float(prev) * 100 if prev else 0,
+                            "ts": datetime.now(),  # freshness stamp (2026-06-18 stale-price fix)
                         }
                         _price_cache[ticker] = result
                         _quote_cache[ticker] = (result, datetime.now())
@@ -293,8 +314,13 @@ async def _fetch_tiingo_iex_batch(tickers: List[str], batch_size: int = 100) -> 
                         data = await resp.json()
                         for d in data:
                             t = d.get("ticker", "").upper()
-                            last = d.get("last") or d.get("tngoLast") or d.get("prevClose") or 0
-                            prev = d.get("prevClose") or last
+                            # Prefer the REAL intraday price. Tiingo's `last` is
+                            # frequently null while `tngoLast` carries the live value.
+                            # Do NOT fall back to prevClose as a "live" price — that
+                            # stamps yesterday's close as today's quote and manufactures
+                            # phantom oversold signals (2026-06-18 stale-price fix).
+                            last = d.get("tngoLast") or d.get("last") or 0
+                            prev = d.get("prevClose") or 0
                             if last and last > 0:
                                 result = {
                                     "price": round(float(last), 2),
@@ -383,7 +409,7 @@ async def _auto_refresh_stale_cache() -> None:
             _system_status.update({"stage": "auto_refreshing", "message": "Pre-computing backtests + evaluating...", "progress": 60})
             positions = _position_mgr._get_open_positions_sync()
             held = set(p["ticker"] for p in positions) if positions else set()
-            live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+            live_px = _fresh_live_px()
             valid = await _run_precompute_and_eval_subproc(held, live_px, label="AutoRefresh")
             print(f"[AutoRefresh] Evaluator: {valid} valid entries")
             _system_status.update({"stage": "ready", "message": f"{valid} entries ready", "progress": 100})
@@ -478,7 +504,17 @@ def _apply_live_overlay(item: dict) -> dict:
             return item
 
         live = _price_cache.get(ticker)
+        # FRESHNESS GUARD (2026-06-18 stale-price fix): only treat a cached quote
+        # as a live intraday price if it was captured TODAY. A stale entry (e.g.
+        # yesterday's close left in _price_cache when the IEX batch didn't refresh
+        # this ticker) must NOT masquerade as live — that stamped yesterday's price
+        # as today's and produced phantom RSI2=0 dips (MOD/IMAX/CRVL bug).
+        live_fresh = False
         if live and live.get("price", 0) > 0:
+            _ts = live.get("ts")
+            if isinstance(_ts, datetime) and _ts.date() == datetime.now().date():
+                live_fresh = True
+        if live_fresh:
             item["price"] = round(live["price"], 2)
             item["price_is_live"] = True
         else:
@@ -488,7 +524,9 @@ def _apply_live_overlay(item: dict) -> dict:
         if df is None or len(df) < 50:
             return item
 
-        if not (live and live.get("price", 0) > 0):
+        if not live_fresh:
+            # No fresh live quote — fall back to the latest cached bar close so
+            # RSI2/SMA50 are recomputed off real data, not a stale "live" value.
             item["price"] = round(float(df["Close"].iloc[-1]), 2)
 
         closes = df["Close"].dropna().tolist()
@@ -4465,7 +4503,7 @@ async def refresh_backtest_cache():
     from strategy_evaluator import evaluate_all, save_cache
     positions = _position_mgr._get_open_positions_sync()
     held = set(p["ticker"] for p in positions) if positions else set()
-    live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+    live_px = _fresh_live_px()
     signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
     save_cache(signals)
     valid = sum(1 for s in signals if not s.vetoed)
@@ -4526,7 +4564,7 @@ async def populate_cache(days: int = 10, ticker: Optional[str] = None):
         from strategy_evaluator import evaluate_all as _eval_all, save_cache as _save_eval
         positions = _position_mgr._get_open_positions_sync()
         held = set(p["ticker"] for p in positions) if positions else set()
-        live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+        live_px = _fresh_live_px()
         signals = await asyncio.to_thread(_eval_all, 10.0, held, live_px)
         _save_eval(signals)
         valid = sum(1 for s in signals if not s.vetoed)
@@ -4575,7 +4613,7 @@ async def get_combined_opportunities():
         _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks...", "progress": 40})
         positions = _position_mgr._get_open_positions_sync()
         held = set(p["ticker"] for p in positions) if positions else set()
-        live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+        live_px = _fresh_live_px()
         try:
             signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
             # Step 3: Validate top 30 with earnings/sentiment/analyst
@@ -4773,7 +4811,7 @@ async def refresh_all_scans():
     _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks...", "progress": 50})
     positions = _position_mgr._get_open_positions_sync()
     held = set(p["ticker"] for p in positions) if positions else set()
-    live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+    live_px = _fresh_live_px()
     signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
 
     # Step 3: Validate top 30
@@ -6605,7 +6643,7 @@ async def cache_refresh_loop():
                     # Pre-compute + evaluator run in subprocess so they can't block the event loop
                     _system_status.update({"stage": "precomputing", "message": "Pre-computing backtests + evaluating (subprocess)...", "progress": 70})
                     _held = set(p["ticker"] for p in positions) if positions else set()
-                    _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                    _live_px = _fresh_live_px()
                     _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="CacheRefresh")
                     print(f"[CacheRefresh] Evaluator: {_valid} valid entries (subprocess)")
                     _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})
@@ -6674,7 +6712,7 @@ async def cache_refresh_loop():
                     if _age_h_global > 24:
                         print(f"[CacheRefresh] backtest_cache is {_age_h_global:.1f}h old — forcing precompute")
                         _held = set(p["ticker"] for p in positions) if positions else set()
-                        _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                        _live_px = _fresh_live_px()
                         _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="StalenessGuard")
                         print(f"[CacheRefresh] Staleness-guard precompute: {_valid} valid entries")
             except Exception as _stale_err:
@@ -6705,7 +6743,7 @@ async def cache_refresh_loop():
                     print(f"[CacheRefresh] Bars fresh but backtest_cache stale — re-running precompute")
                     try:
                         _held = set(p["ticker"] for p in positions) if positions else set()
-                        _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                        _live_px = _fresh_live_px()
                         _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="BacktestRefresh")
                         print(f"[CacheRefresh] Backtest precompute: {_valid} valid entries")
                     except Exception as _bt_err:
@@ -6748,7 +6786,7 @@ async def cache_refresh_loop():
                 try:
                     print(f"[CacheRefresh] Re-computing backtests + evaluating (subprocess)...")
                     _held = set(p["ticker"] for p in positions) if positions else set()
-                    _live_px = {t: q["price"] for t, q in _price_cache.items() if q.get("price", 0) > 0}
+                    _live_px = _fresh_live_px()
                     _valid = await _run_precompute_and_eval_subproc(_held, _live_px, label="CacheRefresh")
                     print(f"[CacheRefresh] Evaluator: {_valid} valid entries")
                     _system_status.update({"stage": "ready", "message": f"{_valid} entries ready", "progress": 100})

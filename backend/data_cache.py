@@ -120,26 +120,48 @@ class DataCache:
         rows = self.conn.execute('SELECT ticker FROM cache_meta').fetchall()
         return [r[0] for r in rows]
 
+    def _newest_bar_date(self) -> Optional[str]:
+        """Most recent bar date across the whole cache. Self-calibrates to the
+        market calendar (handles weekends / intraday-before-today's-bar)."""
+        row = self.conn.execute('SELECT MAX(data_end) FROM cache_meta').fetchone()
+        return row[0] if row and row[0] else None
+
     def is_fresh(self, ticker: str) -> bool:
-        today = datetime.now().strftime('%Y-%m-%d')
+        # Freshness is judged by the latest BAR date (data_end), NOT last_updated.
+        # last_updated is only the refresh-ATTEMPT timestamp — a ticker whose
+        # Tiingo fetch returned no new bars still gets last_updated=today while
+        # its actual prices rot. A ticker is fresh iff its newest bar is not
+        # behind the freshest ticker in the cache (2026-06-18 universe-staleness fix).
         row = self.conn.execute(
-            'SELECT last_updated FROM cache_meta WHERE ticker = ?', (ticker.upper(),)
+            'SELECT data_end FROM cache_meta WHERE ticker = ?', (ticker.upper(),)
         ).fetchone()
-        return row is not None and row[0] >= today
+        if not row or not row[0]:
+            return False
+        newest = self._newest_bar_date()
+        return newest is not None and row[0] >= newest
 
     def get_stale_tickers(self) -> List[str]:
-        today = datetime.now().strftime('%Y-%m-%d')
+        # Stale = latest BAR (data_end) is behind the freshest ticker's latest bar.
+        # Previously keyed off last_updated (refresh-attempt timestamp), so tickers
+        # touched today but carrying weeks-old bars were never flagged — the bug
+        # that hid genuinely-oversold names (FCX/NSIT/EVTC) from the scanner.
+        newest = self._newest_bar_date()
+        if not newest:
+            return [r[0] for r in self.conn.execute('SELECT ticker FROM cache_meta').fetchall()]
         rows = self.conn.execute(
-            'SELECT ticker FROM cache_meta WHERE last_updated < ?', (today,)
+            'SELECT ticker FROM cache_meta WHERE data_end < ? OR data_end IS NULL', (newest,)
         ).fetchall()
         return [r[0] for r in rows]
 
     def stats(self) -> Dict:
         total = self.conn.execute('SELECT COUNT(DISTINCT ticker) FROM cache_meta').fetchone()[0]
-        today = datetime.now().strftime('%Y-%m-%d')
-        fresh = self.conn.execute('SELECT COUNT(*) FROM cache_meta WHERE last_updated >= ?', (today,)).fetchone()[0]
+        newest = self._newest_bar_date()
+        fresh = self.conn.execute(
+            'SELECT COUNT(*) FROM cache_meta WHERE data_end >= ?', (newest,)
+        ).fetchone()[0] if newest else 0
         total_rows = self.conn.execute('SELECT COUNT(*) FROM daily_prices').fetchone()[0]
-        return {'total_tickers': total, 'fresh_today': fresh, 'stale': total - fresh, 'total_rows': total_rows}
+        return {'total_tickers': total, 'fresh_today': fresh, 'stale': total - fresh,
+                'total_rows': total_rows, 'newest_bar': newest}
 
     # ── Write ──
 

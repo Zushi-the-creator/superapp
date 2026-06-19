@@ -3,7 +3,7 @@
 ## Core Rules
 - **PRIMARY GOAL**: MAXIMIZE ROI (3% monthly is MINIMUM, not target)
 - **RULE**: When saying SELL, ALWAYS say what to BUY
-- **MODEL**: Production runs **ATLAS V2.7 (MR entries) + V3.0 (cache-accelerated evaluator) + V3.3 (regime-adaptive entry sizing, 2026-06-12) + V3.4 (Buffered WR scoring, 2026-06-16) + V3.4 (Fixed60d MR exit, 2026-06-17 — replaces V3.2 Fixed30d after honest 13-window walk-forward validation)**. There is no single "version" — the deployed code is a hybrid. See "Active Strategy" section below for the actual rules.
+- **MODEL**: Production runs **ATLAS V2.7 (MR entries) + V3.0 (cache-accelerated evaluator) + V3.3 (regime-adaptive entry sizing, 2026-06-12) + V3.4 (Buffered WR scoring, 2026-06-16) + V3.4 (Fixed60d MR exit, 2026-06-17 — replaces V3.2 Fixed30d after honest 13-window walk-forward validation) + V3.5 (Entries tab sorts by composite_score, not Buffered WR, 2026-06-18 — head-to-head walk-forward: composite top-3 fwd +4.43% vs BWR +2.79%)**. There is no single "version" — the deployed code is a hybrid. See "Active Strategy" section below for the actual rules.
 - **VALIDATION**: NEVER recommend without backtest validation (WR > 55%, 10+ trades)
 - **LIVE DATA**: NEVER suggest buy without verifying live prices first (MANDATORY)
 - **SENTIMENT**: ALWAYS check news sentiment before any buy recommendation (informational; not a hard veto for MR — see VETO chain below)
@@ -23,34 +23,30 @@
 
 ---
 
-## Current Positions (Updated 2026-04-29, post-rotation)
+## Current Positions (Updated 2026-06-17, reconciled to PRODUCTION API — source of truth)
 
-### USD Portfolio
+> The local positions.db and this file had both drifted ~6 weeks stale (showed an April PRAX/GHM/AMSC/CAMT/APEI/IREN set). Reconciled to the live production portfolio (`superapp-ke5bhg.fly.dev/api/v2/portfolio`, the frontend source) on 2026-06-17. The April set was CLOSED; deposits grew to $20,907.
 
-| Ticker | Shares | Avg Entry | Cost Basis | Current | Value | P&L | Weight |
-|--------|--------|-----------|------------|---------|-------|-----|--------|
-| PRAX | 7.8313 | $319.23 | $2,499.99 | $318.81 | $2,496.70 | -$3.29 | 19.1% |
-| GHM | 27.7313 | $90.15 | $2,499.98 | $90.06 | $2,497.32 | -$2.66 | 19.1% |
-| AMSC | 53.0447 | $47.13 | $2,500.00 | $47.10 | $2,498.41 | -$1.59 | 19.1% |
-| CAMT | 11.9513 | $181.90 | $2,173.94 | $188.08 | $2,247.84 | +$73.90 | 17.2% |
-| APEI | 37.2961 | $57.70 | $2,151.98 | $57.18 | $2,132.30 | -$19.68 | 16.3% |
-| IREN | 27.7958 | $42.85 | $1,191.05 | $42.62 | $1,184.65 | -$6.40 | 9.1% |
+### USD Portfolio (live 2026-06-17)
 
-**Cash: $1,274.38 | Positions Value: ~$13,058 | Total Portfolio: ~$14,332**
-**Total Deposited: $11,891.58 | Realized P&L: +$1,533.87 | Total Fees: $105.01**
-**Open P&L: +$40.70 (+0.31%) — fresh entries, marks-to-market**
+| Ticker | Shares | Avg Entry | Cost Basis | Current | Value | P&L | Weight | Days | RSI2 |
+|--------|--------|-----------|------------|---------|-------|-----|--------|------|------|
+| NVDA | 15.2646 | $197.45 | $3,014.00 | $207.23 | $3,163.6 | +$149 (+5.0%) | 18.5% | 30 | 59 |
+| SFM | 37.8924 | $79.17 | $2,999.94 | $80.72 | $3,058.7 | +$59 (+2.0%) | 17.9% | 29 | 0 |
+| BE | 10.1786 | $294.73 | $2,999.94 | $290.90 | $2,961.0 | -$39 (-1.3%) | 17.4% | 15 | 100 |
+| CLS | 5.5429 | $377.23 | $2,090.95 | $387.49 | $2,147.6 | +$57 (+2.7%) | 12.6% | 28 | 32 |
+| CELC | 22.5773 | $132.88 | $3,000.07 | $87.62 | $1,978.4 | -$1,022 (-34.1%) | 11.6% | 28 | 0 |
+| DAC | 14.8286 | $128.00 | $1,898.06 | $127.49 | $1,890.5 | -$8 (-0.4%) | 11.1% | 15 | 1 |
+| APP | 3.7902 | $568.83 | $2,155.98 | $491.98 | $1,864.7 | -$291 (-13.5%) | 10.9% | 10 | 81 |
 
-### 2026-04-29 Rotation Trades (Audit-Driven)
-**SOLD (3 — proceeds $5,793, realized +$1,652):**
-- WDC: 6.3874 @ $417.08 → +$862.59 (+47.9%) — RSI2=0 + big-winner exit
-- POWL: 11.91 @ $253.41 → +$864.63 (+40.2%) — Hybrid21d trigger, big-winner bucket validated
-- BBIO: 29.6173 @ $70.16 → -$75.54 (-3.4%) — exit triggered, low-conviction biotech
+**Cash: $4,302.75 | Positions Value: ~$17,064 | Total Portfolio: ~$21,367**
+**Total Deposited: $20,907.44 | Realized P&L: +$1,967.68 | Total Fees: $110 | Total Tax: $317**
+**Open P&L: -$1,094.80 (-6.03%) — drag is CELC (-$1,022, sell-the-news + convertible dilution; thesis intact)**
 
-**BOUGHT (4 — total deployed $8,691):**
-- PRAX: 7.8313 @ $319.23 — RSI Dip, 80% WR, Strong Buy
-- GHM: 27.7313 @ $90.15 — RSI Dip+Breakout, 73.7% WR, 19 trades, Strong Buy + POSITIVE
-- AMSC: 53.0447 @ $47.13 — Breakout, ATR 7.7%, Strong Buy
-- IREN: 27.7958 @ $42.85 — Breakout, ATR 8.6%, Buy
+### Exit status (Fixed60d, all entered May–June → none at day 60 yet)
+- No holding has earnings within 7 days (verified vs Finnhub calendar 2026-06-17 — portfolio_check/scanner news-based earnings detector is throwing false positives on ALL tickers; do not trust it).
+- No stock-specific negative-sentiment exit: all 7 hold POSITIVE sentiment.
+- NVDA prod UI shows "EXIT NOW" = stale Fixed30d logic (prod not yet redeployed to V3.4 Fixed60d). Under Fixed60d it HOLDS to day 60.
 
 ### ILS Portfolio
 - **SOLD** TA-35 3x ETF on 2026-02-10 for ~+2,871 ILS profit (+14.5%)
@@ -142,18 +138,20 @@ REQUIRED:  Price > SMA(50)
 - Sentiment score < -0.3 in MR scanner: -0.43% edge → REMOVED (still active in `momentum_scanner.py:232` and `atlas_v2/entry.py:423` — inconsistent enforcement, see Known drift below)
 - Zone WR < 65% / zone trades < 5 / score < 3.0 / avg_return < 3%: documented but currently NOT enforced as hard vetoes — they are ranking factors only. Tier labels (TIER1/TIER2/TIER3) are display-only.
 
-### Scoring (V3.4 Buffered WR, 2026-06-16) — **PRIMARY SORT KEY**
-- **Formula**: `score = bayesian_wr - (std / sqrt(n))` per strategy (MR or MOM)
-- **Computed in** `backtest_precompute.py` and stored in `backtest_cache.mr_score` / `mom_score`
-- **Used by** strategy_evaluator → frontend `combined.score` field → Entries tab sort
-- **Validation** (527 V3.3-filtered signals × 9 years, 40 quarterly anchors):
-  - In-sample (2016-2021): **+14.12% CAGR, 74% WR, -0.36% MaxDD**
-  - Out-of-sample (2022-2025): **+4.80% CAGR, 54.5% WR, -17.31% MaxDD**
-  - Full 9-yr: **+11.50% CAGR vs EV-classic +5.50%**
-  - OOS edge: **+11.3 pp/year** (EV-classic LOSES money OOS at -6.50% CAGR)
-- **Why it works**: Penalizes WR by sample-size-adjusted uncertainty. Rewards consistent winners; punishes lucky small-sample stocks. Naturally discounts survivor bias.
-- **Wins across 21 anchors**: Buffered WR 12, EV-classic 8, ties 1
-- **Robust to top-N**: BWR wins at top-3, top-5, top-7, top-10 portfolio sizes
+### Entries-tab sort key (V3.5 composite_score, 2026-06-18) — **PRIMARY SORT KEY**
+- **The Entries tab sorts by `composite_score`** (`_compute_composite_score` in `api_v2.py`), tiebroken by Buffered WR. Changed from Buffered-WR sort on 2026-06-18 after a head-to-head walk-forward — see `backend/_rank_backtest.py`.
+- **Why** (point-in-time walk-forward, 299 anchors, 7,172 PROD-gated signals, 2017-2026, Fixed60d forward return, no lookahead — BWR recomputed per-anchor from only trades closed before the anchor):
+  - Top-1 fwd 60d: **composite +4.02% vs BWR +1.03%** (OOS +5.76% vs +2.06%)
+  - Top-3 fwd 60d: **composite +4.43% vs BWR +2.79%** (OOS +5.77% vs +3.56%)
+  - Top-5 fwd 60d: **composite +4.07% vs BWR +2.51%** (paired t=+2.15)
+  - Spearman IC: composite +0.014 vs BWR +0.006 (OOS +0.022 vs +0.005)
+- **Honest caveat**: median anchor is a wash (win-counts 137 vs 135); composite's edge is tail-driven — it surfaces the high-ATR / BOTH-bonus winners, which is exactly what a top-1-to-3 concentrated book captures. Live composite also gets real analyst consensus (+1.19% edge) the backtest replica lacked, so the live edge is likely larger.
+- **No contradiction with the old BWR validation**: BWR's "+11.50% vs +5.50%" win was vs **EV-classic** (already dropped from composite), never vs composite.
+- **Frontend**: `OpportunitiesTab.tsx` sorts `unified` by `composite_score`; headline number shows composite ("Score 65 · BWR 54") so number + tier badge + sort order all agree.
+
+### Buffered WR — now a secondary/tiebreak stat (V3.4, 2026-06-16)
+- **Formula**: `score = bayesian_wr - (std / sqrt(n))` per strategy; computed in `backtest_precompute.py`, stored in `backtest_cache.mr_score` / `mom_score`, surfaced as `combined.score`.
+- Still displayed per row and used as the sort tiebreaker. Beat EV-classic in its own validation (527 signals × 9yr: full +11.50% vs +5.50% CAGR; OOS +4.80% vs -6.50%) — but was beaten by composite as the sort key (above).
 
 ### Legacy: `api_v2.py:_ev_score` (still used for holdings rotation comparison)
 - Bayesian-shrunk: `zone_ret_shrunk × zone_wr_shrunk / 100` for MR, momentum-zone equivalent for MOM

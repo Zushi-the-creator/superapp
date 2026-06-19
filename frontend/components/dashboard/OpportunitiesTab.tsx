@@ -6,7 +6,7 @@ import { ScoreGauge } from "@/components/shared/ScoreGauge";
 import { RegimeBadge, SignalBadge, TierBadge } from "@/components/shared/Badges";
 import { formatCurrency, formatPercent, cn, pnlColor } from "@/lib/utils";
 import { api } from "@/lib/api";
-import { RefreshCw, ArrowUp, Zap, ShieldCheck, DollarSign, Star, ChevronDown } from "lucide-react";
+import { RefreshCw, ArrowUp, Zap, ShieldCheck, DollarSign, Star, ChevronDown, Loader2 } from "lucide-react";
 import { useState, useEffect } from "react";
 import type { ScanOpportunity, HoldingScore } from "@/lib/types";
 
@@ -18,30 +18,49 @@ const TIER_COLORS: Record<string, { border: string; bg: string; text: string }> 
   POOR: { border: "border-neutral-800", bg: "bg-neutral-950/50", text: "text-neutral-600" },
 };
 
+type CombinedResponseExt = import("@/lib/types").CombinedResponse & {
+  tier_counts?: Record<string, number>;
+  ranked_count?: number;
+  total_scanned?: number;
+  passed?: number;
+  upgrades?: number;
+  holdings_scores?: { ticker: string; score: number; zone_return: number; win_rate: number; exit_triggered: boolean; signal: string }[];
+  worst_holding?: string;
+  worst_score?: number;
+  refreshing?: boolean;
+  scanning?: boolean;
+  cache_stale?: boolean;
+  cache_age_min?: number;
+};
+
 export function OpportunitiesTab() {
-  const { scanner } = useData();
-  const { data, loading, lastUpdated, refresh } = scanner;
+  // V3.3 SSOT — /scan/combined is the SOLE entries-tab data source. No more
+  // useData().scanner (/scan/opportunities) here. /scan/opportunities still
+  // serves the holdings-rotation backend logic but the frontend doesn't touch it.
+  const [data, setData] = useState<CombinedResponseExt | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  const [combined, setCombined] = useState<import("@/lib/types").CombinedSignal[]>([]);
-  const [combinedStats, setCombinedStats] = useState({ mr: 0, mom: 0, both: 0 });
   const [systemStatus, setSystemStatus] = useState({ stage: "idle", message: "", progress: 0 });
-  const [dataDate, setDataDate] = useState("");
-  const [cacheAge, setCacheAge] = useState(0);
+  const [combinedError, setCombinedError] = useState<string | null>(null);
 
-  // Fetch combined on mount and refresh
   const fetchCombined = async () => {
     try {
-      const res = await api.getCombined();
-      setCombined(res.signals ?? []);
-      setCombinedStats({ mr: res.mean_reversion ?? 0, mom: res.momentum ?? 0, both: res.both ?? 0 });
+      const res = (await api.getCombined()) as CombinedResponseExt;
+      setData(res);
       if (res.system_status) setSystemStatus(res.system_status as { stage: string; message: string; progress: number });
-      if (res.data_date) setDataDate(res.data_date);
-      if ((res as Record<string, unknown>).cache_age_min != null) setCacheAge((res as Record<string, unknown>).cache_age_min as number);
-    } catch {}
+      setLastUpdated(new Date());
+      setLoading(false);
+      setCombinedError(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[OpportunitiesTab] /scan/combined fetch failed:", e);
+      setCombinedError(msg);
+      setLoading(false);
+    }
   };
 
-  // Fetch combined on mount + poll every 60s to keep data fresh
   useEffect(() => {
     fetchCombined();
     const interval = setInterval(fetchCombined, 60000);
@@ -51,53 +70,22 @@ export function OpportunitiesTab() {
   const handleForceRefresh = async () => {
     setRefreshing(true);
     try {
-      // Fire off both refreshes in background — evaluator (entries) + deep_scanner (holdings scores)
       api.refreshAll().catch(() => {});
-      api.refreshScan().catch(() => {});
-      // Immediately fetch current results (shows cached data instantly)
       await fetchCombined();
-      await refresh();
-      // Poll for updated results as scan runs
-      const poll = setInterval(async () => {
-        await fetchCombined();
-        await refresh();
-      }, 5000);
+      const poll = setInterval(async () => { await fetchCombined(); }, 5000);
       setTimeout(() => { clearInterval(poll); setRefreshing(false); }, 30000);
     } catch {
       setRefreshing(false);
     }
   };
 
-  const opportunities = data?.opportunities ?? [];
+  // Derive everything from the single SSOT response.
+  const combined = data?.signals ?? [];
   const holdingsScores = data?.holdings_scores ?? [];
   const worstHolding = data?.worst_holding ?? "";
-
-  // Filter out current holdings
-  const holdingTickers = new Set(holdingsScores.map((h) => h.ticker));
-  const allStocks = opportunities.filter((o) => !holdingTickers.has(o.ticker));
-
-  // Separate vetoed and ranked
-  const vetoed = allStocks.filter((o) => o.vetoed);
-  const ranked = allStocks.filter((o) => !o.vetoed);
-
-  // Sort ranked by composite_score descending
-  const sorted = [...ranked].sort((a, b) => b.composite_score - a.composite_score);
-
-  // Best candidates = meets_strict
-  const bestCandidates = sorted.filter((o) => o.meets_strict);
-
-  // Tier counts
-  const tierCounts = {
-    BEST: sorted.filter((o) => o.quality_tier === "BEST").length,
-    GOOD: sorted.filter((o) => o.quality_tier === "GOOD").length,
-    FAIR: sorted.filter((o) => o.quality_tier === "FAIR").length,
-    WEAK: sorted.filter((o) => o.quality_tier === "WEAK").length,
-    POOR: sorted.filter((o) => o.quality_tier === "POOR").length,
-  };
-
-  // Show top 30 by default, all when expanded
-  const displayLimit = showAll ? sorted.length : 30;
-  const displayStocks = sorted.slice(0, displayLimit);
+  const tierCounts = data?.tier_counts ?? { BEST: 0, GOOD: 0, FAIR: 0, WEAK: 0, POOR: 0 };
+  const dataDate = data?.data_date ?? "";
+  const cacheAge = data?.cache_age_min ?? 0;
 
   return (
     <div className="flex flex-col h-full">
@@ -105,7 +93,7 @@ export function OpportunitiesTab() {
         title="Stock Scanner"
         lastUpdated={lastUpdated}
         loading={loading}
-        onRefresh={refresh}
+        onRefresh={fetchCombined}
       />
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 pb-20 md:pb-6">
         {/* Stats bar */}
@@ -121,15 +109,24 @@ export function OpportunitiesTab() {
           <span className="text-neutral-700">|</span>
           <span>Scanned: <strong className="text-neutral-300">{data?.total_scanned?.toLocaleString() ?? 0}</strong></span>
           <span className="text-neutral-700">|</span>
-          <span>Ranked: <strong className="text-neutral-300">{data?.ranked_count ?? ranked.length}</strong></span>
+          <span>Ranked: <strong className="text-neutral-300">{data?.ranked_count ?? combined.length}</strong></span>
           <span className="text-neutral-700">|</span>
-          <span>Strict: <strong className="text-signal-buy">{data?.passed ?? bestCandidates.length}</strong></span>
+          <span>Strict: <strong className="text-signal-buy">{data?.passed ?? 0}</strong></span>
           <span className="text-neutral-700">|</span>
           {Object.entries(tierCounts).map(([tier, count]) => count > 0 && (
             <span key={tier} className={TIER_COLORS[tier]?.text}>
               {tier}: {count}
             </span>
           ))}
+          {(data?.refreshing || data?.scanning) && (
+            <span className="inline-flex items-center gap-1.5 text-amber-400">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span>Refreshing 3K stocks…</span>
+            </span>
+          )}
+          {data?.cache_stale && !data?.refreshing && !data?.scanning && (
+            <span className="text-signal-sell">Stale — refresh queued</span>
+          )}
           <button
             onClick={handleForceRefresh}
             disabled={refreshing}
@@ -214,13 +211,15 @@ export function OpportunitiesTab() {
           </div>
         )}
 
-        {/* ═══ UNIFIED ENTRIES LIST ═══ */}
+        {/* ═══ UNIFIED ENTRIES LIST (sort key TBD pending backtest) ═══ */}
         {(() => {
-          // Merge MR best candidates + combined momentum into ONE sorted list
+          // /scan/combined is the canonical source post-V3.2 enrichment.
+          // Sort key is currently EV — TBD after composite vs EV backtest.
           type UnifiedEntry = {
             ticker: string;
             price: number;
-            score: number;
+            composite: number;
+            ev: number;
             wr: number;
             trades: number;
             avgRet: number;
@@ -230,43 +229,35 @@ export function OpportunitiesTab() {
             sentiment?: string;
             analyst?: string;
             volumeRatio?: number;
-            regime?: string;
             vetoed?: boolean;
             vetoReason?: string;
             isMR: boolean;
+            qualityTier?: string;
           };
 
           const unified: UnifiedEntry[] = [];
 
-          // Add MR strict-pass candidates
-          for (const opp of bestCandidates) {
-            unified.push({
-              ticker: opp.ticker,
-              price: opp.price,
-              score: opp.composite_score,
-              wr: opp.bayesian_wr || opp.win_rate,
-              trades: opp.trades,
-              avgRet: opp.zone_return,
-              type: "FRESH_ENTRY",
-              typeLabel: "RSI Dip — BUY",
-              rsi: opp.rsi2,
-              sentiment: opp.sentiment_label,
-              analyst: opp.analyst_consensus,
-              volumeRatio: opp.volume_ratio,
-              regime: opp.regime,
-              isMR: true,
-            });
-          }
-
-          // Add combined signals (not already in MR list)
-          const mrTickers = new Set(bestCandidates.map((o) => o.ticker));
+          // Defensive filter — backend already drops vetoed in /scan/combined,
+          // but we never want a vetoed signal slipping into the list.
+          // V3.5 (2026-06-18): sort by `composite_score`, NOT Buffered WR.
+          // Head-to-head point-in-time walk-forward (299 anchors, 7,172 PROD-gated
+          // signals, 2017-2026, Fixed60d forward return) showed composite is the
+          // better SORT KEY at the picks we actually trade:
+          //   top-1 fwd:  Composite +4.02% vs BWR +1.03%   (OOS +5.76% vs +2.06%)
+          //   top-3 fwd:  Composite +4.43% vs BWR +2.79%   (OOS +5.77% vs +3.56%)
+          //   top-5 fwd:  Composite +4.07% vs BWR +2.51%   (paired t=+2.15)
+          // BWR's prior "+11.50% vs EV-classic" win was vs EV (already dropped from
+          // composite) — never vs composite. Sorting by composite also makes the
+          // headline number + tier badge agree (they both derive from composite).
+          // BWR is retained as the tiebreaker + a secondary stat.
           for (const sig of combined) {
-            if (mrTickers.has(sig.ticker)) continue;
+            if (sig.vetoed) continue;
             const isFresh = sig.strategy === "MEAN_REVERSION" || sig.strategy === "BOTH";
             unified.push({
               ticker: sig.ticker,
               price: sig.price,
-              score: sig.score,
+              composite: (sig as unknown as { composite_score?: number }).composite_score ?? 0,
+              ev: sig.score,  // Buffered WR (bwr - std/sqrt(n)) — tiebreaker + secondary stat
               wr: sig.confidence,
               trades: sig.trades,
               avgRet: sig.expected_return,
@@ -277,11 +268,13 @@ export function OpportunitiesTab() {
               analyst: sig.analyst_consensus,
               volumeRatio: sig.volume_ratio,
               isMR: sig.strategy !== "MOMENTUM",
+              qualityTier: (sig as unknown as { quality_tier?: string }).quality_tier,
             });
           }
 
-          // Sort by score (highest first)
-          unified.sort((a, b) => b.score - a.score);
+          // V3.5: sort by composite_score (better forward-return ranker per
+          // 2017-2026 walk-forward), tiebreak by Buffered WR.
+          unified.sort((a, b) => b.composite - a.composite || b.ev - a.ev);
 
           const freshCount = unified.filter((u) => u.type === "FRESH_ENTRY" || u.type === "BOTH").length;
           const breakoutCount = unified.filter((u) => u.type === "BREAKOUT").length;
@@ -300,9 +293,22 @@ export function OpportunitiesTab() {
               </div>
 
               {unified.length === 0 ? (
-                <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 text-center">
-                  <p className="text-neutral-400 text-sm">No entry signals right now</p>
-                  <p className="text-xs text-neutral-500 mt-1">Scanner checks 3,000+ stocks. Refresh to scan again.</p>
+                <div className={cn(
+                  "rounded-xl border p-6 text-center",
+                  combinedError ? "border-signal-sell/40 bg-signal-sell/5" : "border-neutral-800 bg-neutral-900/50"
+                )}>
+                  {combinedError ? (
+                    <>
+                      <p className="text-signal-sell text-sm font-medium">Couldn&apos;t load entry signals</p>
+                      <p className="text-xs text-neutral-400 mt-1 font-mono">{combinedError}</p>
+                      <p className="text-xs text-neutral-500 mt-2">Check the network tab — backend may be unreachable or returning an error.</p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-neutral-400 text-sm">No entry signals right now</p>
+                      <p className="text-xs text-neutral-500 mt-1">Scanner checks 3,000+ stocks. Refresh to scan again.</p>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -326,13 +332,14 @@ export function OpportunitiesTab() {
                         <span className="text-neutral-300 font-medium">{formatCurrency(entry.price)}</span>
                       </div>
 
-                      {/* Metrics */}
+                      {/* Metrics — V3.5: headline "Score" is composite_score (the sort
+                          key + tier source). BWR (Buffered Win Rate) shown as secondary. */}
                       <div className="grid grid-cols-3 gap-2 text-xs">
                         <div>
                           <span className="text-neutral-500">Score</span>
                           <div className={cn("font-bold",
-                            entry.score >= 60 ? "text-emerald-400" : entry.score >= 40 ? "text-blue-400" : "text-neutral-300"
-                          )}>{entry.score.toFixed(0)}</div>
+                            entry.composite >= 65 ? "text-emerald-400" : entry.composite >= 50 ? "text-blue-400" : entry.composite >= 35 ? "text-amber-300" : "text-neutral-300"
+                          )}>{entry.composite.toFixed(0)} <span className="text-neutral-600 font-normal">· BWR {entry.ev.toFixed(0)}</span></div>
                         </div>
                         <div>
                           <span className="text-neutral-500">WR</span>
@@ -348,8 +355,16 @@ export function OpportunitiesTab() {
                         </div>
                       </div>
 
-                      {/* Analyst + Sentiment badges */}
+                      {/* Analyst + Sentiment + Quality tier badges */}
                       <div className="flex items-center gap-2 pt-1 border-t border-neutral-800/50 text-[10px]">
+                        {entry.qualityTier && (
+                          <span className={cn("px-1.5 py-0.5 rounded font-semibold",
+                            entry.qualityTier === "BEST" ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30" :
+                            entry.qualityTier === "GOOD" ? "bg-blue-500/15 text-blue-300" :
+                            entry.qualityTier === "FAIR" ? "bg-amber-500/15 text-amber-300" :
+                            "bg-neutral-800 text-neutral-400"
+                          )}>{entry.qualityTier}</span>
+                        )}
                         {entry.analyst && <span className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">{entry.analyst}</span>}
                         {entry.sentiment && <span className={cn("px-1.5 py-0.5 rounded",
                           entry.sentiment === "POSITIVE" ? "bg-emerald-500/10 text-emerald-400" :
@@ -375,23 +390,6 @@ export function OpportunitiesTab() {
           );
         })()}
 
-        {/* Vetoed section */}
-        {vetoed.length > 0 && (
-          <>
-            <h3 className="text-xs text-neutral-500 font-medium mt-6">
-              Vetoed ({vetoed.length}) — penny stocks, earnings risk, or strongly negative sentiment
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 opacity-40">
-              {vetoed.slice(0, 6).map((opp) => (
-                <OpportunityCard
-                  key={opp.ticker}
-                  opp={opp}
-                  holdingsScores={holdingsScores}
-                />
-              ))}
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
@@ -515,7 +513,7 @@ function OpportunityCard({
           <span className="text-neutral-500">Win Rate</span>
           <div className="text-neutral-200 font-medium">
             {(opp.bayesian_wr || opp.win_rate).toFixed(1)}%
-            {opp.bayesian_wr > 0 && Math.abs(opp.bayesian_wr - opp.win_rate) >= 2 && (
+            {(opp.bayesian_wr ?? 0) > 0 && Math.abs((opp.bayesian_wr ?? 0) - opp.win_rate) >= 2 && (
               <span className="text-[10px] text-neutral-500 ml-1">(raw: {opp.win_rate.toFixed(0)}%)</span>
             )}
           </div>
