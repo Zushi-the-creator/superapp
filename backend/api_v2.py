@@ -2946,23 +2946,43 @@ def _get_holdings_scores() -> tuple:
                 # Update cache so portfolio endpoint stays in sync
                 tech["exit_triggered"] = exit_triggered
         below_sma50 = not tech.get("above_sma50", True) if tech else False
-        # Backtest quality check: BOTH ATLAS and exit zone must fail for EXIT
+        # ── Align with the Portfolio tab as the single source of truth (2026-06-20) ──
+        # Show the SAME entry-zone WR/return the Portfolio shows, and apply the SAME
+        # timer-based signal ladder — model-EXIT WITH winner-protect (pnl<5) and a
+        # 7-day min-hold. The old gate-less `bad_backtest` EXIT over-flagged fresh /
+        # winning positions and contradicted the Portfolio (e.g. ARCB/SNOW/BE).
         ez_wr = tech.get("exit_zone_wr", 0) if tech else 0
-        ez_ret = tech.get("exit_zone_return", 0) if tech else 0
         ez_trades = tech.get("exit_zone_trades", 0) if tech else 0
         atlas_wr = tech.get("win_rate", 0) if tech else 0
         atlas_trades = tech.get("total_trades", 0) if tech else 0
-        bad_backtest = ez_trades >= 10 and (ez_ret < 0 or ez_wr < 65) and \
-                       (atlas_trades < 10 or atlas_wr < 65)
-        signal = "EXIT" if (exit_triggered or bad_backtest) else "HOLD"
-        if strat_wr > 0:
-            # Unified scoring — same _ev_score used for entries
-            _trades_for_shrink = tech.get("total_trades", 0) if tech else 0
-            score = _ev_score(strat_ret, strat_wr, _trades_for_shrink)
+        zone_return = tech.get("zone_return", strat_ret) if tech else strat_ret
+        entry_price = pos.get("entry_price", 0)
+        _lq = _price_cache.get(ticker, {})
+        _lp = _lq.get("price", 0) if _lq else 0
+        pnl_pct = ((_lp - entry_price) / entry_price * 100) if (entry_price > 0 and _lp > 0) else 0
+        days_held = 0
+        try:
+            from datetime import date as _date
+            _ed = _date.fromisoformat(pos.get("entry_date", ""))
+            _td = _date.today()
+            days_held = sum(1 for n in range((_td - _ed).days) if (_ed + timedelta(days=n + 1)).weekday() < 5)
+        except Exception:
+            pass
+        model_exit = (ez_trades >= 5 and atlas_trades >= 5
+                      and ez_wr < 65 and atlas_wr < 65
+                      and pnl_pct < 5.0 and days_held >= 7)
+        bad_backtest = model_exit  # name kept for downstream consumers
+        signal = "EXIT" if (exit_triggered or model_exit) else "HOLD"
+        _wr_for_score = atlas_wr if atlas_wr > 0 else strat_wr
+        if _wr_for_score > 0:
+            # Score from the SAME entry-zone WR/return both tabs display, so score,
+            # WR and ZR are all consistent (and rotation compares like-for-like vs
+            # candidate entries, which are also entry-zone-scored).
+            score = _ev_score(zone_return, _wr_for_score, atlas_trades)
             holdings_scores[ticker] = {
                 "score": score,
-                "zone_return": strat_ret,
-                "win_rate": strat_wr,
+                "zone_return": zone_return,
+                "win_rate": _wr_for_score,
                 "exit_triggered": exit_triggered,
                 "below_sma50": below_sma50,
                 "bad_backtest": bad_backtest,
