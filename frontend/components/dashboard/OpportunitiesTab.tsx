@@ -34,12 +34,19 @@ type CombinedResponseExt = import("@/lib/types").CombinedResponse & {
   market_session?: string;
 };
 
+// Module-level cache of the last good /scan/combined response. Persists across
+// tab-switch remounts (component-local useState would reset to null and blank the
+// tab on every entry). Updated only with responses that actually have signals.
+let _lastGoodCombined: CombinedResponseExt | null = null;
+
 export function OpportunitiesTab() {
   // V3.3 SSOT — /scan/combined is the SOLE entries-tab data source. No more
   // useData().scanner (/scan/opportunities) here. /scan/opportunities still
   // serves the holdings-rotation backend logic but the frontend doesn't touch it.
-  const [data, setData] = useState<CombinedResponseExt | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Initialize from the module-level cache so switching INTO this tab shows the
+  // last results instantly instead of going blank while the fetch is in flight.
+  const [data, setData] = useState<CombinedResponseExt | null>(_lastGoodCombined);
+  const [loading, setLoading] = useState(_lastGoodCombined === null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -49,7 +56,20 @@ export function OpportunitiesTab() {
   const fetchCombined = async () => {
     try {
       const res = (await api.getCombined()) as CombinedResponseExt;
-      setData(res);
+      const newHasSignals = (res.signals?.length ?? 0) > 0;
+      setData((prev) => {
+        // Never blank the tab: if the new response has no signals (cold machine
+        // wake / background rebuild still running) but we already have results,
+        // keep them and only refresh the status/refreshing flags. Otherwise take
+        // the new response.
+        if (!newHasSignals && prev && (prev.signals?.length ?? 0) > 0) {
+          const merged = { ...prev, system_status: res.system_status, refreshing: res.refreshing, scanning: res.scanning, cache_stale: res.cache_stale, cache_age_min: res.cache_age_min };
+          _lastGoodCombined = merged;
+          return merged;
+        }
+        if (newHasSignals) _lastGoodCombined = res;
+        return newHasSignals ? res : (prev ?? res);
+      });
       if (res.system_status) setSystemStatus(res.system_status as { stage: string; message: string; progress: number });
       setLastUpdated(new Date());
       setLoading(false);
