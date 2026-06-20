@@ -31,6 +31,7 @@ type CombinedResponseExt = import("@/lib/types").CombinedResponse & {
   scanning?: boolean;
   cache_stale?: boolean;
   cache_age_min?: number;
+  market_session?: string;
 };
 
 export function OpportunitiesTab() {
@@ -86,6 +87,10 @@ export function OpportunitiesTab() {
   const tierCounts = data?.tier_counts ?? { BEST: 0, GOOD: 0, FAIR: 0, WEAK: 0, POOR: 0 };
   const dataDate = data?.data_date ?? "";
   const cacheAge = data?.cache_age_min ?? 0;
+  // Only flag a price "stale" when the market is OPEN and a live quote is missing.
+  // When closed (nights/weekends) every price is the last close — that's expected,
+  // not a warning — so we don't badge it (avoids "stale" on every card off-hours).
+  const marketOpen = ["REGULAR", "PRE_MARKET", "AFTER_HOURS"].includes(data?.market_session ?? "");
 
   return (
     <div className="flex flex-col h-full">
@@ -333,8 +338,8 @@ export function OpportunitiesTab() {
                         </div>
                         <span className="text-neutral-300 font-medium flex items-center gap-1">
                           {formatCurrency(entry.price)}
-                          {entry.priceIsLive === false && (
-                            <span title="Cached close — not a live intraday price" className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-400 font-normal">stale</span>
+                          {marketOpen && entry.priceIsLive === false && (
+                            <span title="Market is open but no live quote — showing last close" className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-400 font-normal">stale</span>
                           )}
                         </span>
                       </div>

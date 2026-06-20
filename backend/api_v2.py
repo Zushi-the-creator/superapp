@@ -4859,6 +4859,7 @@ async def get_combined_opportunities():
             "scanning": _scan_running,                              # V3.3 SSOT
             "live_prices": live_count,
             "stale_tickers": stale_left,
+            "market_session": session_now,  # so the UI only flags "stale" prices when market is OPEN
             "signals": valid,
             "system_status": _system_status,
             "market_regime": _regime_now,
