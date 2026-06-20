@@ -426,6 +426,36 @@ async def _auto_refresh_stale_cache() -> None:
         _auto_refresh_running = False
 
 
+async def _background_full_scan() -> None:
+    """Evaluate + validate + save the entries cache OFF the request path.
+
+    /scan/combined must never block on this (evaluate_all + validate_top_signals'
+    ~15s of earnings/sentiment network calls can exceed the request timeout on a
+    cold/new-day machine — that broke the entries tab on 2026-06-20). The endpoint
+    triggers this in the background and serves the current/most-recent cache
+    immediately; the next poll picks up the fresh result."""
+    global _scan_running
+    if _scan_running:
+        return
+    _scan_running = True
+    try:
+        from strategy_evaluator import evaluate_all, validate_top_signals, save_cache
+        positions = _position_mgr._get_open_positions_sync()
+        held = set(p["ticker"] for p in positions) if positions else set()
+        live_px = _fresh_live_px()
+        _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks...", "progress": 40})
+        signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
+        _system_status.update({"stage": "validating", "message": "Checking earnings, sentiment...", "progress": 70})
+        signals = await validate_top_signals(signals, top_n=50)
+        save_cache(signals)
+        _system_status.update({"stage": "ready", "message": f"{sum(1 for s in signals if not s.vetoed)} entries ready", "progress": 100})
+    except Exception as e:
+        print(f"[BackgroundScan] error: {e}")
+        _system_status.update({"stage": "error", "message": f"Scan failed: {e}", "progress": 0})
+    finally:
+        _scan_running = False
+
+
 def _mom_stat(ticker: str, col: str) -> float:
     """Momentum backtest stat from backtest_cache, NULL-safe (NULL column → 0)."""
     row = _cache.conn.execute(f"SELECT {col} FROM backtest_cache WHERE ticker=?", (ticker,)).fetchone()
@@ -4646,42 +4676,43 @@ async def get_combined_opportunities():
                      or (cached and len(cached) < 20))
 
     if needs_refresh:
-        # Data freshness is handled by the background cache_refresh_loop on startup.
-        # The staleness guard in strategy_evaluator skips stocks with >3d old data.
-        # DO NOT refresh data inline — it blocks the endpoint for 2+ minutes.
-        _system_status.update({"stage": "evaluating", "message": "Evaluating 3,000+ stocks...", "progress": 40})
-        positions = _position_mgr._get_open_positions_sync()
-        held = set(p["ticker"] for p in positions) if positions else set()
-        live_px = _fresh_live_px()
-        try:
-            signals = await asyncio.to_thread(evaluate_all, 10.0, held, live_px)
-            # Step 3: Validate top 30 with earnings/sentiment/analyst
-            _system_status.update({"stage": "validating", "message": "Checking earnings, sentiment...", "progress": 70})
-            signals = await validate_top_signals(signals, top_n=50)
-            save_cache(signals)
-            cached = [asdict(s) for s in signals]
-            cache_age_min = 0
-            _system_status.update({"stage": "ready", "message": f"{sum(1 for s in signals if not s.vetoed)} entries ready", "progress": 100})
-        except Exception as e:
-            # Refresh failed — fall back to most recent cache so the frontend gets something.
+        # NON-BLOCKING (2026-06-20 fix): never run evaluate_all + validate_top_signals
+        # inline — that ~15s+ of work can exceed the request timeout on a cold/new-day
+        # machine and made the entries tab fail to load entirely. Instead, kick off a
+        # background scan and serve whatever cache we have RIGHT NOW. The frontend polls
+        # every 60s, so the fresh result appears within a poll or two. This also lets the
+        # machine auto-stop safely (the wake request returns fast instead of hanging).
+        if not _scan_running:
+            asyncio.create_task(_background_full_scan())
+        if not cached:
+            # No cache for today — serve the most recent so the tab isn't empty while
+            # the background build runs. (cache_stale flags it in the UI.)
             fallback, fallback_date, age_days = load_most_recent_cache()
             if fallback:
                 cached = fallback
                 cache_stale = True
                 cache_date_str = fallback_date or cache_date_str
                 cache_age_min = (age_days or 0) * 24 * 60
-                _system_status.update({"stage": "error", "message": f"Scan failed ({type(e).__name__}); serving cache from {fallback_date}", "progress": 0})
+                _system_status.update({"stage": "building", "message": f"Building today's scan… serving {fallback_date}", "progress": 30})
             else:
-                _system_status.update({"stage": "error", "message": f"Scan failed: {e}", "progress": 0})
+                # Nothing cached anywhere (first-ever boot) — return fast with a
+                # building status; the background scan fills it in shortly.
+                _system_status.update({"stage": "building", "message": "Building first scan…", "progress": 10})
                 return {
                     "timestamp": datetime.now().isoformat(),
                     "total": 0, "mean_reversion": 0, "momentum": 0, "both": 0,
-                    "data_date": "", "cache_age_min": 0, "live_prices": 0,
-                    "stale_tickers": len(_cache.get_stale_tickers()),
+                    "passed": 0, "upgrades": 0,
+                    "tier_counts": {"BEST": 0, "GOOD": 0, "FAIR": 0, "WEAK": 0, "POOR": 0},
+                    "ranked_count": 0, "total_scanned": 0,
+                    "holdings_scores": [], "worst_holding": "", "worst_score": 0,
+                    "data_date": "", "cache_age_min": 0, "cache_stale": True,
+                    "refreshing": True, "scanning": True,
+                    "live_prices": 0, "stale_tickers": len(_cache.get_stale_tickers()),
                     "signals": [], "system_status": _system_status,
                     "market_regime": _check_market_regime(),
-                    "error": f"{type(e).__name__}: {e}",
                 }
+        # else: today's cache exists but is stale/>30min — serve it now; the background
+        # scan above refreshes it for the next poll.
 
     if cached:
         # Regime gate enforcement (over the FULL cached list so a recovered
