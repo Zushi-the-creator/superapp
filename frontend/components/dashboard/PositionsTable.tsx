@@ -10,6 +10,84 @@ import { StockChart } from "@/components/shared/StockChart";
 import { TableSkeleton } from "@/components/shared/Skeleton";
 import type { PositionDetail, ScanOpportunity } from "@/lib/types";
 
+type EventTone = "danger" | "warn" | "muted";
+type NextEvent = {
+  kind: "earnings" | "catalyst";
+  label: string;     // short headline, e.g. "Earnings" or "Phase 3"
+  detail: string;    // full title for tooltip
+  dateLabel: string; // "Jun 20"
+  days: number | null;
+  tone: EventTone;
+};
+
+const EVENT_TONE_CLASS: Record<EventTone, string> = {
+  danger: "text-signal-sell",
+  warn: "text-amber-400",
+  muted: "text-neutral-400",
+};
+
+function fmtEventDate(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function daysUntil(iso?: string | null): number | null {
+  if (!iso) return null;
+  const d = new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso);
+  if (isNaN(d.getTime())) return null;
+  return Math.round((d.getTime() - Date.now()) / 86_400_000);
+}
+
+// Soonest upcoming binary event for a position. Biotech catalysts (trial
+// readouts / FDA / PDUFA) have wiped 25-50% in a session, so they read RED
+// inside ~2 weeks; earnings escalate amber (≤21d) → red (≤7d, the VETO window).
+function nextEvent(pos: PositionDetail): NextEvent | null {
+  const events: NextEvent[] = [];
+
+  if (pos.next_earnings_date) {
+    const days = pos.days_to_earnings ?? daysUntil(pos.next_earnings_date);
+    events.push({
+      kind: "earnings",
+      label: "Earnings",
+      detail: `Next earnings ${fmtEventDate(pos.next_earnings_date)}${days != null ? ` (${days}d)` : ""}`,
+      dateLabel: fmtEventDate(pos.next_earnings_date),
+      days,
+      tone: days == null ? "muted" : days <= 7 ? "danger" : days <= 21 ? "warn" : "muted",
+    });
+  }
+
+  if (pos.next_catalyst_date || pos.next_catalyst) {
+    const days = daysUntil(pos.next_catalyst_date);
+    const t = (pos.next_catalyst_type || "other").toUpperCase();
+    const label =
+      t === "PHASE" ? "Trial readout" :
+      t === "PDUFA" ? "PDUFA" :
+      t === "FDA" ? "FDA decision" :
+      t === "NDA" ? "NDA/BLA" :
+      t === "CONFERENCE" ? "Conference" : "Catalyst";
+    events.push({
+      kind: "catalyst",
+      label,
+      detail: pos.next_catalyst || `${label} ${fmtEventDate(pos.next_catalyst_date)}`,
+      dateLabel: fmtEventDate(pos.next_catalyst_date),
+      days,
+      tone: days != null && days > 14 ? "warn" : "danger",
+    });
+  }
+
+  if (events.length === 0) return null;
+  // Show the soonest; catalysts win ties (higher severity).
+  events.sort((a, b) => {
+    const da = a.days ?? 9999;
+    const db = b.days ?? 9999;
+    if (da !== db) return da - db;
+    return a.kind === "catalyst" ? -1 : 1;
+  });
+  return events[0];
+}
+
 export function PositionsTable({
   positions,
   loading,
@@ -42,10 +120,12 @@ export function PositionsTable({
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium">Entry</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium">Live</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium">P&L</th>
+              <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Value</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Weight</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Expected</th>
               <th className="text-center px-3 py-3 text-xs text-neutral-500 font-medium hidden lg:table-cell">20d</th>
               <th className="text-right px-3 py-3 text-xs text-neutral-500 font-medium hidden md:table-cell">Exit Strategy</th>
+              <th className="text-center px-3 py-3 text-xs text-neutral-500 font-medium hidden lg:table-cell">Next Event</th>
               <th className="text-center px-3 py-3 text-xs text-neutral-500 font-medium">Signal</th>
               <th className="w-8" />
             </tr>
@@ -147,38 +227,55 @@ const PositionRow = memo(function PositionRow({
           <div>{formatCurrency(pos.pnl)}</div>
           <span className="text-xs">{formatPercent(pos.pnl_pct)}</span>
         </td>
+        <td className="text-right px-3 py-3 text-neutral-300 font-medium hidden md:table-cell">
+          {formatCurrency(pos.current_value)}
+        </td>
         <td className="text-right px-3 py-3 text-neutral-400 hidden md:table-cell">
           {pos.weight.toFixed(1)}%
         </td>
         <td className="text-right px-3 py-3 hidden md:table-cell">
           {(() => {
-            const isMom = pos.strategy === "MOMENTUM";
-            const expRet = isMom ? pos.avg_return : pos.exit_zone_return;
-            const expWr = isMom ? pos.win_rate : pos.exit_zone_wr;
-            const expTrades = isMom ? pos.total_trades : pos.exit_zone_trades;
+            // Bayesian shrinkage on zone return — validated on 9,332 trades:
+            // Raw 12%+ predictions deliver -1% actual. Shrunk 3-5% → 3.4% actual.
+            // Formula: (raw × trades + 2.85 × 20) / (trades + 20)
+            const PRIOR_RET = 2.85;
+            const PRIOR_WEIGHT = 20;
+            const rawRet = pos.exit_zone_return;
+            const expTrades = pos.exit_zone_trades;
+            const shrunkRet = expTrades > 0
+              ? (rawRet * expTrades + PRIOR_RET * PRIOR_WEIGHT) / (expTrades + PRIOR_WEIGHT)
+              : 0;
+            const expWr = pos.exit_zone_wr;
+            const conf = expTrades >= 20 ? "high" : expTrades >= 10 ? "med" : expTrades >= 5 ? "low" : "noisy";
             return (
               <>
-                <div className={cn("font-medium text-xs", pnlColor(expRet))}>
-                  {expRet !== 0
-                    ? `${expRet > 0 ? "+" : ""}${expRet.toFixed(1)}%`
+                <div className={cn("font-medium text-xs", pnlColor(shrunkRet))}>
+                  {shrunkRet !== 0
+                    ? `${shrunkRet > 0 ? "+" : ""}${shrunkRet.toFixed(1)}%`
                     : "—"}
                 </div>
-                <div className={cn(
-                  "text-[10px]",
-                  expWr >= 80 ? "text-signal-buy" :
-                  expWr >= 65 ? "text-amber-400" :
-                  expWr > 0 ? "text-signal-sell" :
-                  "text-neutral-600"
-                )}>
+                <div className="text-[10px] text-neutral-500 whitespace-nowrap">
                   {expWr > 0 ? `${expWr.toFixed(0)}% WR` : "—"}
-                  {isMom && <span className="text-neutral-600 ml-1">MOM</span>}
+                  {pos.rsi_zone && (
+                    <span className="text-neutral-600 ml-1">
+                      @RSI {pos.rsi_zone}
+                    </span>
+                  )}
                 </div>
+                {expTrades > 0 && (
+                  <div className={cn(
+                    "text-[9px] whitespace-nowrap",
+                    conf === "noisy" ? "text-signal-sell" :
+                    conf === "low" ? "text-amber-400" :
+                    conf === "med" ? "text-neutral-500" :
+                    "text-signal-buy"
+                  )}>
+                    {expTrades}t · {conf === "noisy" ? "unreliable" : conf === "low" ? "low conf" : conf === "med" ? "moderate" : "reliable"}
+                  </div>
+                )}
               </>
             );
           })()}
-          {pos.exit_zone_trades > 0 && (
-            <div className="text-[9px] text-neutral-600">{pos.exit_zone_trades}t</div>
-          )}
         </td>
         <td className="text-center px-3 py-3 hidden lg:table-cell">
           <button
@@ -252,6 +349,28 @@ const PositionRow = memo(function PositionRow({
             <span className="text-neutral-600 text-xs">—</span>
           )}
         </td>
+        <td className="text-center px-3 py-3 hidden lg:table-cell whitespace-nowrap">
+          {(() => {
+            const ev = nextEvent(pos);
+            if (!ev) return <span className="text-neutral-600 text-xs">—</span>;
+            const tone = EVENT_TONE_CLASS[ev.tone];
+            return (
+              <div title={ev.detail} className="leading-tight">
+                <div className={cn("text-xs font-medium", tone)}>
+                  {ev.kind === "catalyst" && "⚠ "}{ev.label}
+                </div>
+                <div className="text-[10px] text-neutral-500">
+                  {ev.dateLabel}
+                  {ev.days != null && (
+                    <span className={cn("ml-1", ev.tone === "danger" ? "text-signal-sell" : ev.tone === "warn" ? "text-amber-400" : "text-neutral-600")}>
+                      {ev.days}d
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+        </td>
         <td className="text-center px-3 py-3 whitespace-nowrap">
           <SignalBadge signal={pos.signal || "HOLD"} />
           {pos.issues?.some(i => i.includes("ROTATE")) && (
@@ -271,7 +390,7 @@ const PositionRow = memo(function PositionRow({
 
       {isExpanded && (
         <tr className="bg-neutral-900/30">
-          <td colSpan={10} className="px-4 py-3">
+          <td colSpan={12} className="px-4 py-3">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
               <div>
                 <span className="text-neutral-500">RSI(2)</span>
@@ -293,7 +412,7 @@ const PositionRow = memo(function PositionRow({
                 <span className="text-neutral-500">Win Rate</span>
                 <div className="text-neutral-200 font-medium">
                   {(pos.bayesian_wr ?? pos.win_rate).toFixed(1)}%
-                  {pos.bayesian_wr != null && Math.abs(pos.bayesian_wr - pos.win_rate) >= 2 && (
+                  {(pos.bayesian_wr ?? 0) > 0 && Math.abs((pos.bayesian_wr ?? 0) - pos.win_rate) >= 2 && (
                     <span className="text-[10px] text-neutral-500 ml-1">(raw: {pos.win_rate.toFixed(0)}%)</span>
                   )}
                 </div>
@@ -359,16 +478,19 @@ const PositionRow = memo(function PositionRow({
               </div>
               <div>
                 <span className="text-neutral-500">
-                  {pos.strategy === "MOMENTUM" ? "Momentum Expected" : `Zone Return (RSI ${pos.rsi_zone})`}
+                  Forward Return @RSI {pos.rsi_zone}
                 </span>
-                <div className={cn("font-medium", pnlColor(
-                  pos.strategy === "MOMENTUM" ? pos.avg_return : pos.exit_zone_return
-                ))}>
-                  {pos.strategy === "MOMENTUM"
-                    ? `${formatPercent(pos.avg_return)} (${pos.win_rate?.toFixed(0)}% WR, ${pos.total_trades} trades)`
-                    : `${formatPercent(pos.exit_zone_return)} (${pos.exit_zone_wr?.toFixed(0)}% WR, ${pos.exit_zone_trades} trades)`
-                  }
+                <div className={cn("font-medium", pnlColor(pos.exit_zone_return))}>
+                  {`${formatPercent(pos.exit_zone_return)} (${pos.exit_zone_wr?.toFixed(0)}% WR, ${pos.exit_zone_trades} trades)`}
+                  {pos.exit_zone_trades > 0 && pos.exit_zone_trades < 10 && (
+                    <span className="text-signal-sell text-xs ml-1">low-n</span>
+                  )}
                 </div>
+                {pos.strategy === "MOMENTUM" && pos.total_trades > 0 && (
+                  <div className="text-[10px] text-neutral-600 mt-0.5">
+                    Entry signal: {formatPercent(pos.avg_return)} ({pos.win_rate?.toFixed(0)}% WR, {pos.total_trades}t) — historical, not forward
+                  </div>
+                )}
               </div>
               <div>
                 <span className="text-neutral-500">Entry Date</span>
@@ -381,6 +503,32 @@ const PositionRow = memo(function PositionRow({
               <div>
                 <span className="text-neutral-500">Cost Basis</span>
                 <div className="text-neutral-200 font-medium">{formatCurrency(pos.cost_basis)}</div>
+              </div>
+              <div className="col-span-2">
+                <span className="text-neutral-500">Next Event</span>
+                {(pos.next_earnings_date || pos.next_catalyst) ? (
+                  <div className="space-y-0.5 mt-0.5">
+                    {pos.next_earnings_date && (() => {
+                      const d = pos.days_to_earnings ?? daysUntil(pos.next_earnings_date);
+                      const tone = d == null ? "muted" : d <= 7 ? "danger" : d <= 21 ? "warn" : "muted";
+                      return (
+                        <div className={cn("font-medium", EVENT_TONE_CLASS[tone as EventTone])}>
+                          📅 Earnings {fmtEventDate(pos.next_earnings_date)}
+                          {d != null && <span className="text-neutral-500 ml-1">({d}d)</span>}
+                        </div>
+                      );
+                    })()}
+                    {pos.next_catalyst && (
+                      <div className="text-signal-sell font-medium" title={pos.next_catalyst}>
+                        ⚠ {pos.next_catalyst_type?.toUpperCase() || "CATALYST"}
+                        {pos.next_catalyst_date && <span className="text-neutral-500 ml-1">{fmtEventDate(pos.next_catalyst_date)}</span>}
+                        <span className="block text-[10px] text-neutral-400 font-normal truncate max-w-[280px]">{pos.next_catalyst}</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-neutral-500">No scheduled event in ~80d</div>
+                )}
               </div>
               {/* Chart button on mobile (sparkline column hidden) */}
               <div className="col-span-2 md:col-span-4 lg:hidden">
@@ -511,6 +659,8 @@ const PositionRow = memo(function PositionRow({
     prev.pos.pnl_pct === next.pos.pnl_pct &&
     prev.pos.signal === next.pos.signal &&
     prev.pos.days_held === next.pos.days_held &&
+    prev.pos.next_earnings_date === next.pos.next_earnings_date &&
+    prev.pos.next_catalyst_date === next.pos.next_catalyst_date &&
     prev.replacement === next.replacement
   );
 });
