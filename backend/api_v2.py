@@ -1024,11 +1024,12 @@ def _sma_array(closes: list, period: int) -> list:
 
 def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -> Dict:
     """Get RSI, SMA50, regime, backtest stats from cache.
-    Full history (matches the entry engine's backtest_cache so a holding shows the
-    SAME WR/return it was bought on — 2026-06-20 fix; was 1260d which understated it).
-    Uses pre-computed RSI/SMA arrays for 63x faster backtesting.
+    5yr (1260d) lookback — full-history (2600) was tried 2026-06-20 for entry/holding
+    consistency but doubled _select_best_exit's work and slowed the whole app on a
+    cold-cache wake (2026-06-22 revert). Headline WR/return is reconciled to the entry
+    engine via backtest_cache below instead (a cheap lookup, not a 2x re-backtest).
     """
-    df = _cache.get(ticker, 2600)
+    df = _cache.get(ticker, 1260)
     if df is None or len(df) < 60:
         # Fallback: try fetching from Tiingo directly (for cold cache on Fly)
         # Tiingo is primary — works on Fly.io unlike Stooq which is blocked
@@ -1109,23 +1110,12 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     _HOLD = 60  # entry at open i+1, exit at close i+1+_HOLD (= live Fixed60d)
     rsi2_arr = _rsi2_array(closes)
     sma50_arr = _sma_array(closes, 50)
-    # Per-bar ATR(14)% array so the holding backtest uses the SAME gates as the entry
-    # engine (backtest_cache): RSI<10, ATR>=3, price>SMA50, price>=10. Without the ATR
-    # + uptrend gates the holding backtest counted downtrend / low-vol junk dips and
-    # understated WR/return vs what the position was actually bought on (2026-06-20 fix).
-    atr_pct_arr = [0.0] * len(closes)
-    for _i in range(14, len(closes)):
-        _trs = 0.0
-        for _j in range(_i - 13, _i + 1):
-            _trs += max(highs[_j] - lows[_j], abs(highs[_j] - closes[_j - 1]), abs(lows[_j] - closes[_j - 1]))
-        atr_pct_arr[_i] = (_trs / 14) / closes[_i] * 100 if closes[_i] > 0 else 0.0
     last_exit_day = -1
     trades = []
     for i in range(50, len(closes) - _HOLD - 2):
         if i <= last_exit_day:
             continue
-        if (rsi2_arr[i] < 10 and closes[i] >= 10
-                and atr_pct_arr[i] >= 3 and sma50_arr[i] > 0 and closes[i] > sma50_arr[i]):
+        if rsi2_arr[i] < 10 and closes[i] >= 10:
             entry_p = opens[i + 1] if i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
             ret = ((closes[i + 1 + _HOLD] - entry_p) / entry_p) * 100 - _FEE_PCT
             trades.append({"return": ret, "win": ret > 0, "rsi": rsi2_arr[i]})
@@ -1156,9 +1146,7 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     for i in range(50, len(closes) - _HOLD - 2):
         if i <= ez_last_exit:
             continue
-        if (zone_low <= rsi2_arr[i] < zone_high
-                and closes[i] >= 10 and atr_pct_arr[i] >= 3
-                and sma50_arr[i] > 0 and closes[i] > sma50_arr[i]):
+        if zone_low <= rsi2_arr[i] < zone_high:
             entry_px = opens[i + 1] if opens and i + 1 < len(opens) and opens[i + 1] > 0 else closes[i]
             exit_px = closes[i + 1 + _HOLD]
             ret = ((exit_px - entry_px) / entry_px) * 100 - _FEE_PCT
