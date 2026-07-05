@@ -127,6 +127,11 @@ def _compute_cash_balance(total_deposited: float) -> float:
              + Σ(SELL.total − SELL.fee)
              − Σ(SPLIT.fee)
              − Σ(TAX.total)
+             + Σ(DIVIDEND.total)
+    DIVIDEND rows (added 2026-07-04) mirror TAX: amount in `total`, fee=0,
+    ticker='_CASH' for broker-reconciliation lump sums or the real ticker for
+    per-stock dividends. Without them every broker dividend credit drifts the
+    app below the broker's cash (found as a $247.25 gap vs Blink).
     `total_deposited` should already include DB DEPOSITs (caller passes
     `_total_deposited_now()`). Fee column on each tx already respects the
     10-free-trades-per-month rule (set by `_calc_trade_fee` at trade time).
@@ -158,9 +163,12 @@ def _compute_cash_balance(total_deposited: float) -> float:
         tax_total = cur.execute(
             "SELECT COALESCE(SUM(total),0) FROM transactions WHERE action='TAX'"
         ).fetchone()[0]
+        dividend_total = cur.execute(
+            "SELECT COALESCE(SUM(total),0) FROM transactions WHERE action='DIVIDEND'"
+        ).fetchone()[0]
     finally:
         conn.close()
-    raw = total_deposited - buy_total - buy_fee + sell_total - sell_fee - split_fee - tax_total
+    raw = total_deposited - buy_total - buy_fee + sell_total - sell_fee - split_fee - tax_total + dividend_total
     if raw < 0:
         # Surface the drift instead of clamping — the user wants to see the real
         # number so fee/tax mismatches with the broker are visible. Set
@@ -1301,14 +1309,15 @@ async def _compute_signal(session: aiohttp.ClientSession, ticker: str,
     if exit_triggered:
         issues.append(f"Exit triggered ({exit_strategy}: {tech.get('exit_label', '')})")
 
-    # Model EXIT signal: both overall WR AND exit zone WR fail 65% → valid early exit
-    # Rule from CLAUDE.md: "Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT"
+    # Model EXIT — RETIRED as an exit trigger (2026-07-04). Backtested on 12,187
+    # PROD-gated entries: exiting the WR<65 cohort early LOSES −2.5pp/trade vs
+    # holding to the Fixed60d timer (OOS −1.9pp); zone stats themselves are
+    # uncalibrated (IC≈0, _zonecalib_bt.py). Kept as an informational note only.
     _wr = tech.get("win_rate", 100)
     _ez_wr = tech.get("exit_zone_wr", 100)
     _ez_trades = tech.get("exit_zone_trades", 0)
     if _wr < MIN_WR and _ez_wr < MIN_WR and _ez_trades >= 5:
-        exit_triggered = True
-        issues.append(f"Model EXIT: WR {_wr:.0f}% + zone WR {_ez_wr:.0f}% both < {MIN_WR}%")
+        issues.append(f"Low-confidence stats: WR {_wr:.0f}% + zone WR {_ez_wr:.0f}% both < {MIN_WR}% (informational — hold to timer)")
 
     # Determine signal from issues + hybrid exit strategy
     critical = [i for i in issues if any(k in i for k in ["Below SMA50", "BEAR regime", "CRASH", "Low WR", "Model EXIT"])]
@@ -1604,19 +1613,17 @@ async def get_portfolio():
             signal = "HOLD"
             issues.append(f"BEAR HOLD: WR {atlas_wr:.0f}%>=65% losing {pnl_pct:+.1f}% — hold (55% improve historically)")
 
-        # Model EXIT: both ATLAS WR and zone WR fail 65% (CLAUDE.md rule).
-        # Winner-protect: skip when up >5% — historical WR is clearly wrong
-        # for this trade right now (it's winning). Let trail/timer handle exit.
-        # Per CLAUDE.md "NOT valid: RSI rising (trade working)" — same idea.
-        # Min-hold gate: don't fire on fresh positions. Hybrid21d MR exits have a
-        # 7-day minimum; flagging a position bought today as EXIT contradicts the
-        # entry filters that just approved it.
+        # Model EXIT — RETIRED as an exit signal (2026-07-04). Backtest on 12,187
+        # PROD-gated entries (_modelexit_bt.py): exiting the WR<65 cohort loses
+        # −2.5pp/trade vs holding to the timer (OOS −1.9pp). Zone stats are also
+        # uncalibrated noise (IC≈0, _zonecalib_bt.py). Informational note only;
+        # valid exits are the Fixed60d/90d timer and earnings <7d (priorities 1-2).
         elif (ez_trades >= 5 and atlas_trades >= 5
               and ez_wr < 65 and atlas_wr < 65
               and pnl_pct < 5.0
-              and _days_held_for_exit >= 7):  # respect Hybrid21d's 7-day min
-            signal = "EXIT"
-            issues.append(f"Model EXIT: WR {atlas_wr:.0f}% + zone WR {ez_wr:.0f}% both < 65% ({pnl_pct:+.1f}%, {_days_held_for_exit}d held)")
+              and _days_held_for_exit >= 7):
+            signal = "HOLD"
+            issues.append(f"Low-confidence stats: WR {atlas_wr:.0f}% + zone WR {ez_wr:.0f}% both < 65% ({pnl_pct:+.1f}%, {_days_held_for_exit}d held) — informational, hold to timer")
 
         else:
             # Non-bear market: standard checks
@@ -1734,10 +1741,13 @@ async def get_portfolio():
                     _best_comp = _best.get("_inline_composite", 0) or 0
                     _gap = _best_comp - h_score
                     if _gap > ROTATION_SCORE_GAP:
-                        signal = "ROTATE"
+                        # ROTATE — RETIRED as a signal (2026-07-04). Portfolio-sim backtest
+                        # (_rotate_bt.py): acting on composite-gap rotation turned $10k into
+                        # $16.5k vs $114.7k for hold-to-timer (2017-2026); every variant lost.
+                        # Kept informational: names the better candidate without advising a swap.
                         _rot_target = _best["ticker"]
                         _rot_gap = round(_gap, 1)
-                        issues.append(f"ROTATE to {_best['ticker']} (score {_best_comp:.0f} vs {h_score:.0f}, gap {_rot_gap})")
+                        issues.append(f"FYI: {_best['ticker']} scores higher (comp {_best_comp:.0f} vs {h_score:.0f}) — for NEW capital only; hold this position to timer")
             except Exception:
                 pass
 
@@ -2970,11 +2980,12 @@ def _get_holdings_scores() -> tuple:
             days_held = sum(1 for n in range((_td - _ed).days) if (_ed + timedelta(days=n + 1)).weekday() < 5)
         except Exception:
             pass
-        model_exit = (ez_trades >= 5 and atlas_trades >= 5
-                      and ez_wr < 65 and atlas_wr < 65
-                      and pnl_pct < 5.0 and days_held >= 7)
-        bad_backtest = model_exit  # name kept for downstream consumers
-        signal = "EXIT" if (exit_triggered or model_exit) else "HOLD"
+        # Model-EXIT retired 2026-07-04 (backtested −2.5pp/trade vs hold-to-timer;
+        # zone stats IC≈0). Only the real exit trigger (timer/earnings) flags EXIT —
+        # mirrors the Portfolio tab so both stay consistent.
+        model_exit = False
+        bad_backtest = False  # name kept for downstream consumers
+        signal = "EXIT" if exit_triggered else "HOLD"
         _wr_for_score = atlas_wr if atlas_wr > 0 else strat_wr
         if _wr_for_score > 0:
             # Score from the SAME entry-zone WR/return both tabs display, so score,

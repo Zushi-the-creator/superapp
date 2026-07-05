@@ -11,12 +11,12 @@
 - **BACKTEST FIRST**: ALWAYS run backtest on ALL positions BEFORE showing any projections or recommendations (MANDATORY)
 - **NO FAKE PROJECTIONS**: NEVER show projected returns without actual backtest data to back it up
 - **VERIFY BEFORE SPEAKING**: NEVER tell user any data before checking it deeply first (MANDATORY)
-- **RSI ZONE ANALYSIS**: Don't assume overbought = sell. Backtest expected returns BY RSI ZONE for each stock (MANDATORY)
+- **RSI ZONE ANALYSIS — RETIRED 2026-07-04**: Per-stock zone expectations are UNCALIBRATED NOISE. Calibration test (5,481 point-in-time samples, `_zonecalib_bt.py`): Spearman IC ≈ 0.00 predicted-vs-realized; stocks "predicting" +20% realized +3.4%, stocks "predicting" negative realized +1.7% — everything converges to the strategy base rate (~+2-4%/60d). Do NOT base hold/sell/size decisions on per-stock zone returns. The behavioral rule that survives (for validated reasons): don't sell overbought winners — hold to the Fixed60d timer.
 - **BE CONFIDENT**: Don't ask user for permission when data supports a decision - act on it
 - **SCAN FOR BETTER**: Before recommending ANY buy, ALWAYS scan 1,000+ stocks for better alternatives. Don't default to existing holdings - find the BEST opportunity (MANDATORY)
 - **PORTFOLIO BALANCE**: When recommending BUY/SELL, ALWAYS consider total portfolio spread. Target ~20% per position, no single stock >30%. Size new buys to rebalance underweight positions. Don't create new overweight positions (MANDATORY)
 - **EARNINGS CALENDAR**: ALWAYS check earnings calendar (Finnhub) before ANY buy recommendation. VETO any stock with earnings within 7 days. Also check portfolio holdings for upcoming earnings and WARN user. Use `python3 deep_scanner.py` which has built-in earnings VETO (MANDATORY)
-- **WEIGHTED ALLOCATION**: When deploying new capital, weight by zone expected return - NOT equal weight. Stocks with higher zone returns get more capital (MANDATORY)
+- **WEIGHTED ALLOCATION — RETIRED 2026-07-04**: "Weight capital by zone expected return" allocated on noise (zone IC ≈ 0, see RSI ZONE ANALYSIS above). Use roughly equal sizing across validated entries, ranked by composite_score (the validated sort key). Respect the 20%/30% position caps.
 - **TRUST BACKTESTS**: If backtests are valid (WR > 55%, 10+ trades, zone trades >= 5), trust the data regardless of stock price. Only filter penny stocks under $10 (MR scanner cap). Momentum scanner caps at $200.
 - **EXIT TRIGGERS (UPDATED 2026-06-17, V3.4)**: Hold positions until backtested per-strategy exit triggers — **Fixed60d** for MR / BOTH (exit on trading day 60; replaced Fixed30d after honest 13-window rolling walk-forward — 24mo IS / 6mo OOS / 6mo step, 17,108 PROD-filtered entries, 487-ticker quarantine). Fixed60d portfolio sim N=4 OOS-2024: +23.2% CAGR / 2.09% monthly / MDD -11.6% / Sharpe 0.78 vs Fixed30d N=4: +6.3% CAGR / 1.04% monthly / MDD -35% / Sharpe 0.59. Cross-period worst-month: Fixed60d +0.94% (never negative) vs Fixed30d -0.18%. Dynamic regime-aware exits (HonestDyn family) were tested honestly and beaten by Fixed60d once portfolio capacity constraints applied. **Fixed90d** for Momentum (unchanged). Valid early exits: (a) Earnings within 7 days — binary event risk, always EXIT. (b) Stock-specific negative sentiment (downgrade, earnings miss, product failure) — EXIT. (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT. NOT valid: market-wide crash headlines, war panic across all stocks, RSI rising (trade working). Distinguish STOCK-SPECIFIC bad news from MARKET-WIDE noise. (MANDATORY)
 - **REGIME-ADAPTIVE ENTRIES (UPDATED 2026-06-12, V3.3)**: Per 35K-trade paired backtest + walk-forward validation (train pre-2022, test 2022+), entry rules adjust by regime: **DANGER (SPY -7% to -15% drawdown) → PAUSE all entries** (was -10% to -15%; widened after CORRECTION regime showed 49% WR / +0.22% avg — below threshold). **SHARP_DROP (SPY 5d < -2%) → 70% size** (still +2.27% avg / 57% WR). All other regimes unchanged. "A skip CORRECTION" returned +2.10%/trade out-of-sample vs +1.18% baseline (+78% cumulative). Dual-bucket "defensive RSI<10" approach was tested and REJECTED — Bucket A (high-vol MR) beat Bucket B and C in every regime including CRISIS. (MANDATORY)
@@ -223,6 +223,19 @@ The `pause_mr` flag is wired in `/api/v2/scan/combined` to filter MR signals whe
 - **Earnings<7d exit WIRED** into the live holdings exit ladder (Priority 2) using the forward Finnhub/Tiingo calendar (`next_earnings_map`), NOT the false-positive news detector. The documented "always EXIT on earnings <7d" rule now actually fires.
 - **2nd-endpoint `days_held`** now weekday-counted (was calendar — ran the days-remaining counter ~40% fast).
 - Note: `_is_true_bear` bear-exit branches remain inert (regime never emits "BEAR") — left inert intentionally; activating panic-sells would contradict the "don't sell into market-wide crashes" strategy.
+
+### Hold-vs-exit mega-validation (2026-06-20 → 07-04, all point-in-time, IS+OOS)
+Every early-exit / rotation idea was backtested against HOLD-to-Fixed60d-timer on PROD-gated entries. **HOLD won every time:**
+| Policy tested | Result vs HOLD |
+|---|---|
+| Composite rotation (gap>15, live ROTATE logic) | −13 to −24 CAGR pts ($114k vs $16.5k on $10k, 2017-2026) |
+| Rotate losers-only variants | all lose (best still −60% of final equity) |
+| Model-EXIT (WR<65 both zones) | −2.5pp/trade on the flagged cohort (OOS −1.9pp) |
+| Exit on SMA50 break ("broken technicals") | −2.7pp/trade; 90% of MR entries break SMA50 mid-hold — that's the dip, not a broken thesis |
+| Stop-loss −8% | hurts (22-39% WR exit cohorts) |
+| Pace-rotation (cut behind-pace at day D, redeploy) | no robust winner; the one good combo (d21/−3%) is an isolated overfit spike — neighbors and N=7 all lose |
+| Exit when current-zone expectation negative | HOLD wins by ~2.7pp at day 5/14/21 checkpoints (the "ARCB case") |
+**Zone-expectation calibration (`_zonecalib_bt.py`, 5,481 samples): per-stock zone returns have IC ≈ 0.00 — pure noise.** Realized ≈ base rate (~+2-4%/60d) regardless of predicted. Raw zone numbers (e.g. "+37.5% expected") must not drive decisions or sizing; shrunk is only marginally better calibrated. **Valid exits remain ONLY: Fixed60d/90d timer, earnings <7d.**
 
 ### Lower-priority (cosmetic / non-blocking)
 - 27 of 31 endpoints have no FastAPI `response_model=` (no output validation on `/scan/combined`, `/analyze`, etc. — guardrail gap, not a live bug).
