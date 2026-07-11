@@ -1,7 +1,7 @@
 # OpenClaw Trading Operator — setup
 
 An always-on operator agent: monitors the portfolio, scans for entries, researches and
-backtests improvements around the clock, ships PRs, and reports to the CEO on Telegram.
+backtests improvements around the clock, ships PRs, and reports to the CEO on WhatsApp.
 It recommends everything and executes nothing at the broker.
 
 ## Install (one time, ~15 min)
@@ -11,17 +11,21 @@ It recommends everything and executes nothing at the broker.
 npm install -g openclaw@latest
 openclaw onboard
 
-# 2. Telegram: create a bot with @BotFather, paste the token during onboarding,
-#    then DM the bot once to pair. Note your chat id (shown by `openclaw status`).
+# 2. Merge openclaw.json.example into ~/.openclaw/openclaw.json FIRST
+#    (sets the WhatsApp allowlist to your number so only you can command the bot)
 
-# 3. Copy the operator identity into the OpenClaw workspace (default ~/.openclaw/workspace)
+# 3. WhatsApp: link via QR (like WhatsApp Web). A dedicated number (spare SIM/eSIM)
+#    is recommended so the operator has its own chat; your personal number also
+#    works (self-chat mode).
+openclaw channels login --channel whatsapp   # scan the QR from the operator's phone
+openclaw gateway                             # start the always-on gateway
+
+# 4. Copy the operator identity into the OpenClaw workspace (default ~/.openclaw/workspace)
 cp SOUL.md OPERATOR_PROTOCOL.md HEARTBEAT.md ~/.openclaw/workspace/
 # Queue/backlog files stay HERE in the repo (version-controlled); SOUL.md points to them.
 
-# 4. Merge openclaw.json.example into ~/.openclaw/openclaw.json
-
-# 5. Create the schedule
-CHAT_ID="<your telegram chat id>" ./setup_cron.sh
+# 5. Create the schedule (your number in E.164 — this is where reports are sent)
+CEO_PHONE="+9725XXXXXXXX" ./setup_cron.sh
 openclaw cron list   # verify 7 jobs
 ```
 
@@ -38,7 +42,7 @@ openclaw cron list   # verify 7 jobs
 | 1st of month | Board audit | Honest ROI attribution vs deposit-matched QQQ |
 | Every 30m, market hours | Heartbeat | Silent unless earnings/timer/regime/news alert |
 
-You drive it from Telegram: `EXECUTED NVDA 10 207.30`, `SKIP BE too concentrated`,
+You drive it from WhatsApp: `EXECUTED NVDA 10 207.30`, `SKIP BE too concentrated`,
 `RESEARCH does VIX term structure improve the regime gate`, `BUILD sector tab retry`,
 `APPROVE DEPLOY backend`, `STATUS`, `SCAN`, `PAUSE`. Full grammar: OPERATOR_PROTOCOL.md.
 

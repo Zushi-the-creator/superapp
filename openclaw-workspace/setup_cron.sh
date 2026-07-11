@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # SuperApp Trading Operator — OpenClaw cron setup
-# Usage: CHAT_ID="<your telegram chat id>" ./setup_cron.sh
+# Usage: CEO_PHONE="+9725XXXXXXXX" ./setup_cron.sh
 set -euo pipefail
 
-: "${CHAT_ID:?Set CHAT_ID to your Telegram chat id (openclaw shows it after pairing)}"
+: "${CEO_PHONE:?Set CEO_PHONE to your WhatsApp number in E.164 format, e.g. +9725XXXXXXXX}"
 
-TG=(--announce --channel telegram --to "$CHAT_ID")
+TG=(--announce --channel whatsapp --to "$CEO_PHONE")
 
 # ── Market-day cadence (America/New_York) ────────────────────────────────────
 

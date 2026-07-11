@@ -1,5 +1,13 @@
 // Merge into ~/.openclaw/openclaw.json (json5). Relevant sections only.
 {
+  channels: {
+    whatsapp: {
+      // Lock the bot to the CEO only. With allowlist, no one else can command it.
+      dmPolicy: "allowlist",
+      allowFrom: ["+9725XXXXXXXX"],   // <-- your WhatsApp number, E.164
+      groupPolicy: "allowlist"        // no group access unless explicitly added
+    }
+  },
   // Heartbeat: 30m ticks during US market hours (Israel time), isolated + light
   // context keeps each tick at ~2-5K tokens. Off-hours coverage comes from the
   // nightly/morning cron jobs, so no 24h heartbeat needed.

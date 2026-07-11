@@ -1,4 +1,4 @@
-# OPERATOR_PROTOCOL.md — Telegram command grammar
+# OPERATOR_PROTOCOL.md — WhatsApp command grammar
 
 Every CEO message is a work order. Parse intent loosely (natural language is fine),
 but these keywords have exact meanings. Always confirm what you understood before

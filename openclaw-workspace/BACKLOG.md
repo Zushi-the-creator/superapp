@@ -15,7 +15,7 @@ description. Deploy only on explicit `APPROVE DEPLOY`.
 5. **SectorsTab error/retry state** — failed first load currently shows "No sector
    data" until remount.
 6. **AllocationChart.tsx** — dead code? Wire it into the Portfolio tab or delete it.
-7. **Telegram-ticket → positions sync helper** — one script that records an EXECUTED
+7. **WhatsApp-ticket → positions sync helper** — one script that records an EXECUTED
    fill into prod API + local positions.db in one shot (reduces the three-way drift
    that keeps happening).
 
