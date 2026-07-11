@@ -1,0 +1,18 @@
+// Merge into ~/.openclaw/openclaw.json (json5). Relevant sections only.
+{
+  // Heartbeat: 30m ticks during US market hours (Israel time), isolated + light
+  // context keeps each tick at ~2-5K tokens. Off-hours coverage comes from the
+  // nightly/morning cron jobs, so no 24h heartbeat needed.
+  heartbeat: {
+    every: "30m",
+    activeHours: { start: "16:00", end: "23:30", tz: "Asia/Jerusalem" },
+    isolatedSession: true,
+    lightContext: true,
+    showOk: false
+  },
+  cron: {
+    enabled: true,
+    maxConcurrentRuns: 2,          // research + a market job at most; protects the laptop
+    retry: { maxAttempts: 3, backoffMs: [30000, 60000, 300000] }
+  }
+}
