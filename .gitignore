@@ -79,3 +79,5 @@ ollama_data/
 # System
 .DS_Store
 Thumbs.db
+*.db-wal
+*.db-shm
