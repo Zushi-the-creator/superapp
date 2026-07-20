@@ -436,6 +436,109 @@ def load_cache() -> Optional[List[dict]]:
     return None
 
 
+# Universe prior for Bayesian return shrinkage (matches _ev_score in api_v2)
+_UNIVERSE_RET = 2.85
+_RET_PRIOR_WEIGHT = 20
+
+
+def _bayesian_ret(ret: float, trades: int) -> float:
+    """Shrink observed avg return toward universe prior (2.85%, 20 phantom trades).
+    Small samples pulled hard toward prior; 50+ trades ≈ face value."""
+    if trades <= 0:
+        return _UNIVERSE_RET
+    return (ret * trades + _UNIVERSE_RET * _RET_PRIOR_WEIGHT) / (trades + _RET_PRIOR_WEIGHT)
+
+
+def load_most_recent_cache() -> tuple:
+    """Load the newest entries_*.json regardless of date — fallback when today's
+    scan fails. Returns (entries, date_str, age_days) or (None, None, None)."""
+    import glob
+    import re
+    for path in sorted(glob.glob(os.path.join(CACHE_DIR, "entries_*.json")), reverse=True):
+        m = re.search(r"entries_(\d{4}-\d{2}-\d{2})\.json$", path)
+        if not m:
+            continue
+        try:
+            with open(path) as f:
+                entries = json.load(f)
+        except Exception:
+            continue
+        date_str = m.group(1)
+        age_days = (datetime.now() - datetime.strptime(date_str, "%Y-%m-%d")).days
+        return entries, date_str, age_days
+    return None, None, None
+
+
+async def validate_top_signals(signals: List[EntrySignal], top_n: int = 30) -> List[EntrySignal]:
+    """Validate the top N non-vetoed signals: earnings (Finnhub), analyst (Finviz),
+    sentiment (Google News + VADER). Same VETO rules as deep_scanner.phase3_validate.
+    Mutates signals in place; returns the full list."""
+    import asyncio
+    import aiohttp
+
+    top = [s for s in signals if not s.vetoed][:top_n]
+    if not top:
+        return signals
+
+    from deep_scanner import DeepScanner
+    from analyst_data import AnalystDataFetcher
+    from sentiment import SentimentEngine
+
+    scanner = DeepScanner()
+    analyst_fetcher = AnalystDataFetcher()
+    sentiment_engine = SentimentEngine()
+
+    sem = asyncio.Semaphore(5)
+    async with aiohttp.ClientSession() as session:
+
+        async def _validate_one(s: EntrySignal):
+            async with sem:
+                # 1. Earnings check (VETO if < 7 days — binary event risk)
+                try:
+                    earnings = await scanner._check_earnings(session, s.ticker)
+                    if earnings:
+                        s.vetoed = True
+                        s.veto_reason = f"Earnings on {earnings['date']} (within 7 days)"
+                        return
+                except Exception:
+                    pass
+
+                # 2. Analyst consensus/target (Finviz) — VETO on Hold/Sell or price > target
+                try:
+                    adata = await analyst_fetcher.fetch_analyst_data(s.ticker)
+                    if adata:
+                        s.analyst_consensus = adata.get("consensus", "")
+                        target = adata.get("price_target_avg", 0) or 0
+                        if s.analyst_consensus in ("Hold", "Sell", "Underperform", "Strong Sell"):
+                            s.vetoed = True
+                            s.veto_reason = f"Analyst says {s.analyst_consensus}"
+                            return
+                        if target > 0 and s.price > target:
+                            s.vetoed = True
+                            s.veto_reason = f"Overvalued (${s.price:.0f} > target ${target:.0f})"
+                            return
+                except Exception:
+                    pass
+
+                # 3. Sentiment (Google News + VADER) — VETO if strongly negative
+                try:
+                    sdata = await sentiment_engine.get_ticker_sentiment(s.ticker)
+                    if sdata:
+                        s.sentiment_label = sdata.get("sentiment_label", "NEUTRAL")
+                        score = sdata.get("sentiment_score", 0)
+                        if score < -0.3:
+                            s.vetoed = True
+                            s.veto_reason = f"Negative sentiment ({score:.2f})"
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[_validate_one(s) for s in top])
+
+    vetoed = sum(1 for s in top if s.vetoed)
+    print(f"[Evaluator] Validated top {len(top)}: {len(top) - vetoed} OK, {vetoed} vetoed")
+    return signals
+
+
 if __name__ == "__main__":
     results = evaluate_all()
     save_cache(results)
