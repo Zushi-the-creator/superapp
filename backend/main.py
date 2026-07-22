@@ -13,11 +13,16 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from datetime import datetime
 
+# Bump on every deploy that changes runtime behaviour so a deploy can be
+# verified from the PUBLIC health endpoint (GET /) without needing fly logs.
+# 2026-07-22: Yahoo-primary refresh (breaks the Tiingo daily-cap freeze).
+BUILD_TAG = "2026-07-22-yahoo-refresh"
+
 from api_v2 import (
     router as v2_router,
     background_monitor, price_level_monitor, warmup_signal_cache,
     quote_refresh_loop, cache_refresh_loop, extended_hours_refresh_loop,
-    technicals_refresh_loop,
+    technicals_refresh_loop, signal_tracker_loop, sector_intel_loop,
 )
 
 
@@ -63,7 +68,8 @@ async def _safe_task(name: str, coro):
 @app.on_event("startup")
 async def startup_event():
     """Start all background loops on startup."""
-    print("Starting NASDAQ Super App V2.6 backend...")
+    print("Starting NASDAQ Super App backend "
+          f"[build {BUILD_TAG}, refresh source: Yahoo-primary/Tiingo-fallback]...")
 
     # V2 background monitor (health check every 15 min)
     asyncio.create_task(_safe_task("background_monitor", background_monitor))
@@ -86,6 +92,13 @@ async def startup_event():
     # Extended hours (pre-market / after-hours) quote refresh
     asyncio.create_task(_safe_task("extended_hours_refresh", extended_hours_refresh_loop))
 
+    # Signal tracker — daily snapshot of top-20 entries + backfill returns
+    # (NEW 2026-06-02: builds the feedback loop for score-vs-realized analysis)
+    asyncio.create_task(_safe_task("signal_tracker_loop", signal_tracker_loop))
+
+    # Sector intelligence — news narratives (45 min) + ticker->sector Finnhub backfill
+    asyncio.create_task(_safe_task("sector_intel_loop", sector_intel_loop))
+
     print("Backend started successfully!")
 
 
@@ -96,6 +109,8 @@ async def root():
         "status": "online",
         "app": "NASDAQ Super App",
         "version": "2.6.0",
+        "build": BUILD_TAG,
+        "refresh_source": "yahoo-primary",
         "timestamp": datetime.now().isoformat()
     }
 

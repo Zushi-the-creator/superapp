@@ -35,6 +35,7 @@ from positions import PositionManager
 from data_cache import DataCache
 from atlas_v2.entry import EntryEngine
 from atlas_v2.regime import RegimeDetector
+import sector_intel as _sector_intel
 
 router = APIRouter(prefix="/api/v2", tags=["V2 Dashboard"])
 
@@ -3499,22 +3500,46 @@ def _build_scan_result(opportunities: list, total_scanned: int,
         for t, d in holdings_scores.items()
     ]
 
-    # Data freshness — most recent close in cache + how stale that is in trading days
-    freshness = {"latest_close": None, "trading_days_stale": None, "is_fresh": False}
+    # Data freshness — COVERAGE-based, not MAX. MAX(date) lies: during the
+    # 2026-07 freeze a single fresh ticker (SPY) made the whole system report
+    # "fresh" while 2,957 tickers carried June-26 bars. Use the date that at
+    # least 90% of the equity universe has reached (P10 of per-ticker data_end).
+    freshness = {"latest_close": None, "trading_days_stale": None, "is_fresh": False,
+                 "fresh_pct": 0, "newest_single": None}
     try:
         import sqlite3 as _sql_fresh
         conn = _sql_fresh.connect(os.path.join(os.path.dirname(__file__), "data", "stock_cache.db"))
-        latest = conn.execute("SELECT MAX(date) FROM daily_prices").fetchone()[0]
+        n = conn.execute(
+            "SELECT COUNT(*) FROM cache_meta WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD'"
+        ).fetchone()[0]
+        newest_single = conn.execute(
+            "SELECT MAX(data_end) FROM cache_meta WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD'"
+        ).fetchone()[0]
+        p10 = None
+        if n:
+            row = conn.execute(
+                "SELECT data_end FROM cache_meta WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD' "
+                "AND data_end IS NOT NULL ORDER BY data_end ASC LIMIT 1 OFFSET ?",
+                (max(0, int(n * 0.10)),)
+            ).fetchone()
+            p10 = row[0] if row else None
+        if newest_single and n:
+            at_newest = conn.execute(
+                "SELECT COUNT(*) FROM cache_meta WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD' "
+                "AND data_end >= ?", (newest_single,)
+            ).fetchone()[0]
+            freshness["fresh_pct"] = round(at_newest / n * 100, 1)
         conn.close()
-        if latest:
-            freshness["latest_close"] = latest
+        if p10:
+            freshness["latest_close"] = p10           # date >=90% of universe has reached
+            freshness["newest_single"] = newest_single
             today = datetime.now().date()
-            last_dt = datetime.strptime(latest, "%Y-%m-%d").date()
+            last_dt = datetime.strptime(p10, "%Y-%m-%d").date()
             cal_days = (today - last_dt).days
             # Approximate trading-day gap (5/7 of calendar days)
             tdg = max(0, int(cal_days * 5 / 7))
             freshness["trading_days_stale"] = tdg
-            freshness["is_fresh"] = tdg <= 1  # today's or yesterday's close = fresh
+            freshness["is_fresh"] = tdg <= 1  # 90% of universe at yesterday's close = fresh
     except Exception:
         pass
 
@@ -3977,40 +4002,108 @@ async def get_history(ticker: str = None, limit: int = 100):
 
 
 # ── Sector Analysis Endpoint ──
+# Sector intelligence is INFORMATIONAL ONLY — it does not feed entry/exit signals
+# or composite_score (a sector-tilt entry factor needs its own backtest first).
+
+_sector_store = _sector_intel.SectorStore()
+_sector_news: Dict[str, dict] = {}          # etf -> news payload, refreshed by sector_intel_loop
+_sectors_cache: Optional[Dict] = None
+_sectors_cache_time: Optional[datetime] = None
+_news_refresh_inflight = False
+
+
+async def _refresh_sector_news():
+    """Fetch + score Google News RSS for all 11 sectors off the event loop."""
+    global _news_refresh_inflight
+    if _news_refresh_inflight:
+        return
+    _news_refresh_inflight = True
+    try:
+        fresh = await asyncio.to_thread(_sector_intel.refresh_all_sector_news, _sector_store)
+        if fresh:
+            _sector_news.update(fresh)
+            print(f"[SectorIntel] News refreshed for {len(fresh)} sectors")
+    except Exception as e:
+        print(f"[SectorIntel] News refresh error: {e}")
+    finally:
+        _news_refresh_inflight = False
+
+
+async def sector_intel_loop():
+    """Sector news refresh (every 45 min) + Finnhub ticker->sector backfill.
+
+    Backfill scope: open positions + top scan candidates (what Portfolio Impact
+    needs), <=20 tickers per cycle under the shared Finnhub rate limiter.
+    """
+    await asyncio.sleep(60)  # let other loops boot first
+
+    # Serve stale-but-present news immediately after a restart
+    try:
+        stored = await asyncio.to_thread(_sector_store.load_news)
+        for etf, payload in stored.items():
+            _sector_news.setdefault(etf, payload)
+        if stored:
+            print(f"[SectorIntel] Hydrated news for {len(stored)} sectors from SQLite")
+    except Exception as e:
+        print(f"[SectorIntel] News hydrate error: {e}")
+
+    while True:
+        await _refresh_sector_news()
+
+        try:
+            tickers = [p["ticker"] for p in _position_mgr._get_open_positions_sync()]
+            if _scan_cache:
+                tickers += [o.get("ticker") for o in _scan_cache.get("opportunities", [])[:30]
+                            if o.get("ticker")]
+            missing = (await asyncio.to_thread(_sector_store.unmapped, tickers))[:20]
+            filled = 0
+            for t in missing:
+                if not _check_finnhub_rate():
+                    break
+                _record_finnhub_call()
+                res = await asyncio.to_thread(_sector_intel.fetch_finnhub_sector, t)
+                if res:
+                    await asyncio.to_thread(
+                        _sector_store.store_sector, t, res["sector"], res["industry"], "finnhub")
+                    filled += 1
+                await asyncio.sleep(1.5)
+            if filled:
+                print(f"[SectorIntel] Sector backfill: {filled} tickers mapped")
+        except Exception as e:
+            print(f"[SectorIntel] Backfill error: {e}")
+
+        await asyncio.sleep(45 * 60)
+
 
 @router.get("/sectors")
 async def get_sectors():
-    """Sector analysis: performance, MR opportunity, portfolio exposure, correlations."""
-    SECTORS = {
-        "XLK": "Technology", "XLF": "Financials", "XLE": "Energy",
-        "XLV": "Healthcare", "XLI": "Industrials", "XLY": "Consumer Disc",
-        "XLP": "Consumer Staples", "XLB": "Materials", "XLU": "Utilities",
-        "XLRE": "Real Estate", "XLC": "Communication",
-    }
+    """Sector intelligence: RRG rotation, performance, correlations, news, portfolio impact."""
+    global _sectors_cache, _sectors_cache_time
 
-    # Approximate sector mapping for common stocks
-    STOCK_SECTORS = {
-        "FIGS": "Healthcare", "EFXT": "Energy", "MTRN": "Industrials",
-        "WDC": "Technology", "PDS": "Energy", "LRCX": "Technology",
-        "MKSI": "Technology", "LIND": "Industrials", "MAMA": "Communication",
-        "HXL": "Industrials", "DBD": "Technology",
-        "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology", "AVGO": "Technology",
-        "GOOGL": "Communication", "META": "Communication", "NFLX": "Communication",
-        "AMZN": "Consumer Disc", "TSLA": "Consumer Disc",
-        "JPM": "Financials", "BAC": "Financials", "GS": "Financials",
-        "XOM": "Energy", "CVX": "Energy", "OXY": "Energy",
-        "UNH": "Healthcare", "JNJ": "Healthcare", "LLY": "Healthcare",
-        "CAT": "Industrials", "GE": "Industrials", "HON": "Industrials",
-        "PG": "Consumer Staples", "KO": "Consumer Staples", "PEP": "Consumer Staples",
-        "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities",
-        "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
-        "PLD": "Real Estate", "AMT": "Real Estate", "EQIX": "Real Estate",
-    }
+    SECTORS = _sector_intel.SECTORS
+
+    def _with_news(base: Dict) -> Dict:
+        result = dict(base)
+        result["news"] = _sector_news or None
+        result["news_refreshing"] = not _sector_news
+        return result
+
+    if _sectors_cache and _sectors_cache_time and (datetime.now() - _sectors_cache_time).total_seconds() < 300:
+        if not _sector_news:
+            asyncio.create_task(_refresh_sector_news())
+        return _with_news(_sectors_cache)
 
     sectors = []
 
-    # Fetch missing sector ETFs from Yahoo (one-time, then cached in SQLite)
-    missing_etfs = [etf for etf in SECTORS if _cache.get(etf, 365) is None or len(_cache.get(etf, 365) or []) < 50]
+    # Fetch missing OR stale sector ETFs (+ SPY, the RRG benchmark) from Yahoo.
+    # Staleness matters: ETFs aren't in the Tiingo universe refresh, so without
+    # this the whole tab silently drifts weeks behind (last bar > 7 days old).
+    def _short(etf):
+        d = _cache.get(etf, 365)
+        if d is None or len(d) < 50:
+            return True
+        return (datetime.now() - d.index[-1].to_pydatetime()).days > 7
+    missing_etfs = [etf for etf in list(SECTORS) + ["SPY"] if _short(etf)]
     if missing_etfs:
         def _fetch_etfs():
             import requests as _req
@@ -4035,12 +4128,20 @@ async def get_sectors():
             await asyncio.wait_for(asyncio.to_thread(_fetch_etfs), timeout=30)
         except Exception: pass
 
+    spy_df = _cache.get("SPY", 365)
+    spy_closes = spy_df["Close"].dropna() if spy_df is not None else None
+    _NEUTRAL_RRG = {"rs_ratio": 100.0, "rs_momentum": 100.0, "quadrant": "Unknown",
+                    "leadership_score": 0.0, "trail": []}
+    close_map: Dict[str, pd.Series] = {}
+
     for etf, name in SECTORS.items():
         df = _cache.get(etf, 365)
         if df is None or len(df) < 50:
             sectors.append({"etf": etf, "name": name, "price": 0, "ret_5d": 0, "ret_20d": 0, "ret_60d": 0, "ret_ytd": 0,
-                           "mr_wr": 0, "mr_trades": 0, "mr_avg_ret": 0, "trend": "UNKNOWN", "rsi14": 50, "above_sma50": False})
+                           "mr_wr": 0, "mr_trades": 0, "mr_avg_ret": 0, "trend": "UNKNOWN", "rsi14": 50, "above_sma50": False,
+                           **_NEUTRAL_RRG})
             continue
+        close_map[etf] = df["Close"]
 
         closes = df["Close"].dropna().tolist()
         opens = df["Open"].tolist() if "Open" in df.columns else closes
@@ -4097,20 +4198,34 @@ async def get_sectors():
         if live and live.get("price", 0) > 0:
             price = live["price"]
 
+        # RRG coordinates + rotation trail vs SPY
+        rrg = (_sector_intel.compute_rrg(df["Close"].dropna(), spy_closes)
+               if spy_closes is not None else dict(_NEUTRAL_RRG))
+
         sectors.append({
             "etf": etf, "name": name, "price": round(price, 2),
             "ret_5d": round(ret_5d, 2), "ret_20d": round(ret_20d, 2), "ret_60d": round(ret_60d, 2), "ret_ytd": round(ret_ytd, 2),
             "mr_wr": round(mr_wr, 1), "mr_trades": len(trades), "mr_avg_ret": round(mr_avg, 2),
             "rsi14": round(rsi14_vals, 1) if isinstance(rsi14_vals, float) else 50,
             "above_sma50": above_sma50, "trend": trend,
+            **rrg,
         })
 
-    # Portfolio sector exposure
+    # Rank by leadership (RRG), leaders first
+    sectors.sort(key=lambda x: x["leadership_score"], reverse=True)
+    for i, s in enumerate(sectors):
+        s["rank"] = i + 1
+
+    # Sector-pair correlations (60d daily returns)
+    correlation = _sector_intel.compute_correlation_matrix(close_map, window=60)
+
+    # Portfolio sector exposure (ticker->sector via SQLite store, Finnhub-backfilled)
+    quadrant_by_name = {s["name"]: s["quadrant"] for s in sectors}
     positions = _position_mgr._get_open_positions_sync()
     exposure = {}
     for pos in positions:
         ticker = pos["ticker"]
-        sector = STOCK_SECTORS.get(ticker, "Unknown")
+        sector = _sector_store.get_sector(ticker)
         if sector not in exposure:
             exposure[sector] = {"tickers": [], "cost": 0, "value": 0}
         live = _price_cache.get(ticker, {})
@@ -4122,21 +4237,38 @@ async def get_sectors():
     total_value = sum(e["value"] for e in exposure.values())
     portfolio_exposure = [
         {"sector": sec, "tickers": data["tickers"], "cost": round(data["cost"], 2),
-         "value": round(data["value"], 2), "weight": round(data["value"] / total_value * 100, 1) if total_value else 0}
+         "value": round(data["value"], 2), "weight": round(data["value"] / total_value * 100, 1) if total_value else 0,
+         "quadrant": quadrant_by_name.get(sec, "Unknown")}
         for sec, data in sorted(exposure.items(), key=lambda x: -x[1]["value"])
     ]
 
-    # Sort sectors by YTD (leaders first)
-    sectors.sort(key=lambda x: x["ret_ytd"], reverse=True)
+    # Portfolio impact vs sector leadership
+    def _live_px(t: str) -> float:
+        live = _price_cache.get(t) or {}
+        return live.get("price", 0) or 0
+    portfolio_impact = _sector_intel.build_portfolio_impact(
+        positions, _live_px, _sector_store.get_sector, sectors, correlation)
 
-    return {
+    base = {
         "timestamp": datetime.now().isoformat(),
         "sectors": sectors,
         "portfolio_exposure": portfolio_exposure,
         "total_sectors_used": len(exposure),
         "total_sectors": len(SECTORS),
         "market_regime": _check_market_regime(),
+        "rrg": {
+            "benchmark": "SPY", "ratio_window": 63, "momentum_window": 10,
+            "as_of": spy_closes.index[-1].strftime("%Y-%m-%d") if spy_closes is not None and len(spy_closes) else None,
+        },
+        "correlation": correlation,
+        "portfolio_impact": portfolio_impact,
     }
+    _sectors_cache = base
+    _sectors_cache_time = datetime.now()
+
+    if not _sector_news:
+        asyncio.create_task(_refresh_sector_news())
+    return _with_news(base)
 
 
 # ── Momentum Scanner Endpoints ──
@@ -4431,8 +4563,13 @@ async def get_data_status():
         "today": today_str,
         "market_session": session,
         "cache": {
-            "stale_count": stale_count,
+            "stale_count": stale_count,          # stale HOLDINGS + SPY/QQQ/VIX (kept for compat)
             "total_checked": len(cache_status),
+            # Universe-wide staleness — the honest "is the scanner degraded" signal.
+            # stale_count above only covers the 7 holdings, so it read "7 stale"
+            # while 2,431 of the scan universe were frozen (2026-07 Tiingo outage).
+            "universe_stale": len(_cache.get_stale_tickers()),
+            "universe_total": len(_cache.get_cached_tickers()),
             "tickers": cache_status,
         },
         "quotes": {
@@ -4632,17 +4769,23 @@ async def populate_cache(days: int = 10, ticker: Optional[str] = None):
 
         # Fetch with specified lookback
         import time as _time
-        sem = asyncio.Semaphore(20)
+        sem = asyncio.Semaphore(10)  # Yahoo-friendly concurrency
         refreshed = 0
         failed = 0
         t0 = _time.time()
 
         async with aiohttp.ClientSession() as session:
+            # Yahoo-primary (2026-07-22): mirror _cache.refresh so this on-demand
+            # endpoint can't re-trip Tiingo's daily cap. rng scales with `days`.
+            _rng = '3mo' if days <= 30 else ('1y' if days <= 400 else '5y')
             async def fetch_one(ticker):
                 nonlocal refreshed, failed
                 async with sem:
-                    result = await _cache._fetch_tiingo(session, ticker, days=days, min_rows=1 if days <= 30 else 50)
+                    result = await _cache._fetch_yahoo(session, ticker, rng=_rng)
+                    if not isinstance(result, pd.DataFrame):
+                        result = await _cache._fetch_tiingo(session, ticker, days=days, min_rows=1 if days <= 30 else 50)
                     if isinstance(result, pd.DataFrame):
+                        _cache._rebase_if_adjusted(ticker, result)
                         _cache.store(ticker, result)
                         refreshed += 1
                     else:
@@ -4843,7 +4986,14 @@ async def get_combined_opportunities():
         both = sum(1 for s in valid if s.get("strategy") == "BOTH")
         passed = sum(1 for s in valid if s.get("meets_strict"))
         upgrades = sum(1 for s in valid if s.get("is_upgrade"))
-        data_date = cached[0].get("data_date", "") if cached else ""
+        # data_date = honest freshness of the SCANNED data. Was cached[0]'s
+        # data_date, which is frequently None or an arbitrary stale ticker →
+        # the phantom "2026-01-30" the KPI bar showed. Use the newest bar date
+        # actually present across the scan results instead (what the scan saw).
+        # NOT _cache._newest_bar_date(), which is calendar-anchored by the
+        # deadlock guard and would read fresh while the universe is still frozen.
+        _dds = [str(r.get("data_date")) for r in cached if r.get("data_date")] if cached else []
+        data_date = max(_dds) if _dds else ""
         stale_left = len(_cache.get_stale_tickers())
 
         # Quality tier counts (for header chips) — V3.3 SSOT
@@ -6948,7 +7098,29 @@ async def cache_refresh_loop():
         _now = _now_et()
         _hour = _now.hour
         _wday = _now.weekday()  # 0=Mon, 6=Sun
-        if _wday >= 5:
+
+        # Stale-backlog override (2026-07-11): if a large fraction of the universe
+        # is still behind the newest bar, DO NOT take a long overnight/weekend
+        # sleep — Friday's closes already exist at Tiingo and Monday's scan must
+        # not run on 2-week-old bars (the July freeze: 2,436 tickers frozen at
+        # 06-26 while the loop slept 44h until Monday). Grind on a 30-min cadence;
+        # the refresh()'s own 45-min 429 cooldown paces the actual fetching so
+        # this never abuses the hourly quota. Delisted tickers are already
+        # excluded from get_stale_tickers, so this only fires on a REAL backlog.
+        try:
+            _backlog = len(_cache.get_stale_tickers())
+            _universe = _cache.conn.execute(
+                "SELECT COUNT(*) FROM cache_meta WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD'"
+            ).fetchone()[0] or 1
+            _backlog_pct = _backlog / _universe * 100
+        except Exception:
+            _backlog, _backlog_pct = 0, 0.0
+
+        if _backlog_pct > 5:
+            _sleep = 1800  # 30 min — keep catching up until the backlog clears
+            print(f"[CacheRefresh] Stale backlog {_backlog} ({_backlog_pct:.0f}%) — "
+                  f"short 30min cadence to catch up (429 cooldown paces fetching)")
+        elif _wday >= 5:
             # Weekend — sleep until Monday 9 ET
             _days_to_mon = (7 - _wday) % 7 or 1
             _sleep = max(3600, _days_to_mon * 24 * 3600 - _hour * 3600)
