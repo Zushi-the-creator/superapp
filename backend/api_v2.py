@@ -855,7 +855,8 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
     if profit > 5%. Max 21 trading days.
     Backtested: 62.9% WR, +2.63% avg, PF 1.80, +0.164/day.
 
-    MOM positions: Fixed60d exit (momentum needs time to play out).
+    MOM positions: Fixed90d exit (momentum needs time to play out).
+    MR/BOTH positions: Fixed42d exit (V3.6, 2026-07-22).
     """
     strategy = cached["strategy"]
     triggered = False
@@ -1520,7 +1521,7 @@ async def get_portfolio():
                 closes_live = df["Close"].dropna().tolist()
                 rsi_live = tech.get("rsi2", -1)
                 pos_strategy_eval = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
-                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Fixed60d"
+                expected_exit_strat = "Fixed90d" if pos_strategy_eval == "MOMENTUM" else "Fixed42d"
                 # Use exit strategy cache if it matches the position's strategy;
                 # otherwise build a fresh exit_cached with the right strategy
                 # name so _evaluate_exit_trigger picks the correct hold target.
@@ -1530,7 +1531,7 @@ async def get_portfolio():
                         "strategy": expected_exit_strat,
                         "wr": tech.get("exit_strategy_wr", 0),
                         "avg_ret": tech.get("exit_strategy_ret", 0),
-                        "avg_hold": tech.get("exit_strategy_hold", 60 if expected_exit_strat == "Fixed60d" else 90),
+                        "avg_hold": tech.get("exit_strategy_hold", 42 if expected_exit_strat == "Fixed42d" else 90),
                     }
                 live_exit = _evaluate_exit_trigger(
                     exit_cached,
@@ -1756,16 +1757,17 @@ async def get_portfolio():
             except Exception:
                 pass
 
-        # Exit strategy V3.4 (2026-06-17): MR/BOTH=Fixed60d, MOM=Fixed90d.
-        # Switched MR from Fixed30d after honest 13-window walk-forward portfolio sim
-        # showed Fixed60d at N=4 delivers +17pp OOS-2024 CAGR with 3x lower drawdown.
+        # Exit strategy V3.6 (2026-07-22): MR/BOTH=Fixed42d, MOM=Fixed90d.
+        # Switched MR from Fixed60d after a 17-window rolling walk-forward on clean
+        # Tiingo data: Fixed42 won 8/17 windows, +30.8% compounded vs Fixed60 -26.1%,
+        # smaller worst-window — 60d holds trap portfolio slots for the drift tail.
         pos_strategy = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
         if pos_strategy == "MOMENTUM":
             exit_strat_name = "Fixed90d"
             exit_target_days = 90
         else:
-            exit_strat_name = "Fixed60d"
-            exit_target_days = 60
+            exit_strat_name = "Fixed42d"
+            exit_target_days = 42
 
         # Exit targets based on regime
         regime = tech.get("regime", "BULL") if tech else "BULL"
@@ -2094,8 +2096,8 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
         "zone_trades": len(zt), "rsi_zone": f"{zone_lo}-{zone_hi}",
         "exit_zone_return": round(exit_zone_ret, 2),
         "exit_zone_wr": round(exit_zone_wr, 1), "exit_zone_trades": len(exit_zt),
-        "exit_strategy": "Fixed60d", "exit_strategy_wr": round(wr, 1),
-        "exit_strategy_ret": round(avg_ret, 2), "exit_strategy_hold": 60.0,
+        "exit_strategy": "Fixed42d", "exit_strategy_wr": round(wr, 1),
+        "exit_strategy_ret": round(avg_ret, 2), "exit_strategy_hold": 42.0,
         "exit_triggered": False, "exit_price": 0, "exit_price_pct": 0,
         "exit_label": f"Hold 60d | +{avg_ret:.1f}% WR {wr:.0f}%",
         "signal": signal, "issues": issues,
@@ -5943,7 +5945,7 @@ async def analyze_stock(ticker: str):
                 best_exit = _select_best_exit(ticker, closes_list, None, rsi2, opens=opens_list)
                 if best_exit:
                     proposed_strategy = {
-                        "exit_strategy": best_exit.get("strategy", "Fixed60d"),
+                        "exit_strategy": best_exit.get("strategy", "Fixed42d"),
                         "exit_strategy_wr": round(best_exit.get("wr", 0), 1),
                         "exit_strategy_ret": round(best_exit.get("avg_ret", 0), 2),
                         "exit_strategy_hold": best_exit.get("avg_hold", 60),
