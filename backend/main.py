@@ -15,8 +15,8 @@ from datetime import datetime
 
 # Bump on every deploy that changes runtime behaviour so a deploy can be
 # verified from the PUBLIC health endpoint (GET /) without needing fly logs.
-# 2026-07-22: Tiingo plan reactivated — data source stays Tiingo-only.
-BUILD_TAG = "2026-07-22-tiingo-reactivated"
+# 2026-07-22: Tiingo reactivated (Tiingo-only) + V3.6 MR exit Fixed60d->Fixed42d.
+BUILD_TAG = "2026-07-22-fixed42-v3.6"
 
 from api_v2 import (
     router as v2_router,
