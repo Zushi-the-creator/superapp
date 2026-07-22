@@ -4769,23 +4769,17 @@ async def populate_cache(days: int = 10, ticker: Optional[str] = None):
 
         # Fetch with specified lookback
         import time as _time
-        sem = asyncio.Semaphore(10)  # Yahoo-friendly concurrency
+        sem = asyncio.Semaphore(20)
         refreshed = 0
         failed = 0
         t0 = _time.time()
 
         async with aiohttp.ClientSession() as session:
-            # Yahoo-primary (2026-07-22): mirror _cache.refresh so this on-demand
-            # endpoint can't re-trip Tiingo's daily cap. rng scales with `days`.
-            _rng = '3mo' if days <= 30 else ('1y' if days <= 400 else '5y')
             async def fetch_one(ticker):
                 nonlocal refreshed, failed
                 async with sem:
-                    result = await _cache._fetch_yahoo(session, ticker, rng=_rng)
-                    if not isinstance(result, pd.DataFrame):
-                        result = await _cache._fetch_tiingo(session, ticker, days=days, min_rows=1 if days <= 30 else 50)
+                    result = await _cache._fetch_tiingo(session, ticker, days=days, min_rows=1 if days <= 30 else 50)
                     if isinstance(result, pd.DataFrame):
-                        _cache._rebase_if_adjusted(ticker, result)
                         _cache.store(ticker, result)
                         refreshed += 1
                     else:

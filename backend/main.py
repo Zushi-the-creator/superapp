@@ -15,8 +15,8 @@ from datetime import datetime
 
 # Bump on every deploy that changes runtime behaviour so a deploy can be
 # verified from the PUBLIC health endpoint (GET /) without needing fly logs.
-# 2026-07-22: Yahoo-primary refresh (breaks the Tiingo daily-cap freeze).
-BUILD_TAG = "2026-07-22-yahoo-refresh"
+# 2026-07-22: Tiingo plan reactivated — data source stays Tiingo-only.
+BUILD_TAG = "2026-07-22-tiingo-reactivated"
 
 from api_v2 import (
     router as v2_router,
@@ -68,8 +68,7 @@ async def _safe_task(name: str, coro):
 @app.on_event("startup")
 async def startup_event():
     """Start all background loops on startup."""
-    print("Starting NASDAQ Super App backend "
-          f"[build {BUILD_TAG}, refresh source: Yahoo-primary/Tiingo-fallback]...")
+    print(f"Starting NASDAQ Super App backend [build {BUILD_TAG}, refresh source: Tiingo]...")
 
     # V2 background monitor (health check every 15 min)
     asyncio.create_task(_safe_task("background_monitor", background_monitor))
@@ -110,7 +109,7 @@ async def root():
         "app": "NASDAQ Super App",
         "version": "2.6.0",
         "build": BUILD_TAG,
-        "refresh_source": "yahoo-primary",
+        "refresh_source": "tiingo",
         "timestamp": datetime.now().isoformat()
     }
 
