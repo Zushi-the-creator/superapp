@@ -3,7 +3,7 @@
 ## Core Rules
 - **PRIMARY GOAL**: MAXIMIZE ROI (3% monthly is MINIMUM, not target)
 - **RULE**: When saying SELL, ALWAYS say what to BUY
-- **MODEL**: Production runs **ATLAS V2.7 (MR entries) + V3.0 (cache-accelerated evaluator) + V3.3 (regime-adaptive entry sizing, 2026-06-12) + V3.4 (Buffered WR scoring, 2026-06-16) + V3.4 (Fixed60d MR exit, 2026-06-17 — replaces V3.2 Fixed30d after honest 13-window walk-forward validation) + V3.5 (Entries tab sorts by composite_score, not Buffered WR, 2026-06-18 — head-to-head walk-forward: composite top-3 fwd +4.43% vs BWR +2.79%)**. There is no single "version" — the deployed code is a hybrid. See "Active Strategy" section below for the actual rules.
+- **MODEL**: Production runs **ATLAS V2.7 (MR entries) + V3.0 (cache-accelerated evaluator) + V3.3 (regime-adaptive entry sizing, 2026-06-12) + V3.4 (Buffered WR scoring, 2026-06-16) + V3.5 (Entries tab sorts by composite_score, not Buffered WR, 2026-06-18) + V3.6 (Fixed42d MR/BOTH exit, 2026-07-22 — replaces V3.4 Fixed60d after a 17-window rolling walk-forward on clean Tiingo data: Fixed42 won 8/17 windows, +30.8% compounded vs Fixed60 -26.1%, smaller worst-window; DEPLOYED + verified live)**. There is no single "version" — the deployed code is a hybrid. See "Active Strategy" section below for the actual rules.
 - **VALIDATION**: NEVER recommend without backtest validation (WR > 55%, 10+ trades)
 - **LIVE DATA**: NEVER suggest buy without verifying live prices first (MANDATORY)
 - **SENTIMENT**: ALWAYS check news sentiment before any buy recommendation (informational; not a hard veto for MR — see VETO chain below)
@@ -162,7 +162,7 @@ REQUIRED:  Price > SMA(50)
 ### Exit Strategy (live V3.4, per-strategy)
 | Strategy | Exit | File:line |
 |----------|------|-----------|
-| Mean Reversion / BOTH | **Fixed60d** — exit on trading day 60 (was Fixed30d, switched 2026-06-17 after 13-window honest walk-forward on clean 2,573-ticker universe: Fixed60d N=4 OOS-2024 +23.2% CAGR / 2.09% monthly / MDD -11.6% / Sharpe 0.78 vs Fixed30d N=4 +6.3% / 1.04% / -35% / 0.59. Cross-period worst-month +0.94% vs -0.18%. Honest regime-dynamic exits also lost to Fixed60d once portfolio capacity constraints applied.) | `api_v2.py:_select_best_exit` |
+| Mean Reversion / BOTH | **Fixed42d** (V3.6, DEPLOYED + verified live 2026-07-22) — exit on trading day 42. Replaced Fixed60d after a 17-window rolling walk-forward on clean Tiingo data: Fixed42 won 8/17 windows, +30.8% compounded vs Fixed60 -26.1%, smaller worst-window (-31% vs -44%). 60d holds trap portfolio slots for the slow drift tail. Wired in `_select_best_exit` (label+42d), `_EXIT_STRATEGIES["Fixed42d"]`, the portfolio-endpoint `exit_strat_name`/live `expected_exit_strat`, `/analyze` `_HOLD=42`, `backtest_precompute.MR_HOLD_DAYS=42`, and frontend PositionsTable countdowns. | `api_v2.py:_select_best_exit` |
 | Momentum | **Fixed90d** | `api_v2.py:_EXIT_STRATEGIES` |
 | Stop loss | None — research confirms stops HURT mean reversion | — |
 | Profit target | None — let fixed timer fire | — |
@@ -237,10 +237,24 @@ Every early-exit / rotation idea was backtested against HOLD-to-Fixed60d-timer o
 | Exit when current-zone expectation negative | HOLD wins by ~2.7pp at day 5/14/21 checkpoints (the "ARCB case") |
 **Zone-expectation calibration (`_zonecalib_bt.py`, 5,481 samples): per-stock zone returns have IC ≈ 0.00 — pure noise.** Realized ≈ base rate (~+2-4%/60d) regardless of predicted. Raw zone numbers (e.g. "+37.5% expected") must not drive decisions or sizing; shrunk is only marginally better calibrated. **Valid exits remain ONLY: Fixed60d/90d timer, earnings <7d.**
 
+### Exit-family study 2026-07-19 (`_exit_family_bt.py` + `_entry_variant_bt.py`, 7,322 PROD-gated MR signals 2017-2026, next-day-open, 0.6% RT fee, IS<2023/OOS 2023+)
+- **WR vs hold-length is a structural trade, not a tuning problem.** Fixed60d WR is ~52-55% in EVERY entry variant tested (RSI2<5, RSI2<2, 2-3 consecutive down closes, cumRSI<20, 5d drop<-8%, buf≥10, ATR 5-12) — deeper oversold does NOT raise 60d WR. Short Connors-style exits (RSI2>75, cap 21d) give 64-70% WR / median +2% / ~6d holds, best in DIP regimes OOS (70.2% WR, +1.30%/trade, 0.23%/day — the best per-day cell in the whole grid), but per-trade profit is ~1/4 of Fixed60d's (+3.9% OOS).
+- **Short exits do NOT compound at portfolio level**: in every N=5 sim (always-on idle=cash AND QQQ-core dip-only), rsi65/rsi75/sma5-cross/first-up-close underperform fixed timers badly (cut winners at +2%, losers still ride to cap; fee churn). Matches tracked `exit_strategy_study.py` (RSIexit_70/SMAcross_5 fell off leaderboard) and the deleted exit_study_v2 Connors tests. Literature agrees the bounce is 1-10d but its "recycle capital" case fails our capacity/fee reality.
+- **Fixed42 beat Fixed60 in ALL FOUR portfolio-sim configurations** (always-on 2017: 4.0 vs 0.5% CAGR; always-on 2023+: ~9-20 vs 3.5-5.3%; QQQ-core dip-only 2017: 21.4 vs 8.2%; 2023+: ~18-20 vs 12-14%) despite lower per-trade avg — 60d holds trap slots. Offset spread is wide (path luck); needs the 13-window walk-forward harness before replacing Fixed60d. **Candidate V3.6: Fixed42d MR exit — VALIDATE FIRST.**
+- **Regime dominates exit choice**: DIP-regime entries beat HEALTHY entries in every policy (OOS fixed60: +2.89 vs +4.48 avg is era-mixed, but WR/short-exit cells: DIP 70% vs HEALTHY 64%); the QQQ-core dip-only frame (DipRunner, 2026-07-11 audit) remains the architecture.
+- Loser-only cuts (day-10/21 if <-5%) and partial scale-outs: no robust improvement (cut10w60 won one sim config, lost the OOS-era config — era-unstable, rejected). Confirms Alvarez: N-day loser stops are psychology, not edge.
+
+### Alternative-strategy survey 2026-07-19 (`_alt_strategy_bt.py`, `_mom_rotation_bt.py` + web research)
+Tested on our own cache (honest conventions) + literature review. **Do NOT build:** PEAD (dead academically — Martineau 2021; our data: +0.9%/42d, 51% WR OOS), sector rotation (15-16% CAGR < QQQ; alpha decayed ~2010), GEM/dual momentum (~6% CAGR OOS 2014+), VIX-switching (refuted OOS; sells bottoms), turn-of-month as overlay (5.5% CAGR; only valid use = timing NEW-cash deployment, zero tax cost), IPO breakouts (negative base rates, WR 20-35%). **QQQ Faber SMA200 monthly**: 19.1% vs 21.8% B&H, MDD -28.6 vs -35.1, 10 switches/decade — insurance, not alpha; SMA gates on stock momentum HURT in our tests (whipsaw, exits after crash + misses recovery — consistent with DANGER-flip finding).
+**Candidates that survived:**
+1. **Large-cap 12-1 momentum rotation** (top-200 dollar-vol, px≥20, 12-1 mom capped ≤200%, top-10 equal-weight, monthly, NO SMA gate): our data 2017+ **32.5% CAGR / MDD -40.9% / monthly WR 63.5%**; 2023+ 58.7%/65.1%. SURVIVORSHIP-INFLATED upper bound (live SPMO analog = 18.6%/yr; QMOM small-cap analog = 12.7% — large-cap is the sleeve that works). Param-sensitive (dv100/cap100 variant → only 15.4%). Needs walk-forward + quarantine-aware validation before any live sizing. This is the honest replacement direction for the broken tab momentum sleeve (which ranks by ret20×vr spike-chasing).
+2. **52wk-high Minervini breakout @ Fixed90d** (within 5% of 252d high, de-dup): 56.4% WR / +4.62% OOS per trade, 59.5% WR 2025+ — the momentum gate itself is fine at the right horizon; the tab's ranking within it is what rotted.
+3. **Leveraged-index trend satellite (QLD/TQQQ > 200SMA, Gayed)** — only published family beating QQQ's CAGR (26%+ backtested), at realized -57 to -72% MDD (2022, filtered). User-decision-only, ≤10-20% satellite, never the book.
+
 ### Lower-priority (cosmetic / non-blocking)
 - 27 of 31 endpoints have no FastAPI `response_model=` (no output validation on `/scan/combined`, `/analyze`, etc. — guardrail gap, not a live bug).
 - `AllocationChart.tsx` appears unused (dead bundle weight or a missing Portfolio-tab feature).
-- `SectorsTab` has no error/retry state (a failed first load shows "No sector data" until remount).
+- ~~`SectorsTab` has no error/retry state~~ — FIXED 2026-07-11 in the Sectors-tab upgrade (error card + retry, stale-data banner). The tab now shows RRG rotation quadrants vs SPY (INFORMATIONAL ONLY — sector strength does NOT feed entry scoring; a sector-tilt factor needs its own backtest first), 11×11 sector correlations, per-sector news sentiment (`sector_intel_loop`, 45-min refresh, Google News RSS), and portfolio tilt vs leadership (quadrant weights, HHI, flags). Logic in `backend/sector_intel.py`; ticker→sector via `ticker_sectors` SQLite table (static seed + Finnhub profile2 backfill). Skill: `/sectors`.
 - `OpportunitiesTab` force-refresh can stack 5s pollers if clicked repeatedly (use a ref).
 
 ---
