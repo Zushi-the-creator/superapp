@@ -28,7 +28,7 @@ _UNIVERSE_WR = 53.5
 _PRIOR_WEIGHT = 10
 
 # Hold periods
-MR_HOLD_DAYS = 60
+MR_HOLD_DAYS = 42   # V3.6 2026-07-22: Fixed42d beat Fixed60d in 17-window walk-forward
 MOM_HOLD_DAYS = 90
 
 # Fee per trade (round-trip)
@@ -36,7 +36,10 @@ FEE_PCT = 0.30
 
 
 def _ensure_table(conn):
-    """Create backtest_cache table if it doesn't exist."""
+    """Create backtest_cache table if it doesn't exist.
+    V3.4 (2026-06-16): added mr_std + mom_std for Buffered-WR scoring.
+    Backtest of 527 V3.3 signals × 9yr showed BufferedWR delivers +11.50% CAGR
+    vs EV-classic's +5.50% (OOS test 2022-25: +4.80% vs -6.50%)."""
     conn.execute('''
         CREATE TABLE IF NOT EXISTS backtest_cache (
             ticker TEXT PRIMARY KEY,
@@ -48,9 +51,20 @@ def _ensure_table(conn):
             mom_avg_return REAL,
             mom_trades INTEGER,
             mom_score REAL,
-            last_computed TEXT
+            last_computed TEXT,
+            mr_std REAL DEFAULT 0,
+            mom_std REAL DEFAULT 0
         )
     ''')
+    # Add std columns if they don't exist (migration for existing DBs)
+    try:
+        conn.execute("ALTER TABLE backtest_cache ADD COLUMN mr_std REAL DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE backtest_cache ADD COLUMN mom_std REAL DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
 
 
@@ -92,15 +106,17 @@ def _sma_arr(closes, period, n):
 
 def _backtest_mr(closes, opens, highs, lows, n):
     """Mean reversion backtest: RSI(2)<10, price>SMA50, ATR>=3%, price>=$10,
-    MR_HOLD_DAYS hold. Returns (trades, wins, total_return)."""
+    MR_HOLD_DAYS hold. Returns (trades, wins, total_return, std_return).
+    V3.4 (2026-06-16): added std_return for Buffered-WR scoring."""
     if n < 100:  # Need enough bars
-        return 0, 0, 0.0
+        return 0, 0, 0.0, 0.0
 
     rsi2 = _rsi2_arr(closes, n)
     sma50 = _sma_arr(closes, 50, n)
     trades = 0
     wins = 0
     total_ret = 0.0
+    trade_returns = []  # NEW V3.4: collect for std calculation
     last_exit = -1
 
     for i in range(50, n - MR_HOLD_DAYS - 2):
@@ -144,18 +160,27 @@ def _backtest_mr(closes, opens, highs, lows, n):
 
         trades += 1
         total_ret += ret
+        trade_returns.append(ret)
         if ret > 0:
             wins += 1
         last_exit = exit_idx
 
-    return trades, wins, total_ret
+    # V3.4: compute std for Buffered-WR scoring
+    if len(trade_returns) > 1:
+        mean = total_ret / trades
+        var = sum((r - mean) ** 2 for r in trade_returns) / (trades - 1)
+        std_ret = var ** 0.5
+    else:
+        std_ret = 0.0
+    return trades, wins, total_ret, std_ret
 
 
 def _backtest_momentum(closes, opens, highs, lows, n):
     """Momentum backtest: Minervini 6/6, ret_20d>5%, 60d hold.
-    Returns (trades, wins, total_return)."""
+    Returns (trades, wins, total_return, std_return).
+    V3.4 (2026-06-16): added std_return for Buffered-WR scoring."""
     if n < 320:  # Need 252 lookback + 60 forward + buffer
-        return 0, 0, 0.0
+        return 0, 0, 0.0, 0.0
 
     sma50 = _sma_arr(closes, 50, n)
     sma150 = _sma_arr(closes, 150, n)
@@ -164,6 +189,7 @@ def _backtest_momentum(closes, opens, highs, lows, n):
     trades = 0
     wins = 0
     total_ret = 0.0
+    trade_returns = []  # V3.4: collect for std
     last_exit = -1
 
     for i in range(252, n - MOM_HOLD_DAYS - 2):
@@ -205,11 +231,19 @@ def _backtest_momentum(closes, opens, highs, lows, n):
 
         trades += 1
         total_ret += ret
+        trade_returns.append(ret)
         if ret > 0:
             wins += 1
         last_exit = exit_idx
 
-    return trades, wins, total_ret
+    # V3.4: compute std for Buffered-WR scoring
+    if len(trade_returns) > 1:
+        mean = total_ret / trades
+        var = sum((r - mean) ** 2 for r in trade_returns) / (trades - 1)
+        std_ret = var ** 0.5
+    else:
+        std_ret = 0.0
+    return trades, wins, total_ret, std_ret
 
 
 def precompute_all(db_path=DB_PATH, force=False):
@@ -282,26 +316,31 @@ def precompute_all(db_path=DB_PATH, force=False):
         closes = [r[4] for r in rows]
         n = len(closes)
 
-        # Mean Reversion backtest
-        mr_trades, mr_wins, mr_total_ret = _backtest_mr(closes, opens, highs, lows, n)
+        # Mean Reversion backtest (V3.4: returns std too)
+        mr_trades, mr_wins, mr_total_ret, mr_std = _backtest_mr(closes, opens, highs, lows, n)
         if mr_trades >= 1:
             mr_wr = _bayesian_wr(mr_wins, mr_trades)
             mr_avg = mr_total_ret / mr_trades
-            mr_score = mr_wr * mr_avg / 100
+            # V3.4 Buffered-WR scoring: bayesian_wr - std/sqrt(n)
+            # Validated on 9-yr backtest: +11.50% CAGR vs EV-classic +5.50%
+            # OOS 2022-25: +4.80% vs -6.50% (EV loses money OOS)
+            mr_score = mr_wr - (mr_std / (mr_trades ** 0.5)) if mr_trades > 0 else 0.0
         else:
             mr_wr = 0.0
             mr_avg = 0.0
+            mr_std = 0.0
             mr_score = 0.0
 
-        # Momentum backtest
-        mom_trades, mom_wins, mom_total_ret = _backtest_momentum(closes, opens, highs, lows, n)
+        # Momentum backtest (V3.4: returns std too)
+        mom_trades, mom_wins, mom_total_ret, mom_std = _backtest_momentum(closes, opens, highs, lows, n)
         if mom_trades >= 1:
             mom_wr = _bayesian_wr(mom_wins, mom_trades)
             mom_avg = mom_total_ret / mom_trades
-            mom_score = mom_wr * mom_avg / 100
+            mom_score = mom_wr - (mom_std / (mom_trades ** 0.5)) if mom_trades > 0 else 0.0
         else:
             mom_wr = 0.0
             mom_avg = 0.0
+            mom_std = 0.0
             mom_score = 0.0
 
         if mr_score > 0:
@@ -313,7 +352,8 @@ def precompute_all(db_path=DB_PATH, force=False):
             ticker,
             round(mr_wr, 2), round(mr_avg, 2), mr_trades, round(mr_score, 2),
             round(mom_wr, 2), round(mom_avg, 2), mom_trades, round(mom_score, 2),
-            today
+            today,
+            round(mr_std, 2), round(mom_std, 2),
         ))
 
         processed += 1
@@ -323,8 +363,9 @@ def precompute_all(db_path=DB_PATH, force=False):
             conn.executemany(
                 "INSERT OR REPLACE INTO backtest_cache "
                 "(ticker, mr_wr, mr_avg_return, mr_trades, mr_score, "
-                " mom_wr, mom_avg_return, mom_trades, mom_score, last_computed) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " mom_wr, mom_avg_return, mom_trades, mom_score, last_computed, "
+                " mr_std, mom_std) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 results[-100:]
             )
             conn.commit()
@@ -342,8 +383,9 @@ def precompute_all(db_path=DB_PATH, force=False):
         conn.executemany(
             "INSERT OR REPLACE INTO backtest_cache "
             "(ticker, mr_wr, mr_avg_return, mr_trades, mr_score, "
-            " mom_wr, mom_avg_return, mom_trades, mom_score, last_computed) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " mom_wr, mom_avg_return, mom_trades, mom_score, last_computed, "
+            " mr_std, mom_std) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             results[-remainder:]
         )
         conn.commit()

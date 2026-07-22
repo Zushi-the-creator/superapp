@@ -646,8 +646,11 @@ def _apply_live_overlay(item: dict) -> dict:
 #   - Stop losses HURT mean reversion (Connors: "stops hurt performance on hundreds of thousands of trades")
 #   - SMA/RSI exits too fast for volatile stocks (+0.38% avg vs Fixed60d +3.48%)
 #   - ONLY Fixed time exits work for mean reversion
-# V2.7: MR=Fixed60d, MOM=Fixed90d (validated on 48,849 trades + 2026 real-world)
-#   - Fixed60d: +3.48% avg, 54.8% WR, PF 1.51 — best per-trade hold
+# V3.6 (2026-07-22): MR/BOTH=Fixed42d, MOM=Fixed90d. Fixed42d replaced Fixed60d
+# after a 17-window rolling walk-forward on clean Tiingo data: Fixed42 won 8/17
+# windows, +30.8% compounded vs Fixed60 -26.1%, smaller worst-window (-31% vs -44%).
+# 60d holds trap portfolio slots for the slow tail of the drift.
+#   - (prior) Fixed60d: +3.48% avg, 54.8% WR, PF 1.51 — higher per-trade but worse at portfolio level
 #   - Per-stock WF unreliable on low-trade stocks (e.g., LIND got Trail5 = 3.7%)
 
 _exit_strategy_cache: Dict[str, Dict] = {}  # ticker -> {strategy, wr, avg_ret, ...}
@@ -655,7 +658,8 @@ _EXIT_CACHE_TTL = 21600  # 6 hours
 
 _EXIT_STRATEGIES = {
     "Fixed30d": {"type": "fixed", "days": 30},  # legacy V3.2 — kept for back-compat
-    "Fixed60d": {"type": "fixed", "days": 60},  # MR / BOTH — V3.4 2026-06-17
+    "Fixed42d": {"type": "fixed", "days": 42},  # MR / BOTH — V3.6 2026-07-22
+    "Fixed60d": {"type": "fixed", "days": 60},  # legacy V3.4 — kept for back-compat
     "Fixed90d": {"type": "fixed", "days": 90},  # MOM
 }
 
@@ -749,7 +753,7 @@ def _backtest_one_strategy(name: str, strat: dict, closes: list, rsi2_arr, sma50
 
 
 def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, current_rsi: float = 0, entry_price: float = 0, entry_date: str = "", opens: list = None, strategy: str = "MEAN_REVERSION") -> Dict:
-    """Fixed60d exit for MR stocks, Fixed90d for MOMENTUM (V3.4 — 2026-06-17).
+    """Fixed42d exit for MR/BOTH stocks, Fixed90d for MOMENTUM (V3.6 — 2026-07-22).
     strategy-aware as of 2026-06-19 (was hardcoded Fixed60d for all — MOM positions
     at the held-position endpoint were wrongly evaluated on a 60d timer).
 
@@ -784,7 +788,7 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
 
     # Backtest the strategy's fixed hold on this stock's historical data
     _FEE_PCT = 0.30
-    hold_days = 90 if strategy == "MOMENTUM" else 60
+    hold_days = 90 if strategy == "MOMENTUM" else 42  # V3.6: MR/BOTH Fixed42d (2026-07-22)
 
     rsi2_arr = [50.0] * len(closes)
     for i in range(2, len(closes)):
@@ -828,13 +832,13 @@ def _select_best_exit(ticker: str, closes: list, _unused_trades: list = None, cu
         avg_ret = round(sum(full_trades) / n, 2)
     ci_lo, ci_hi = _wilson_ci(sum(1 for r in full_trades if r > 0), n) if n > 0 else (0, 0)
 
-    _strat_label = "Fixed90d" if strategy == "MOMENTUM" else "Fixed60d"
+    _strat_label = "Fixed90d" if strategy == "MOMENTUM" else "Fixed42d"
     result = {
         "strategy": _strat_label, "wr": wr,
         "avg_ret": avg_ret, "avg_hold": hold_days,
         "oos_wr": wr, "is_wr": wr,
-        "overfitting_ratio": 1.0, "validation_note": f"{_strat_label}_V3.4",
-        "overfit": 1.0, "validation": f"{_strat_label}_V3.4",
+        "overfitting_ratio": 1.0, "validation_note": f"{_strat_label}_V3.6",
+        "overfit": 1.0, "validation": f"{_strat_label}_V3.6",
         "ci_lo": ci_lo, "ci_hi": ci_hi,
         "oos_ci_lo": ci_lo, "oos_ci_hi": ci_hi,
         "_cached_at": datetime.now().timestamp(),
@@ -921,8 +925,8 @@ def _evaluate_exit_trigger(cached: Dict, closes: list, current_rsi: float, curre
     # GATED TO MOMENTUM (2026-06-19): a 32,607-trade backtest showed applying this
     # to MR/Fixed60d HURTS — it cuts the median affected MR trade by -3.0% (5,649
     # worse vs 3,147 better) and turns the OOS median negative (-0.22% vs +0.20%
-    # pure Fixed60d), with only a tail-driven mean bump. Confirms "stops hurt mean
-    # reversion." MR/BOTH now let the Fixed60d timer fire, as the strategy requires.
+    # pure fixed-timer), with only a tail-driven mean bump. Confirms "stops hurt mean
+    # reversion." MR/BOTH now let the Fixed42d timer (V3.6) fire, as the strategy requires.
     MOMENTUM_PNL_THRESHOLD = 5.0
     TRAILING_STOP_PCT = 8.0
 
@@ -1112,11 +1116,11 @@ def _get_technicals(ticker: str, entry_price: float = 0, entry_date: str = "") -
     regime_info = RegimeDetector.detect(closes, highs, lows, volumes)
     regime = regime_info.regime.value if hasattr(regime_info, "regime") else str(regime_info)
 
-    # Backtest (60-trading-day hold — matches live Fixed60d exit; RSI<10 entry,
+    # Backtest (42-trading-day hold — matches live Fixed42d exit; RSI<10 entry,
     # next-day open, fee-adjusted, non-overlapping trades).
     # Uses pre-computed arrays: O(n) instead of O(n²) — 63x faster
     _FEE_PCT = 0.30
-    _HOLD = 60  # entry at open i+1, exit at close i+1+_HOLD (= live Fixed60d)
+    _HOLD = 42  # entry at open i+1, exit at close i+1+_HOLD (= live Fixed42d, V3.6)
     rsi2_arr = _rsi2_array(closes)
     sma50_arr = _sma_array(closes, 50)
     last_exit_day = -1

@@ -545,19 +545,19 @@ const PositionRow = memo(function PositionRow({
                   Open Full Chart
                 </button>
               </div>
-              {/* V3.0: Per-strategy exit countdown (MR 60d, MOM 90d) */}
+              {/* Per-strategy exit countdown (MR 42d — V3.6 2026-07-22, MOM 90d) */}
               <div className="col-span-2 md:col-span-4 mt-1 pt-2 border-t border-neutral-800/50">
                 <div className="grid grid-cols-3 gap-3">
                   <div>
                     <span className="text-neutral-500">Strategy</span>
                     <div className="font-medium text-amber-400">
-                      {pos.strategy === "MOMENTUM" ? "MOM 90d" : "MR 60d"}
+                      {pos.strategy === "MOMENTUM" ? "MOM 90d" : "MR 42d"}
                     </div>
                   </div>
                   <div>
                     <span className="text-neutral-500">Days Held</span>
                     {(() => {
-                      const target = pos.strategy === "MOMENTUM" ? 90 : 60;
+                      const target = pos.strategy === "MOMENTUM" ? 90 : 42;
                       const warn = target - 5;
                       return (
                         <div className={cn(
@@ -587,7 +587,7 @@ const PositionRow = memo(function PositionRow({
                 )}
                 {/* Visual hold progress bar */}
                 {(() => {
-                  const target = pos.strategy === "MOMENTUM" ? 90 : 60;
+                  const target = pos.strategy === "MOMENTUM" ? 90 : 42;  // V3.6 MR Fixed42d
                   const warn = target - 5;
                   return (
                     <>
