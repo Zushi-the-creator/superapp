@@ -133,7 +133,33 @@ class DataCache:
             "SELECT MAX(data_end) FROM cache_meta "
             "WHERE ticker != 'VIX' AND ticker NOT LIKE '%USD'"
         ).fetchone()
-        return row[0] if row and row[0] else None
+        newest = row[0] if row and row[0] else None
+        if not newest:
+            return None
+        # Deadlock guard (2026-07-04): if the WHOLE universe ages together (refresh
+        # died for days), MAX(data_end) ages with it and every ticker compares
+        # "fresh" against the rotten baseline — a stable deadlock (prod froze at
+        # 2026-06-26 for 5 trading days; only 82 delisted tickers were retried,
+        # each failing forever). If the baseline is >3 weekdays behind the last
+        # expected trading day, anchor to the calendar so staleness resumes and
+        # the refresh loop re-fetches the universe. The 3-weekday slack keeps
+        # weekends/holidays from re-creating the intraday refresh-storm problem
+        # the 2026-06-19 exclusion fix addressed.
+        expected = datetime.now() - timedelta(days=1)
+        while expected.weekday() >= 5:  # back up to the most recent weekday
+            expected -= timedelta(days=1)
+        try:
+            d = datetime.strptime(newest, '%Y-%m-%d')
+        except ValueError:
+            return newest
+        gap = 0
+        while d.date() < expected.date() and gap <= 3:
+            d += timedelta(days=1)
+            if d.weekday() < 5:
+                gap += 1
+        if gap > 3:
+            return expected.strftime('%Y-%m-%d')
+        return newest
 
     def is_fresh(self, ticker: str) -> bool:
         # Freshness is judged by the latest BAR date (data_end), NOT last_updated.
@@ -154,11 +180,17 @@ class DataCache:
         # Previously keyed off last_updated (refresh-attempt timestamp), so tickers
         # touched today but carrying weeks-old bars were never flagged — the bug
         # that hid genuinely-oversold names (FCX/NSIT/EVTC) from the scanner.
+        # Delisted exclusion (2026-07-11): tickers whose last bar is >30 days old
+        # are delisted/acquired (TIF, TERP, CTL, GRA...) — Tiingo has nothing newer,
+        # so retrying them every cycle burns ~100 requests of rate-limit budget
+        # per cycle forever (they were 82 of the "82 failed" retry storm).
         newest = self._newest_bar_date()
         if not newest:
             return [r[0] for r in self.conn.execute('SELECT ticker FROM cache_meta').fetchall()]
+        delist_cutoff = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
         rows = self.conn.execute(
-            'SELECT ticker FROM cache_meta WHERE data_end < ? OR data_end IS NULL', (newest,)
+            'SELECT ticker FROM cache_meta WHERE data_end IS NULL '
+            'OR (data_end < ? AND data_end >= ?)', (newest, delist_cutoff)
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -214,6 +246,9 @@ class DataCache:
             async with session.get(url, params=params, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 429:
+                    # Count 429s so refresh() can abort a doomed cycle instead of
+                    # burning the whole hourly budget on rate-limited requests.
+                    self._429_count = getattr(self, '_429_count', 0) + 1
                     await asyncio.sleep(2)
                     return None
                 if resp.status != 200:
@@ -259,6 +294,9 @@ class DataCache:
             async with session.get(url, params=params, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 429:
+                    # Count 429s so refresh() can abort a doomed cycle instead of
+                    # burning the whole hourly budget on rate-limited requests.
+                    self._429_count = getattr(self, '_429_count', 0) + 1
                     await asyncio.sleep(2)
                     return None
                 if resp.status != 200:
@@ -368,17 +406,20 @@ class DataCache:
             print(f'[CACHE] All {len(tickers)} tickers already cached')
             return {'fetched': 0, 'cached': len(cached), 'failed': 0}
 
-        print(f'[CACHE] Populate: {len(to_fetch)} tickers (Tiingo, 20 concurrent, 400d)')
+        print(f'[CACHE] Populate: {len(to_fetch)} tickers (Yahoo primary 2y, Tiingo fallback, 10 concurrent)')
         start_time = time.time()
         fetched = 0
         failed_tickers = set()
-        sem = asyncio.Semaphore(20)
+        sem = asyncio.Semaphore(10)
 
         async with aiohttp.ClientSession() as session:
             async def fetch_one(ticker):
                 nonlocal fetched
                 async with sem:
-                    result = await self._fetch_tiingo(session, ticker, days=400)
+                    # Yahoo primary (no daily cap); Tiingo fallback for the rare miss.
+                    result = await self._fetch_yahoo(session, ticker, rng='2y')
+                    if not isinstance(result, pd.DataFrame):
+                        result = await self._fetch_tiingo(session, ticker, days=400)
                     if isinstance(result, pd.DataFrame):
                         self.store(ticker, result)
                         fetched += 1
@@ -398,6 +439,72 @@ class DataCache:
         elapsed = time.time() - start_time
         print(f'[CACHE] Done in {elapsed:.0f}s: {fetched} fetched, {len(failed_tickers)} failed')
         return {'fetched': fetched, 'cached': len(cached), 'failed': len(failed_tickers)}
+
+    async def _fetch_yahoo(self, session: aiohttp.ClientSession,
+                           ticker: str, rng: str = '3mo') -> Optional[pd.DataFrame]:
+        """Fetch adjusted daily OHLCV from Yahoo's chart API.
+
+        This is the reliable BULK source on the Fly.io IP: Tiingo's daily request
+        allocation can't feed a ~3k-ticker universe (blows the cap → 429 storm →
+        the whole universe freezes stale), and Stooq is JS-walled from the server.
+        Yahoo has no per-symbol daily cap and already serves VIX in prod.
+
+        Returns split+dividend-adjusted OHLC (adjclose basis), matching Tiingo's
+        back-adjusted prices, so _rebase_if_adjusted stays a no-op on normal bars
+        and only fires on genuine splits. `rng`: Yahoo range token — '1mo'/'3mo'
+        for refresh (overlaps the cache for the rebase check), '2y' for populate.
+        """
+        params = {'range': rng, 'interval': '1d'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'}
+        # Rotate hosts: Yahoo rate-limits per host, so a 429 on query1 often
+        # succeeds on query2 — the standard resilience trick for the chart API.
+        data = None
+        try:
+            for host in ('query1', 'query2'):
+                url = f'https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}'
+                async with session.get(url, params=params, headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status == 429:
+                        self._429_count = getattr(self, '_429_count', 0) + 1
+                        await asyncio.sleep(0.5)
+                        continue
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json(content_type=None)
+                    break
+            res = (data or {}).get('chart', {}).get('result')
+            res = (res or [None])[0]
+            return self._parse_yahoo_result(res)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_yahoo_result(res) -> Optional[pd.DataFrame]:
+        """Turn a Yahoo chart `result` block into a split+dividend-adjusted OHLCV
+        frame. OHLC are scaled by (adjclose/close) so the whole series sits on the
+        back-adjusted basis Tiingo uses. Split out for offline unit-testing."""
+        if not res:
+            return None
+        ts = res.get('timestamp')
+        q = (res.get('indicators', {}).get('quote') or [{}])[0]
+        if not ts or not q.get('close'):
+            return None
+        idx = (pd.to_datetime(ts, unit='s', utc=True)
+               .tz_convert('America/New_York').tz_localize(None).normalize())
+        df = pd.DataFrame({'Open': q.get('open'), 'High': q.get('high'),
+                           'Low': q.get('low'), 'Close': q.get('close'),
+                           'Volume': q.get('volume')}, index=idx)
+        adj = (res.get('indicators', {}).get('adjclose') or [{}])[0].get('adjclose')
+        if adj is not None:
+            adj = pd.Series(adj, index=idx)
+            factor = (adj / df['Close']).where(df['Close'] > 0, 1.0).fillna(1.0)
+            for c in ('Open', 'High', 'Low'):
+                df[c] = df[c] * factor
+            df['Close'] = adj
+        df = df.dropna(subset=['Close'])
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+        return df if len(df) else None
 
     def _rebase_if_adjusted(self, ticker: str, df: pd.DataFrame) -> bool:
         """Detect split/dividend re-adjustment and rebase cached history to match.
@@ -449,8 +556,26 @@ class DataCache:
         return True
 
     async def refresh(self, tickers: Optional[List[str]] = None) -> Dict:
-        """Daily refresh via Tiingo (10d window, 20 concurrent). Minimal bandwidth."""
+        """Daily refresh — Yahoo-primary (3mo window), Tiingo per-ticker fallback.
+
+        Switched off Tiingo-primary 2026-07-22: Tiingo's DAILY request allocation
+        can't cover a ~3k-ticker universe (each ticker = 1 request). Once the daily
+        cap is hit every fetch 429s, the universe freezes stale, and the next day
+        there are even MORE stale tickers to refresh — an unrecoverable death spiral
+        (observed: prod frozen since ~2026-07-13). Yahoo's chart API has no per-symbol
+        daily cap, serves the whole universe in ~90s (measured), and already feeds VIX
+        in prod. Tiingo stays as a per-ticker fallback for the rare Yahoo miss.
+
+        429-storm guard retained generically (Yahoo rarely 429s): abort the cycle
+        after 30 rate-limited responses and cool down 15 min.
+        """
         import time
+
+        cooldown_until = getattr(self, '_rl_cooldown_until', 0)
+        if time.time() < cooldown_until:
+            mins = (cooldown_until - time.time()) / 60
+            print(f'[CACHE] Refresh skipped — 429 cooldown ({mins:.0f} min left)')
+            return {'refreshed': 0, 'failed': 0, 'cooldown': True}
 
         if tickers:
             stale = [t.upper() for t in tickers if not self.is_fresh(t)]
@@ -461,37 +586,60 @@ class DataCache:
             print('[CACHE] All tickers up to date')
             return {'refreshed': 0, 'failed': 0}
 
-        print(f'[CACHE] Refresh: {len(stale)} stale tickers (Tiingo, 20 concurrent, 10d)')
+        print(f'[CACHE] Refresh: {len(stale)} stale tickers (Yahoo primary, 10 concurrent, 3mo)')
         start_time = time.time()
         refreshed = 0
+        yahoo_hits = 0
+        tiingo_fallbacks = 0
         failed_tickers = set()
-        sem = asyncio.Semaphore(20)
+        sem = asyncio.Semaphore(10)
+        self._429_count = 0
 
         async with aiohttp.ClientSession() as session:
             async def refresh_one(ticker):
-                nonlocal refreshed
+                nonlocal refreshed, yahoo_hits, tiingo_fallbacks
                 async with sem:
-                    result = await self._fetch_tiingo(session, ticker, days=10, min_rows=1)
+                    if self._429_count >= 30:
+                        failed_tickers.add(ticker)  # storm — skip
+                        return
+                    result = await self._fetch_yahoo(session, ticker, rng='3mo')
+                    src = 'yahoo'
+                    if not isinstance(result, pd.DataFrame):
+                        result = await self._fetch_tiingo(session, ticker, days=10, min_rows=1)
+                        src = 'tiingo'
                     if isinstance(result, pd.DataFrame):
                         self._rebase_if_adjusted(ticker, result)
                         self.store(ticker, result)
                         refreshed += 1
+                        if src == 'yahoo':
+                            yahoo_hits += 1
+                        else:
+                            tiingo_fallbacks += 1
                     else:
                         failed_tickers.add(ticker)
 
             for i in range(0, len(stale), 100):
+                if self._429_count >= 30:
+                    failed_tickers.update(stale[i:])
+                    break
                 batch = stale[i:i + 100]
                 await asyncio.gather(*[refresh_one(t) for t in batch])
                 done = min(i + 100, len(stale))
                 elapsed = time.time() - start_time
                 rate = refreshed / elapsed * 60 if elapsed > 0 else 0
                 eta = (len(stale) - done) / rate if rate > 0 else 0
-                print(f'  [{done}/{len(stale)}] OK: {refreshed} | '
+                print(f'  [{done}/{len(stale)}] OK: {refreshed} (Y{yahoo_hits}/T{tiingo_fallbacks}) | '
                       f'Failed: {len(failed_tickers)} | {elapsed:.0f}s | ~{rate:.0f}/min | ETA: {eta:.1f}min')
 
         elapsed = time.time() - start_time
-        print(f'[CACHE] Refresh done in {elapsed:.0f}s: {refreshed} refreshed, {len(failed_tickers)} failed')
-        return {'refreshed': refreshed, 'failed': len(failed_tickers)}
+        if self._429_count >= 30:
+            self._rl_cooldown_until = time.time() + 15 * 60
+            print(f'[CACHE] 429 STORM detected ({self._429_count} rate-limited) — '
+                  f'aborted cycle, cooling down 15 min')
+        print(f'[CACHE] Refresh done in {elapsed:.0f}s: {refreshed} refreshed '
+              f'(Yahoo {yahoo_hits}, Tiingo fallback {tiingo_fallbacks}), {len(failed_tickers)} failed')
+        return {'refreshed': refreshed, 'failed': len(failed_tickers),
+                'rate_limited': self._429_count >= 30}
 
     def close(self):
         if hasattr(self._local, 'conn') and self._local.conn:
