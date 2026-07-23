@@ -167,7 +167,9 @@ class SentimentAnalyzer:
         if days_to_earnings is None:
             days_to_earnings = self._get_days_to_earnings(ticker)
 
-        if days_to_earnings is not None and days_to_earnings <= 7:
+        # 10 calendar days ≈ 7 trading days incl. weekends.
+        # IREN bug 2026-04-29: 7d window let earnings 6 trading days out through.
+        if days_to_earnings is not None and days_to_earnings <= 10:
             veto = True
             veto_reason = f"Earnings in {days_to_earnings} days - binary event risk"
 

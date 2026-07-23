@@ -629,7 +629,7 @@ class PositionManager:
             total_pnl = cursor.fetchone()[0]
 
             # Trading fees + count exclude TAX rows
-            cursor.execute("SELECT COALESCE(SUM(fee), 0), COUNT(*) FROM transactions WHERE action != 'TAX'")
+            cursor.execute("SELECT COALESCE(SUM(fee), 0), COUNT(*) FROM transactions WHERE action NOT IN ('TAX','DIVIDEND')")
             row = cursor.fetchone()
             total_fees = row[0]
             count = row[1]

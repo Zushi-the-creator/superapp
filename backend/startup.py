@@ -12,31 +12,33 @@ MIN_TICKERS = 500  # If volume DB has fewer tickers, re-seed
 
 
 def seed_if_needed():
-    # Always check if volume DB is valid — delete if corrupted
+    # Cheap sanity check — open the DB and confirm a table query works.
+    # `PRAGMA integrity_check` was running for several minutes on the 700MB
+    # volume DB on shared-1x Fly.io machines, blocking uvicorn startup. The
+    # SQLite engine validates pages lazily during normal queries, so a quick
+    # SELECT is enough to detect a corrupted/missing DB without paying the
+    # full-scan cost.
     if os.path.exists(DEST_PATH):
         try:
-            conn = sqlite3.connect(DEST_PATH)
-            conn.execute("PRAGMA integrity_check")
+            conn = sqlite3.connect(DEST_PATH, timeout=10)
             count = conn.execute(
                 "SELECT COUNT(DISTINCT ticker) FROM cache_meta"
             ).fetchone()[0]
-            # Check data depth — need 1000+ bars for 10yr backtests
             avg_bars = conn.execute(
                 "SELECT AVG(cnt) FROM (SELECT COUNT(*) as cnt FROM daily_prices GROUP BY ticker LIMIT 100)"
             ).fetchone()[0] or 0
             conn.close()
             print(f"[Seed] Volume DB: {count} tickers, ~{avg_bars:.0f} avg bars")
             if count >= MIN_TICKERS and avg_bars >= 1000:
-                return  # DB has enough tickers AND depth
+                return
             if count >= MIN_TICKERS and avg_bars < 1000:
                 print(f"[Seed] Data too shallow ({avg_bars:.0f} bars < 1000). Re-seeding with 10yr data...")
         except Exception as e:
-            print(f"[Seed] Volume DB corrupted ({e}), removing...")
+            print(f"[Seed] Volume DB unreadable ({e}), removing...")
             try:
                 os.remove(DEST_PATH)
             except Exception:
                 pass
-            # Also clean WAL/SHM files
             for suffix in ['-wal', '-shm']:
                 try:
                     os.remove(DEST_PATH + suffix)

@@ -18,7 +18,7 @@ import sqlite3
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 
@@ -199,8 +199,22 @@ def evaluate_all(min_price: float = 10.0, held_tickers: set = None, live_prices:
     mr_count = 0
     mom_count = 0
 
+    # Dead/frozen-ticker quarantine (2026-07-11): a ticker whose last bar is
+    # more than 14 calendar days old is either delisted (TIF/TERP/CTL-style)
+    # or frozen by a refresh failure. Its stale bars show whatever dip it froze
+    # mid-way through — a phantom "oversold" signal the scanner surfaces and
+    # the stale-veto then has to block (this is what put "data: 2026-01-30" in
+    # the Entries header). Not tradable either way; skip up front.
+    _quarantine_cutoff = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
+    _quarantined = sum(1 for i in ticker_info.values() if i["last_date"] < _quarantine_cutoff)
+    if _quarantined:
+        print(f"[Evaluator] Quarantined {_quarantined} dead/frozen tickers "
+              f"(last bar older than {_quarantine_cutoff})")
+
     for ticker, info in ticker_info.items():
         if ticker in held:
+            continue
+        if info["last_date"] < _quarantine_cutoff:
             continue
 
         # Load ONLY last 260 bars (enough for SMA200 + momentum checks)

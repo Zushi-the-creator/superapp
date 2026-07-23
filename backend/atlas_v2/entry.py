@@ -321,7 +321,7 @@ class EntryEngine:
             volumes: Volume history
             highs: High prices
             lows: Low prices
-            days_to_earnings: Days until earnings (veto if < 7)
+            days_to_earnings: Days until earnings (veto if <= 10 calendar days)
             sentiment_score: -1 (negative) to +1 (positive)
             learned_params: Parameters from Thompson Sampling learner
             backtest_win_rate: Actual backtest win rate (if available)
@@ -415,15 +415,17 @@ class EntryEngine:
         vetoed = False
         veto_reason = ""
 
-        if days_to_earnings is not None and days_to_earnings <= 7:
+        # Earnings VETO: 10 calendar days (~7 trading days incl. weekends).
+        # IREN bug 2026-04-29: 7d window let earnings 6 trading days out through.
+        if days_to_earnings is not None and days_to_earnings <= 10:
             vetoed = True
             veto_reason = f"Earnings in {days_to_earnings} days - binary event risk"
             factors.append(f"VETO: {veto_reason}")
 
-        if sentiment_score < -0.3:
-            vetoed = True
-            veto_reason = f"Strong negative sentiment ({sentiment_score:.2f})"
-            factors.append(f"VETO: {veto_reason}")
+        # Sentiment VETO REMOVED 2026-05-01 — backtest on 88K signals: filter
+        # `sentiment<-0.3` has edge -0.43% (HURTS returns). Already removed in
+        # deep_scanner.py and strategy_evaluator.py per 2026-04-24 audit.
+        # Aligning atlas_v2/entry.py + momentum_scanner.py to a single source of truth.
 
         # === Determine Signal ===
         min_score = regime_params['min_confidence']

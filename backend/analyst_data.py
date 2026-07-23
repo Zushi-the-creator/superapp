@@ -23,7 +23,7 @@ class AnalystDataFetcher:
     def __init__(self):
         self.cache = {}
         self.cache_duration = timedelta(hours=24)  # Cache for 24 hours
-        self.finnhub_key = os.environ.get("FINNHUB_API_KEY", "d5ed7a9r01qjckl3djkgd5ed7a9r01qjckl3djl0")
+        self.finnhub_key = os.environ.get("FINNHUB_API_KEY", "")
 
     async def fetch_analyst_data(self, ticker: str) -> Optional[Dict]:
         """

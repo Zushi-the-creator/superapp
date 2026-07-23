@@ -23,6 +23,12 @@ class SellRequest(BaseModel):
     notes: str = ""
 
 
+class DepositRequest(BaseModel):
+    amount: float
+    date: Optional[str] = None    # ISO YYYY-MM-DD, defaults to today
+    notes: str = ""
+
+
 # ── Response Models ──
 
 class PositionDetail(BaseModel):
@@ -97,6 +103,12 @@ class PositionDetail(BaseModel):
     # Rotation (V3.0: score gap > 2, min 10d held)
     rotation_target: Optional[str] = None
     rotation_score_gap: float = 0
+    # Upcoming events (display: "Next Event" column)
+    next_earnings_date: Optional[str] = None   # 'YYYY-MM-DD' next scheduled earnings (Finnhub)
+    days_to_earnings: Optional[int] = None      # trading-agnostic calendar days until earnings
+    next_catalyst: Optional[str] = None         # biotech catalyst title (trial readout / FDA / PDUFA)
+    next_catalyst_date: Optional[str] = None    # ISO date of upcoming catalyst
+    next_catalyst_type: Optional[str] = None    # phase / pdufa / fda / nda / conference / other
     # Signal
     signal: str = "HOLD"
     issues: List[str] = []
@@ -120,12 +132,17 @@ class PortfolioSummary(BaseModel):
     day_pnl_pct: float = 0  # Today's P&L percentage
     realized_pnl: float = 0  # Total realized P&L from closed positions
     total_fees: float = 0  # Total trading fees paid
+    total_tax: float = 0  # Broker tax withholdings (deducted from cash + PnL)
     total_deposited: float = 0  # Total capital deposited
     position_count: int
     max_positions: int = 5
     slots_available: int = 5
     avg_win_rate: float
     cash: float = 0
+    yesterday_pnl: float = 0
+    yesterday_pnl_pct: float = 0
+    week_pnl: float = 0
+    week_pnl_pct: float = 0
     market_session: str = "CLOSED"
     timestamp: str
 

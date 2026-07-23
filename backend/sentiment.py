@@ -1,19 +1,59 @@
 """
 News Sentiment Analysis Engine
-Scrapes news from multiple sources and performs VADER sentiment analysis
+Primary: Tiingo News API (rich descriptions, multi-ticker, tagged)
+Fallback: Google News RSS
+Sentiment: VADER (title + description combined)
+Daily logging: Stores all articles in news_log table for future backtesting
 """
 
 import asyncio
 import aiohttp
+import os
+import sqlite3
 from typing import List, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from bs4 import BeautifulSoup
 import feedparser
+
+_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "stock_cache.db")
+_TIINGO_KEY = os.environ.get("TIINGO_API_KEY", "")
+
+
+def _ensure_news_log():
+    """Create news_log table for historical news storage."""
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS news_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            published_date TEXT,
+            title TEXT,
+            description TEXT,
+            source TEXT,
+            tags TEXT,
+            sentiment_score REAL,
+            sentiment_label TEXT,
+            fetch_date TEXT,
+            UNIQUE(ticker, published_date, title)
+        )
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_news_log_ticker_date
+        ON news_log (ticker, published_date)
+    ''')
+    conn.commit()
+    conn.close()
+
+
+# Ensure table exists on import
+try:
+    _ensure_news_log()
+except Exception:
+    pass
 
 
 class SentimentEngine:
-    """Analyze sentiment from news articles using VADER"""
+    """Analyze sentiment from news articles using VADER + Tiingo News"""
 
     def __init__(self):
         self.analyzer = SentimentIntensityAnalyzer()
@@ -21,7 +61,10 @@ class SentimentEngine:
         self.cache_duration = 300  # 5 minutes
 
     async def get_news_for_ticker(self, ticker: str) -> List[Dict]:
-        """Get news articles for a specific ticker"""
+        """Get news articles for a specific ticker.
+        Primary: Tiingo News API (richer data, descriptions, tags)
+        Fallback: Google News RSS
+        """
         # Check cache
         cache_key = f"news_{ticker}"
         if cache_key in self.cache:
@@ -31,65 +74,122 @@ class SentimentEngine:
 
         news_items = []
 
-        # Method 1: yfinance news - DISABLED (rate limited)
-        # yfinance news is disabled due to persistent 429 rate limiting from Yahoo Finance
-
-        # Method 2: Google News RSS (free, no API key needed, PRIMARY source)
+        # Method 1: Tiingo News API (PRIMARY — rich descriptions + tags)
         try:
-            rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
-            feed = await asyncio.to_thread(feedparser.parse, rss_url)
-
-            if hasattr(feed, 'entries') and feed.entries:
-                for entry in feed.entries[:5]:  # Top 5 from Google News
-                    title = entry.get("title", "")
-                    if title:  # Only add if we have a title
-                        news_items.append({
-                            "title": title,
-                            "link": entry.get("link", ""),
-                            "publisher": entry.get("source", {}).get("title", "Google News") if isinstance(entry.get("source"), dict) else "Google News",
-                            "published": int(datetime.now().timestamp()),
-                            "source": "google_news"
-                        })
+            url = f"https://api.tiingo.com/tiingo/news?tickers={ticker}&limit=10&token={_TIINGO_KEY}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers={"Content-Type": "application/json"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list) and data:
+                            for article in data[:10]:
+                                title = article.get("title", "")
+                                desc = article.get("description", "")
+                                if title:
+                                    news_items.append({
+                                        "title": title,
+                                        "description": desc[:500] if desc else "",
+                                        "link": article.get("url", ""),
+                                        "publisher": article.get("source", "Tiingo"),
+                                        "published": article.get("publishedDate", ""),
+                                        "tags": article.get("tags", []),
+                                        "source": "tiingo",
+                                    })
         except Exception:
-            pass  # Skip Google News if it fails
+            pass
+
+        # Method 2: Google News RSS (FALLBACK)
+        if not news_items:
+            try:
+                rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+                feed = await asyncio.to_thread(feedparser.parse, rss_url)
+                if hasattr(feed, 'entries') and feed.entries:
+                    for entry in feed.entries[:5]:
+                        title = entry.get("title", "")
+                        if title:
+                            news_items.append({
+                                "title": title,
+                                "description": "",
+                                "link": entry.get("link", ""),
+                                "publisher": entry.get("source", {}).get("title", "Google News") if isinstance(entry.get("source"), dict) else "Google News",
+                                "published": "",
+                                "tags": [],
+                                "source": "google_news",
+                            })
+            except Exception:
+                pass
 
         # If we have no news, create a generic placeholder
         if not news_items:
             news_items = [{
                 "title": f"{ticker} stock continues trading",
+                "description": "",
                 "link": "",
                 "publisher": "General",
-                "published": int(datetime.now().timestamp()),
-                "source": "placeholder"
+                "published": "",
+                "tags": [],
+                "source": "placeholder",
             }]
 
         # Cache the results
         self.cache[cache_key] = (datetime.now(), news_items)
 
+        # Log to DB for future backtesting (non-blocking)
+        try:
+            self._log_news(ticker, news_items)
+        except Exception:
+            pass
+
         return news_items
 
-    def analyze_sentiment(self, text: str) -> Dict:
-        """
-        Analyze sentiment of text using VADER
+    def _log_news(self, ticker: str, articles: List[Dict]):
+        """Store articles in news_log table for historical analysis."""
+        today = date.today().isoformat()
+        conn = sqlite3.connect(_DB_PATH)
+        for a in articles:
+            if a.get("source") == "placeholder":
+                continue
+            title = a.get("title", "")
+            desc = a.get("description", "")
+            # Analyze sentiment on title + description combined
+            text = f"{title}. {desc}" if desc else title
+            sent = self.analyze_sentiment(text)
+            try:
+                conn.execute('''
+                    INSERT OR IGNORE INTO news_log
+                    (ticker, published_date, title, description, source, tags,
+                     sentiment_score, sentiment_label, fetch_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    ticker,
+                    a.get("published", "")[:19],
+                    title[:500],
+                    desc[:1000],
+                    a.get("publisher", ""),
+                    ",".join(a.get("tags", [])) if a.get("tags") else "",
+                    sent["compound"],
+                    self._get_sentiment_label(sent["compound"]),
+                    today,
+                ))
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
 
-        Returns:
-            Dict with sentiment scores (compound, positive, negative, neutral)
+    def analyze_sentiment(self, text: str) -> Dict:
+        """Analyze sentiment using VADER.
+        For Tiingo articles, analyzes title + description combined for richer signal.
         """
         scores = self.analyzer.polarity_scores(text)
         return {
-            "compound": scores["compound"],  # -1 (most negative) to +1 (most positive)
+            "compound": scores["compound"],
             "positive": scores["pos"],
             "negative": scores["neg"],
-            "neutral": scores["neu"]
+            "neutral": scores["neu"],
         }
 
     async def get_ticker_sentiment(self, ticker: str) -> Dict:
-        """
-        Get aggregated sentiment for a ticker based on recent news
-
-        Returns:
-            Dict with sentiment analysis and news articles
-        """
+        """Get aggregated sentiment for a ticker based on recent news."""
         news_items = await self.get_news_for_ticker(ticker)
 
         if not news_items:
@@ -102,22 +202,26 @@ class SentimentEngine:
                 "negative_count": 0,
                 "neutral_count": 0,
                 "articles": [],
-                "timestamp": datetime.now().isoformat()
+                "headlines": [],
+                "timestamp": datetime.now().isoformat(),
             }
 
-        # Analyze each article
+        # Analyze each article — use title + description for Tiingo articles
         sentiments = []
         analyzed_articles = []
 
         for item in news_items:
-            text = item["title"]  # Use title for sentiment (lightweight)
+            title = item.get("title", "")
+            desc = item.get("description", "")
+            # Combine title + description for richer sentiment (Tiingo gives us both)
+            text = f"{title}. {desc}" if desc else title
             sentiment = self.analyze_sentiment(text)
 
             sentiments.append(sentiment["compound"])
             analyzed_articles.append({
                 **item,
                 "sentiment": sentiment,
-                "sentiment_label": self._get_sentiment_label(sentiment["compound"])
+                "sentiment_label": self._get_sentiment_label(sentiment["compound"]),
             })
 
         # Aggregate scores
@@ -128,6 +232,9 @@ class SentimentEngine:
         negative_count = sum(1 for s in sentiments if s < -0.05)
         neutral_count = len(sentiments) - positive_count - negative_count
 
+        # Extract headlines for the UI
+        headlines = [a.get("title", "") for a in analyzed_articles[:5] if a.get("title")]
+
         return {
             "ticker": ticker,
             "sentiment_score": round(avg_sentiment, 3),
@@ -136,8 +243,9 @@ class SentimentEngine:
             "positive_count": positive_count,
             "negative_count": negative_count,
             "neutral_count": neutral_count,
-            "articles": analyzed_articles[:5],  # Return top 5 for UI
-            "timestamp": datetime.now().isoformat()
+            "articles": analyzed_articles[:5],
+            "headlines": headlines,
+            "timestamp": datetime.now().isoformat(),
         }
 
     def _get_sentiment_label(self, compound_score: float) -> str:
@@ -150,17 +258,11 @@ class SentimentEngine:
             return "NEUTRAL"
 
     async def compare_tickers(self, ticker1: str, ticker2: str) -> Dict:
-        """
-        Compare sentiment between two tickers
-
-        Returns:
-            Dict with comparative analysis
-        """
+        """Compare sentiment between two tickers"""
         sentiment1 = await self.get_ticker_sentiment(ticker1)
         sentiment2 = await self.get_ticker_sentiment(ticker2)
 
         difference = sentiment1["sentiment_score"] - sentiment2["sentiment_score"]
-
         winner = ticker1 if difference > 0 else ticker2 if difference < 0 else "TIE"
 
         return {
@@ -170,26 +272,7 @@ class SentimentEngine:
             "sentiment2": sentiment2,
             "difference": round(difference, 3),
             "winner": winner,
-            "analysis": self._generate_comparison_text(ticker1, ticker2, sentiment1, sentiment2, difference)
         }
-
-    def _generate_comparison_text(self, t1: str, t2: str, s1: Dict, s2: Dict, diff: float) -> str:
-        """Generate human-readable comparison"""
-        if abs(diff) < 0.05:
-            return f"{t1} and {t2} have similar sentiment profiles with no clear winner."
-
-        winner = t1 if diff > 0 else t2
-        loser = t2 if diff > 0 else t1
-        winner_sentiment = s1 if diff > 0 else s2
-        loser_sentiment = s2 if diff > 0 else s1
-
-        return (
-            f"{winner} shows {winner_sentiment['sentiment_label']} sentiment "
-            f"({winner_sentiment['sentiment_score']:+.2f}) based on {winner_sentiment['article_count']} articles, "
-            f"while {loser} shows {loser_sentiment['sentiment_label']} sentiment "
-            f"({loser_sentiment['sentiment_score']:+.2f}) from {loser_sentiment['article_count']} articles. "
-            f"{winner} has a sentiment advantage of {abs(diff):.2f} points."
-        )
 
 
 class NewsAggregator:
@@ -217,3 +300,20 @@ class NewsAggregator:
             print(f"Error fetching Yahoo Finance RSS: {e}")
 
         return news_items
+
+
+# ── Utility: News log stats ──
+
+def news_log_stats():
+    """Get stats about the news log."""
+    conn = sqlite3.connect(_DB_PATH)
+    total = conn.execute("SELECT COUNT(*) FROM news_log").fetchone()[0]
+    tickers = conn.execute("SELECT COUNT(DISTINCT ticker) FROM news_log").fetchone()[0]
+    oldest = conn.execute("SELECT MIN(fetch_date) FROM news_log").fetchone()[0]
+    newest = conn.execute("SELECT MAX(fetch_date) FROM news_log").fetchone()[0]
+    conn.close()
+    return {
+        "total_articles": total,
+        "unique_tickers": tickers,
+        "date_range": f"{oldest} to {newest}",
+    }

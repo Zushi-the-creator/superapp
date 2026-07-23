@@ -52,4 +52,4 @@ __all__ = [
     'create_expert_analyst',
 ]
 
-__version__ = "2.0.0"
+__version__ = "2.7.0"  # MR entries V2.7 + Hybrid21d exit V3.1 + cache evaluator V3.0

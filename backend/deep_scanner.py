@@ -275,6 +275,20 @@ class DeepScanner:
             else:
                 self.stats["fetch_failed"] = len(missing)
 
+        # Dead/frozen-ticker quarantine (2026-07-11): drop tickers whose last bar
+        # is >14 calendar days old. They're delisted or refresh-frozen; their
+        # bars show whatever dip they froze in — phantom "oversold" signals that
+        # the stale-veto then has to block downstream (MLTX/FTAI/LSCC/COCO were
+        # served for 2 weeks straight this way). Not tradable; drop at the source.
+        from datetime import datetime as _qdt, timedelta as _qtd
+        _cutoff = (_qdt.now() - _qtd(days=14)).strftime('%Y-%m-%d')
+        _dead = [t for t, df in data.items()
+                 if df is not None and len(df) and str(df.index[-1])[:10] < _cutoff]
+        for t in _dead:
+            del data[t]
+        if _dead:
+            print(f"  Quarantined {len(_dead)} dead/frozen tickers (last bar < {_cutoff})")
+
         print(f"  Phase 1 complete: {len(data)} stocks with data in {time.time()-t0:.1f}s")
         return data
 

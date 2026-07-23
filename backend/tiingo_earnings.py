@@ -443,3 +443,97 @@ async def earnings_window_batch(
         if hit:
             out[ticker] = hit
     return out
+
+
+# -----------------------------------------------------------------------------
+# Forward-looking NEXT-earnings DATE (Finnhub calendar only).
+#
+# `earnings_window_*` above answer "is there a binary event within ±N days?" —
+# a near-term WARNING. This pair answers a different question: "when does this
+# stock NEXT report?" — for DISPLAY in the positions table, even when that date
+# is a month out. Finnhub's calendar gives reliable scheduled future dates;
+# Tiingo News does not, and its forward window is noisy, so this is Finnhub-only.
+# -----------------------------------------------------------------------------
+
+
+async def _finnhub_next_earnings(
+    session: aiohttp.ClientSession,
+    ticker: str,
+    forward_days: int = 80,
+    timeout_s: float = 4.0,
+) -> Optional[dict]:
+    """Earliest UNREPORTED earnings date in [today, today+forward_days].
+
+    Returns {ticker, date: 'YYYY-MM-DD', days_to: int, quarter, year} or None.
+    Unlike `_finnhub_earnings_window`, this never returns a just-reported event —
+    it only looks forward and skips rows that already have an epsActual.
+    """
+    if not _FINNHUB_KEY:
+        return None
+    today = datetime.now(timezone.utc).date()
+    end = today + timedelta(days=forward_days)
+    try:
+        async with session.get(
+            _FINNHUB_CAL_URL,
+            params={
+                "symbol": ticker.upper(),
+                "from": today.isoformat(),
+                "to": end.isoformat(),
+                "token": _FINNHUB_KEY,
+            },
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    except Exception:
+        return None
+    rows = (data or {}).get("earningsCalendar") or []
+    future = []
+    for r in rows:
+        try:
+            d = datetime.fromisoformat(r["date"]).date()
+        except Exception:
+            continue
+        if d < today:
+            continue
+        if r.get("epsActual") is not None:
+            continue  # already reported
+        future.append((d, r))
+    if not future:
+        return None
+    future.sort(key=lambda x: x[0])
+    d, row = future[0]
+    return {
+        "ticker": ticker.upper(),
+        "date": d.isoformat(),
+        "days_to": (d - today).days,
+        "quarter": row.get("quarter"),
+        "year": row.get("year"),
+    }
+
+
+async def next_earnings_batch(
+    session: aiohttp.ClientSession,
+    tickers: list[str],
+    forward_days: int = 80,
+    concurrency: int = 8,
+) -> dict[str, dict]:
+    """Concurrent next-earnings-date lookup. {ticker: {date, days_to, ...}}."""
+    if not tickers:
+        return {}
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(t: str):
+        async with sem:
+            return t, await _finnhub_next_earnings(session, t, forward_days=forward_days)
+
+    results = await asyncio.gather(*[_one(t) for t in tickers], return_exceptions=True)
+    out: dict[str, dict] = {}
+    for r in results:
+        if isinstance(r, Exception) or r is None:
+            continue
+        ticker, hit = r
+        if hit:
+            out[ticker] = hit
+    return out
