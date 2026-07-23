@@ -174,7 +174,7 @@ export function OpportunitiesTab() {
             <div className={cn("text-xs", data.market_regime.pause_entries ? "text-signal-sell font-medium" : "text-neutral-400")}>
               {data.market_regime.pause_entries
                 ? `ENTRIES PAUSED — ${data.market_regime.reason}`
-                : `Market: ${data.market_regime.regime} — SPY 5d: ${(data.market_regime.spy_5d_return ?? 0).toFixed(1)}%${data.market_regime.vix > 0 ? `, VIX: ${data.market_regime.vix.toFixed(0)}` : ""} — reduce position size to ${data.market_regime.position_size_pct}%`
+                : `Market: ${data.market_regime.regime} — SPY 5d: ${(data.market_regime.spy_5d_return ?? 0).toFixed(1)}%${data.market_regime.vix > 0 ? `, VIX: ${data.market_regime.vix.toFixed(0)}` : ""} — ${data.market_regime.position_size_pct >= 100 ? "full position size" : `reduce position size to ${data.market_regime.position_size_pct}%`}`
               }
             </div>
           </div>
@@ -299,9 +299,16 @@ export function OpportunitiesTab() {
             });
           }
 
-          // V3.5: sort by composite_score (better forward-return ranker per
-          // 2017-2026 walk-forward), tiebreak by Buffered WR.
-          unified.sort((a, b) => b.composite - a.composite || b.ev - a.ev);
+          // V3.6 (2026-07-22): MR/BOTH first, MOMENTUM demoted below them.
+          // The July P&L audit pinned the tab's low realized WR on the momentum
+          // sleeve (30% WR) ranking at the top; momentum is not validated at its
+          // hold horizon. Keep momentum visible but below all MR/BOTH signals.
+          // Within each sleeve, sort by composite_score (V3.5 ranker), then EV.
+          unified.sort((a, b) =>
+            (b.isMR ? 1 : 0) - (a.isMR ? 1 : 0) ||
+            b.composite - a.composite ||
+            b.ev - a.ev
+          );
 
           const freshCount = unified.filter((u) => u.type === "FRESH_ENTRY" || u.type === "BOTH").length;
           const breakoutCount = unified.filter((u) => u.type === "BREAKOUT").length;
