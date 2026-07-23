@@ -2021,7 +2021,7 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
     # Backtest (60-day forward, V3.4: RSI<10, fee-adjusted)
     # Note: ILS Yahoo data has no Open column — use closes as entry proxy
     _FEE_PCT = 0.30
-    _HOLD = 60  # match live Fixed60d exit
+    _HOLD = 42  # match live Fixed42d exit (V3.6 2026-07-22 — was 60)
     last_exit_day = -1
     trades = []
     for i in range(50, len(closes) - _HOLD - 2):
@@ -2099,7 +2099,7 @@ def _get_ils_technicals(ticker: str, closes: list) -> dict:
         "exit_strategy": "Fixed42d", "exit_strategy_wr": round(wr, 1),
         "exit_strategy_ret": round(avg_ret, 2), "exit_strategy_hold": 42.0,
         "exit_triggered": False, "exit_price": 0, "exit_price_pct": 0,
-        "exit_label": f"Hold 60d | +{avg_ret:.1f}% WR {wr:.0f}%",
+        "exit_label": f"Hold 42d | +{avg_ret:.1f}% WR {wr:.0f}%",
         "signal": signal, "issues": issues,
         "sparkline": sparkline,
     }
@@ -2891,7 +2891,7 @@ def _backtest_mr(ticker: str) -> dict:
         return {}
 
     _FEE_PCT = 0.30
-    _HOLD = 60  # match live Fixed60d exit
+    _HOLD = 42  # match live Fixed42d exit (V3.6 2026-07-22 — was 60)
     opens = df["Open"].tolist() if "Open" in df.columns else closes
     rsi_arr = _rsi2_array(closes)
     sma_arr = _sma_array(closes, 50)
@@ -5823,7 +5823,7 @@ async def analyze_stock(ticker: str):
                     }
                     held_position_info["exit_triggered"] = triggered.get("triggered", False)
                     held_position_info["exit_label"] = triggered.get("label", "")
-                    _tgt = 90 if pos_strategy == "MOMENTUM" else 60  # Fixed90d for MOM, Fixed60d else
+                    _tgt = 90 if pos_strategy == "MOMENTUM" else 42  # Fixed90d for MOM, Fixed42d for MR/BOTH (V3.6 2026-07-22 — was hardcoded 60, missed by a7fbd34)
                     held_position_info["target_hold_days"] = _tgt
                     held_position_info["days_remaining"] = max(0, _tgt - days_held)
                     if triggered.get("triggered", False):
