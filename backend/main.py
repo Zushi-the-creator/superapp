@@ -15,8 +15,9 @@ from datetime import datetime
 
 # Bump on every deploy that changes runtime behaviour so a deploy can be
 # verified from the PUBLIC health endpoint (GET /) without needing fly logs.
-# 2026-07-22: Tiingo reactivated (Tiingo-only) + V3.6 MR exit Fixed60d->Fixed42d.
-BUILD_TAG = "2026-07-22-fixed42-v3.6"
+# 2026-07-23: staleness fixes — delist-deadlock (active tickers recover) +
+# baseline advances to last completed trading day (was lagging 1-3 days).
+BUILD_TAG = "2026-07-23-staleness-fix"
 
 from api_v2 import (
     router as v2_router,

@@ -152,12 +152,16 @@ class DataCache:
             d = datetime.strptime(newest, '%Y-%m-%d')
         except ValueError:
             return newest
-        gap = 0
-        while d.date() < expected.date() and gap <= 3:
-            d += timedelta(days=1)
-            if d.weekday() < 5:
-                gap += 1
-        if gap > 3:
+        # Anchor the freshness baseline to the expected last COMPLETED trading day
+        # whenever the cache is behind it. `expected` is always a past weekday
+        # (now-1d), never today's in-progress bar, and VIX/crypto are excluded
+        # above — so this can never chase a partial intraday bar (the 2026-06-19
+        # storm cause, fixed by that exclusion). Tightened 2026-07-23 from a
+        # 3-weekday slack, which let the WHOLE universe sit 1-3 trading days behind
+        # once it aged uniformly (get_stale_tickers is baseline-relative, so a
+        # uniform universe never flagged itself for the next day). Now the daily
+        # refresh advances the universe to yesterday's close as soon as it lands.
+        if d.date() < expected.date():
             return expected.strftime('%Y-%m-%d')
         return newest
 
@@ -180,17 +184,25 @@ class DataCache:
         # Previously keyed off last_updated (refresh-attempt timestamp), so tickers
         # touched today but carrying weeks-old bars were never flagged — the bug
         # that hid genuinely-oversold names (FCX/NSIT/EVTC) from the scanner.
-        # Delisted exclusion (2026-07-11): tickers whose last bar is >30 days old
-        # are delisted/acquired (TIF, TERP, CTL, GRA...) — Tiingo has nothing newer,
-        # so retrying them every cycle burns ~100 requests of rate-limit budget
-        # per cycle forever (they were 82 of the "82 failed" retry storm).
+        # Delisted handling (reworked 2026-07-23 — the old rule TRAPPED live names):
+        # A ticker >30d behind used to be hard-excluded as "delisted". But active
+        # names that fell >30d behind during an outage (BK/MASI/CYBR/CADE...) then
+        # got excluded => never retried => stuck out of every scan forever (a
+        # deadlock; ~80 live tickers were frozen this way). New rule: a >30d-stale
+        # ticker is skipped ONLY if we have CONFIRMED it has no newer data — i.e.
+        # we ATTEMPTED it in the last 2 days (last_updated recent) and Tiingo still
+        # returned nothing. Ones not retried recently get another chance and
+        # recover; genuinely-dead ones are re-confirmed cheaply every ~2 days.
+        # (refresh() now stamps last_updated on FAILED fetches so this works.)
         newest = self._newest_bar_date()
         if not newest:
             return [r[0] for r in self.conn.execute('SELECT ticker FROM cache_meta').fetchall()]
         delist_cutoff = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        recheck_after = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
         rows = self.conn.execute(
-            'SELECT ticker FROM cache_meta WHERE data_end IS NULL '
-            'OR (data_end < ? AND data_end >= ?)', (newest, delist_cutoff)
+            'SELECT ticker FROM cache_meta WHERE data_end IS NULL OR '
+            '(data_end < ? AND NOT (data_end < ? AND last_updated >= ?))',
+            (newest, delist_cutoff, recheck_after)
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -549,6 +561,16 @@ class DataCache:
                       f'Failed: {len(failed_tickers)} | {elapsed:.0f}s | ~{rate:.0f}/min | ETA: {eta:.1f}min')
 
         elapsed = time.time() - start_time
+        # Stamp last_updated on FAILED fetches (no bar stored, so store() didn't run).
+        # This records the attempt so get_stale_tickers can tell a CONFIRMED-dead
+        # ticker (recently attempted, still no data) from one that just fell behind
+        # and deserves a retry — the fix for the delist deadlock (2026-07-23).
+        if failed_tickers:
+            _today = datetime.now().strftime('%Y-%m-%d')
+            self.conn.executemany(
+                'UPDATE cache_meta SET last_updated = ? WHERE ticker = ?',
+                [(_today, t) for t in failed_tickers])
+            self.conn.commit()
         if self._429_count >= 30:
             self._rl_cooldown_until = time.time() + 45 * 60
             print(f'[CACHE] 429 STORM detected ({self._429_count} rate-limited) — '
