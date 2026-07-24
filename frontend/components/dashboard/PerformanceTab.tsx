@@ -109,8 +109,13 @@ export function PerformanceTab() {
       }
     }
 
-    // Milestones mapped to chart x positions
+    // Milestones mapped to chart x positions.
+    // Drop milestones outside [firstBar, lastBar] so they don't stack on the
+    // left edge or run off the right.
+    const firstDate = dailyPnl.length > 1 ? dailyPnl[0].date : "";
+    const lastDate = dailyPnl.length > 1 ? dailyPnl[dailyPnl.length - 1].date : "";
     const milestoneMarkers = dailyPnl.length > 1 ? MILESTONES.map((m) => {
+      if (m.date < firstDate || m.date > lastDate) return null;
       const idx = dailyPnl.findIndex((d) => d.date >= m.date);
       if (idx < 0) return null;
       return { ...m, x: toX(idx), idx };
@@ -161,7 +166,10 @@ export function PerformanceTab() {
           <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
             <span className="text-xs text-neutral-500">Total P&L</span>
             {(() => {
-              const totalPnl = (data?.total_realized ?? 0) + (data?.total_unrealized ?? 0) - (data?.total_fees ?? 0);
+              // realized + unrealized − fees − broker tax. Matches the KPI card formula and
+              // equals (portfolio_value − total_deposited) within rounding noise.
+              const totalPnl = (data?.total_realized ?? 0) + (data?.total_unrealized ?? 0)
+                                - (data?.total_fees ?? 0) - (data?.tax_amount ?? 0);
               const totalPct = (data?.total_deposited ?? 0) > 0
                 ? (totalPnl / (data?.total_deposited ?? 1)) * 100 : 0;
               return (
@@ -207,7 +215,9 @@ export function PerformanceTab() {
               {data?.win_rate?.toFixed(0) ?? 0}%
             </div>
             <span className="text-[10px] text-neutral-500">
-              {data?.win_count ?? 0}W / {data?.loss_count ?? 0}L ({data?.total_trades ?? 0} trades)
+              {data?.win_count ?? 0}W / {data?.loss_count ?? 0}L
+              {(data?.break_even_count ?? 0) > 0 ? ` / ${data?.break_even_count}BE` : ""}
+              {" "}({data?.total_trades ?? 0} trades)
             </span>
           </div>
         </div>
@@ -474,6 +484,100 @@ export function PerformanceTab() {
             </div>
           </div>
         )}
+
+        {/* Running CAGR Chart */}
+        {dailyPnl.length > 7 && (() => {
+          // Compute running CAGR at each point
+          const firstDate = new Date(dailyPnl[0].date);
+          const cagrPoints = dailyPnl.map((d, i) => {
+            const dt = new Date(d.date);
+            const days = (dt.getTime() - firstDate.getTime()) / 86400000;
+            const years = days / 365.25;
+            const totalReturn = d.pnl_pct / 100;
+            if (years < 0.05 || totalReturn <= -1) return null;
+            const cagr = ((1 + totalReturn) ** (1 / years) - 1) * 100;
+            return { date: d.date, cagr: Math.max(-100, Math.min(200, cagr)), idx: i };
+          }).filter(Boolean) as { date: string; cagr: number; idx: number }[];
+
+          if (cagrPoints.length < 5) return null;
+
+          const cW = 900, cH = 200;
+          const cPadL = 55, cPadR = 20, cPadT = 20, cPadB = 30;
+          const cPlotW = cW - cPadL - cPadR;
+          const cPlotH = cH - cPadT - cPadB;
+
+          const cagrVals = cagrPoints.map(p => p.cagr);
+          const minC = Math.min(...cagrVals, 0);
+          const maxC = Math.max(...cagrVals, 10);
+          const rangeC = maxC - minC || 1;
+
+          const cToX = (i: number) => cPadL + (i / Math.max(cagrPoints.length - 1, 1)) * cPlotW;
+          const cToY = (v: number) => cPadT + cPlotH - ((v - minC) / rangeC) * cPlotH;
+          const zeroY = cToY(0);
+
+          const points = cagrPoints.map((p, i) => `${cToX(i).toFixed(1)},${cToY(p.cagr).toFixed(1)}`);
+          const linePath = `M${points.join("L")}`;
+          const areaP = `M${cPadL},${zeroY.toFixed(1)}L${points.join("L")}L${cToX(cagrPoints.length - 1).toFixed(1)},${zeroY.toFixed(1)}Z`;
+
+          const lastCagr = cagrPoints[cagrPoints.length - 1].cagr;
+          const color = lastCagr >= 0 ? "#22c55e" : "#ef4444";
+
+          // Y grid
+          const step = rangeC > 50 ? 20 : rangeC > 20 ? 10 : 5;
+          const yLines: { y: number; label: string }[] = [];
+          for (let v = Math.ceil(minC / step) * step; v <= maxC; v += step) {
+            yLines.push({ y: cToY(v), label: `${v.toFixed(0)}%` });
+          }
+
+          // X labels
+          const xStep = Math.max(1, Math.floor(cagrPoints.length / 5));
+          const xLbls = [];
+          for (let i = 0; i < cagrPoints.length; i += xStep) {
+            xLbls.push({ x: cToX(i), label: cagrPoints[i].date.slice(5) });
+          }
+
+          return (
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium text-neutral-300">Running CAGR (Annualized Return)</h3>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={cn("text-lg font-bold", lastCagr >= 0 ? "text-signal-buy" : "text-signal-sell")}>
+                    {lastCagr >= 0 ? "+" : ""}{lastCagr.toFixed(1)}%
+                  </span>
+                  <span className="text-neutral-500">annualized</span>
+                </div>
+              </div>
+              <svg viewBox={`0 0 ${cW} ${cH}`} className="w-full h-auto" preserveAspectRatio="xMidYMid meet">
+                {yLines.map((gl, i) => (
+                  <g key={i}>
+                    <line x1={cPadL} y1={gl.y} x2={cW - cPadR} y2={gl.y} stroke="#262626" strokeWidth="0.5" />
+                    <text x={cPadL - 6} y={gl.y + 3.5} textAnchor="end" fill="#525252" fontSize="9">{gl.label}</text>
+                  </g>
+                ))}
+                <line x1={cPadL} y1={zeroY} x2={cW - cPadR} y2={zeroY} stroke="#525252" strokeWidth="1" strokeDasharray="4,4" />
+                <text x={cPadL - 6} y={zeroY + 3.5} textAnchor="end" fill="#737373" fontSize="10" fontWeight="600">0%</text>
+                <defs>
+                  <linearGradient id="cagrGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={color} stopOpacity="0.15" />
+                    <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+                  </linearGradient>
+                </defs>
+                <path d={areaP} fill="url(#cagrGrad)" />
+                <path d={linePath} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+                {xLbls.map((xl, i) => (
+                  <text key={i} x={xl.x} y={cH - 6} textAnchor="middle" fill="#525252" fontSize="9">{xl.label}</text>
+                ))}
+                <circle cx={cToX(cagrPoints.length - 1)} cy={cToY(lastCagr)} r="4" fill={color} />
+                <text x={cToX(cagrPoints.length - 1) - 8} y={cToY(lastCagr) - 10} textAnchor="end" fill={color} fontSize="11" fontWeight="bold">
+                  {lastCagr >= 0 ? "+" : ""}{lastCagr.toFixed(1)}%
+                </text>
+              </svg>
+              <div className="text-[10px] text-neutral-500 mt-1">
+                CAGR = (1 + total_return%)^(365/days_held) - 1. Stabilizes over longer periods.
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Trades table */}
         {trades.length > 0 && (

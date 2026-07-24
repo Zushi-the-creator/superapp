@@ -26,6 +26,8 @@ interface DataContextType {
   history: PollingResult<HistoryResponse>;
   performance: PollingResult<PerformanceResponse>;
   health: PollingResult<HealthCheckResponse>;
+  /** Refresh every data source — call after a trade so all tabs show new positions / cash. */
+  refreshAll: () => Promise<void>;
 }
 
 const DataContext = createContext<DataContextType | null>(null);
@@ -38,8 +40,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     offHoursInterval: REFRESH_INTERVALS.portfolioOffHours,
   });
 
+  // V3.4 SSOT (2026-06-17): no consumers of useData().scanner remain after the
+  // Entries-tab refactor. Polling /scan/opportunities was wasted bandwidth.
+  // OpportunitiesTab fetches /scan/combined directly. Keep the state shape for
+  // back-compat with any latent consumers but stub the fetcher to a no-op.
   const scanner = usePolling<ScanResponse>({
-    fetcher: api.getOpportunities,
+    fetcher: async () => ({ opportunities: [], holdings_scores: [] } as unknown as ScanResponse),
     interval: REFRESH_INTERVALS.scanner,
     offHoursInterval: REFRESH_INTERVALS.scannerOffHours,
   });
@@ -62,8 +68,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     offHoursInterval: REFRESH_INTERVALS.healthOffHours,
   });
 
+  const refreshAll = async () => {
+    await Promise.all([
+      portfolio.refresh(),
+      scanner.refresh(),
+      history.refresh(),
+      performance.refresh(),
+      health.refresh(),
+    ]);
+  };
+
   return (
-    <DataContext.Provider value={{ portfolio, scanner, history, performance, health }}>
+    <DataContext.Provider value={{ portfolio, scanner, history, performance, health, refreshAll }}>
       {children}
     </DataContext.Provider>
   );

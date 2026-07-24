@@ -4,6 +4,7 @@ import {
   BarChart3,
   History,
   Rocket,
+  ShoppingCart,
   TrendingUp,
   Zap,
 } from "lucide-react";
@@ -13,6 +14,7 @@ import type { TabId } from "@/lib/types";
 const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "portfolio", label: "Portfolio", icon: BarChart3 },
   { id: "opportunities", label: "Entries", icon: Zap },
+  { id: "trade", label: "Trade", icon: ShoppingCart },
   { id: "sectors", label: "Sectors", icon: Rocket },
   { id: "performance", label: "Performance", icon: TrendingUp },
   { id: "history", label: "History", icon: History },
@@ -21,7 +23,6 @@ const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
 interface SidebarProps {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
-  alertCount?: number;
 }
 
 export function Sidebar({ activeTab, onTabChange }: SidebarProps) {

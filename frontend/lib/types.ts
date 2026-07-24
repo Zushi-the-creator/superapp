@@ -68,6 +68,12 @@ export interface PositionDetail {
   // Rotation (V3.0: score gap > 2, min 10d held)
   rotation_target: string | null;
   rotation_score_gap: number;
+  // Upcoming events ("Next Event" column)
+  next_earnings_date?: string | null;   // 'YYYY-MM-DD' next scheduled earnings
+  days_to_earnings?: number | null;     // calendar days until earnings
+  next_catalyst?: string | null;        // biotech catalyst title (trial / FDA / PDUFA)
+  next_catalyst_date?: string | null;   // ISO date of upcoming catalyst
+  next_catalyst_type?: string | null;   // phase / pdufa / fda / nda / conference / other
   // Signal
   signal: string;
   issues: string[];
@@ -237,6 +243,9 @@ export interface ScanResponse {
   market_regime?: MarketRegime;
   data_freshness?: DataFreshness;
   system_status?: SystemStatus;
+  cache_stale?: boolean;
+  refreshing?: boolean;
+  scanning?: boolean;
 }
 
 export interface TransactionRecord {
@@ -427,6 +436,14 @@ export interface PerformanceResponse {
   total_trades: number;
 }
 
+export type RRGQuadrant = "Leading" | "Weakening" | "Lagging" | "Improving" | "Unknown";
+
+export interface RRGPoint {
+  date: string;
+  rs_ratio: number;
+  rs_momentum: number;
+}
+
 export interface SectorData {
   etf: string;
   name: string;
@@ -441,6 +458,13 @@ export interface SectorData {
   rsi14: number;
   above_sma50: boolean;
   trend: string;
+  // RRG (relative rotation vs SPY)
+  rs_ratio: number;
+  rs_momentum: number;
+  quadrant: RRGQuadrant;
+  leadership_score: number;
+  rank: number;
+  trail: RRGPoint[];
 }
 
 export interface PortfolioSectorExposure {
@@ -449,6 +473,56 @@ export interface PortfolioSectorExposure {
   cost: number;
   value: number;
   weight: number;
+  quadrant: RRGQuadrant;
+}
+
+export interface SectorCorrelation {
+  window_days: number;
+  etfs: string[];
+  matrix: number[][];
+  high_pairs: { a: string; b: string; corr: number }[];
+  low_pairs: { a: string; b: string; corr: number }[];
+}
+
+export interface SectorHeadline {
+  title: string;
+  sentiment: number;
+  label: "POSITIVE" | "NEUTRAL" | "NEGATIVE";
+}
+
+export interface SectorNews {
+  etf: string;
+  avg_sentiment: number;
+  label: string;
+  pos_count: number;
+  neg_count: number;
+  neutral_count: number;
+  headlines: SectorHeadline[];
+  updated: string;
+}
+
+export interface PortfolioImpactHolding {
+  ticker: string;
+  sector: string;
+  etf: string | null;
+  weight: number;
+  quadrant: RRGQuadrant;
+}
+
+export interface PortfolioImpact {
+  holdings: PortfolioImpactHolding[];
+  quadrant_weights: {
+    leading: number;
+    improving: number;
+    weakening: number;
+    lagging: number;
+    unknown: number;
+  };
+  leadership_score: number;
+  concentration_hhi: number;
+  concentration_label: "LOW" | "MODERATE" | "HIGH";
+  avg_held_sector_correlation: number | null;
+  flags: string[];
 }
 
 export interface SectorsResponse {
@@ -458,6 +532,16 @@ export interface SectorsResponse {
   total_sectors_used: number;
   total_sectors: number;
   market_regime?: MarketRegime;
+  rrg: {
+    benchmark: string;
+    ratio_window: number;
+    momentum_window: number;
+    as_of: string | null;
+  };
+  correlation: SectorCorrelation | null;
+  news: Record<string, SectorNews> | null;
+  news_refreshing?: boolean;
+  portfolio_impact: PortfolioImpact;
 }
 
 export interface DataStatus {
@@ -467,6 +551,8 @@ export interface DataStatus {
   cache: {
     stale_count: number;
     total_checked: number;
+    universe_stale?: number;
+    universe_total?: number;
     tickers: Record<string, { latest: string | null; rows: number; fresh: boolean }>;
   };
   quotes: {
@@ -481,12 +567,19 @@ export interface DataStatus {
   market_regime: {
     regime: string;
     pause_entries: boolean;
+    position_size_pct?: number;
+    reason?: string;
     spy_5d_return?: number;
     spy_price?: number;
     spy_price_live?: number;
     vix?: number;
   };
   scan_cache_age_min: number | null;
+  backtest_cache?: {
+    last_computed: string | null;
+    age_hours: number | null;
+    rows: number;
+  };
   system: { stage: string; message: string; progress: number };
   portfolio_earnings?: {
     count: number;
@@ -507,6 +600,30 @@ export interface DataStatus {
       title: string;
       url: string;
       date: string;
+    }>;
+    error?: string;
+  };
+  portfolio_catalysts?: {
+    count: number;
+    upcoming: Array<{
+      ticker: string;
+      kind: "upcoming" | "reported";
+      direction: "past" | "future";
+      age_hours: number;
+      title: string;
+      url: string;
+      date: string;
+      catalyst_type: "phase" | "pdufa" | "fda" | "nda" | "conference" | "other";
+    }>;
+    reported: Array<{
+      ticker: string;
+      kind: "upcoming" | "reported";
+      direction: "past" | "future";
+      age_hours: number;
+      title: string;
+      url: string;
+      date: string;
+      catalyst_type: "phase" | "pdufa" | "fda" | "nda" | "conference" | "other";
     }>;
     error?: string;
   };

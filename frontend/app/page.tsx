@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { DataStatusBar } from "@/components/layout/DataStatusBar";
 import { PortfolioTab } from "@/components/dashboard/PortfolioTab";
 import { OpportunitiesTab } from "@/components/dashboard/OpportunitiesTab";
+import { TradeTab } from "@/components/dashboard/TradeTab";
 import { PerformanceTab } from "@/components/dashboard/PerformanceTab";
 import { HistoryTab } from "@/components/dashboard/HistoryTab";
 import { SectorsTab } from "@/components/dashboard/SectorsTab";
@@ -24,6 +25,7 @@ export default function DashboardPage() {
         <main className="flex-1 overflow-hidden">
           {activeTab === "portfolio" && <PortfolioTab />}
           {activeTab === "opportunities" && <OpportunitiesTab />}
+          {activeTab === "trade" && <TradeTab />}
           {activeTab === "performance" && <PerformanceTab />}
           {activeTab === "sectors" && <SectorsTab />}
           {activeTab === "history" && <HistoryTab />}

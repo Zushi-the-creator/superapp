@@ -9,8 +9,8 @@ import { CheckCircle, XCircle } from "lucide-react";
 import type { PositionDetail, TradeResult } from "@/lib/types";
 
 export function TradeTab() {
-  const { portfolio } = useData();
-  const { data, lastUpdated, loading, refresh } = portfolio;
+  const { portfolio, refreshAll } = useData();
+  const { data, lastUpdated, loading } = portfolio;
 
   return (
     <div className="flex flex-col h-full">
@@ -18,15 +18,16 @@ export function TradeTab() {
         title="Trade"
         lastUpdated={lastUpdated}
         loading={loading}
-        onRefresh={refresh}
+        onRefresh={refreshAll}
       />
       <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-20 md:pb-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl">
-          <BuyForm onComplete={refresh} />
+          <BuyForm onComplete={refreshAll} />
           <SellForm
             positions={data?.positions ?? []}
-            onComplete={refresh}
+            onComplete={refreshAll}
           />
+          <DepositForm onComplete={refreshAll} />
         </div>
       </div>
     </div>
@@ -302,6 +303,90 @@ function SellForm({
     </div>
   );
 }
+
+function DepositForm({ onComplete }: { onComplete: () => Promise<void> }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState("");
+  const [notes, setNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const handleSubmit = async () => {
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0) return;
+    setSubmitting(true);
+    try {
+      const res = await api.deposit(amt, date || undefined, notes);
+      setResult({ success: res.success, message: res.message });
+      if (res.success) {
+        setAmount("");
+        setDate("");
+        setNotes("");
+        await onComplete();
+      }
+    } catch (e) {
+      setResult({ success: false, message: e instanceof Error ? e.message : "Failed" });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
+      <h3 className="text-sm font-semibold text-amber-400 mb-4">DEPOSIT (new capital)</h3>
+      <div className="space-y-3">
+        <div>
+          <label className="text-xs text-neutral-500">Amount (USD)</label>
+          <input
+            type="number"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="0.00"
+            step="0.01"
+            className="w-full mt-1 px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 text-sm focus:border-amber-400 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-neutral-500">Date (optional, defaults to today)</label>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="w-full mt-1 px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 text-sm focus:border-amber-400 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-neutral-500">Notes (optional)</label>
+          <input
+            type="text"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="w-full mt-1 px-3 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-100 text-sm focus:border-amber-400 focus:outline-none"
+          />
+        </div>
+        <button
+          onClick={handleSubmit}
+          disabled={submitting || !amount}
+          className="w-full py-2.5 rounded-lg bg-amber-500 text-black font-medium text-sm hover:bg-amber-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {submitting ? "Recording..." : "RECORD DEPOSIT"}
+        </button>
+      </div>
+      {result && (
+        <div
+          className={cn(
+            "mt-3 p-3 rounded-lg flex items-center gap-2 text-xs",
+            result.success ? "bg-amber-500/10 text-amber-400" : "bg-signal-sell/10 text-signal-sell"
+          )}
+        >
+          {result.success ? <CheckCircle className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}
+          {result.message}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function ResultMessage({ result }: { result: TradeResult | null }) {
   if (!result) return null;

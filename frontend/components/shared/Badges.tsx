@@ -18,8 +18,18 @@ export function SignalBadge({ signal }: { signal: string }) {
 export function RegimeBadge({ regime }: { regime: string }) {
   const colors: Record<string, string> = {
     BULL: "bg-signal-buy/15 text-signal-buy border-signal-buy/30",
+    HEALTHY: "bg-signal-buy/15 text-signal-buy border-signal-buy/30",
+    DIP_BUY: "bg-signal-buy/15 text-signal-buy border-signal-buy/30",
     SIDEWAYS: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    WEAK: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    PULLBACK: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    CORRECTION: "bg-amber-500/15 text-amber-400 border-amber-500/30",
     BEAR: "bg-signal-sell/15 text-signal-sell border-signal-sell/30",
+    BEAR_BOUNCE: "bg-signal-sell/15 text-signal-sell border-signal-sell/30",
+    BELOW_SMA200: "bg-signal-sell/15 text-signal-sell border-signal-sell/30",
+    DANGER: "bg-signal-sell/15 text-signal-sell border-signal-sell/30",
+    CRISIS: "bg-signal-sell/15 text-signal-sell border-signal-sell/30",
+    FEAR: "bg-signal-sell/15 text-signal-sell border-signal-sell/30",
   };
 
   return (

@@ -8,8 +8,9 @@ import type {
   StockAnalysis,
   ChartData,
   PerformanceResponse,
-  MomentumResponse,
   CombinedResponse,
+  SectorsResponse,
+  DataStatus,
 } from "./types";
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
@@ -37,15 +38,18 @@ export const api = {
 
   // Health
   getHealth: () => fetchJson<HealthCheckResponse>("/api/v2/portfolio/health"),
-  refreshHealth: () =>
-    fetchJson<HealthCheckResponse>("/api/v2/portfolio/health/refresh", {
-      method: "POST",
-    }),
 
   // Scanner — return data even if scan is in progress (empty results are fine)
   getOpportunities: () => fetchJson<ScanResponse>("/api/v2/scan/opportunities"),
   refreshScan: () =>
     fetchJson<ScanResponse>("/api/v2/scan/refresh", { method: "POST" }),
+  // Full refresh: clears today's cache and re-runs evaluator + Phase 3 validation.
+  // OpportunitiesTab's "Full Scan" button calls this. Endpoint: /api/v2/scan/refresh-all
+  refreshAll: () =>
+    fetchJson<{ status: string; refreshed?: number; failed?: number; entries?: number }>(
+      "/api/v2/scan/refresh-all",
+      { method: "POST" }
+    ),
 
   // Trade
   buy: (ticker: string, shares: number, price: number, notes = "") =>
@@ -58,6 +62,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ticker, shares, price, notes }),
     }),
+  deposit: (amount: number, date?: string, notes = "") =>
+    fetchJson<{ success: boolean; message: string; total_deposited?: number }>(
+      "/api/v2/positions/deposit",
+      {
+        method: "POST",
+        body: JSON.stringify({ amount, date, notes }),
+      }
+    ),
 
   // Analyze
   analyzeStock: (ticker: string) =>
@@ -84,18 +96,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(config),
     }),
-  // Momentum
-  getMomentum: () => fetchJson<MomentumResponse>("/api/v2/momentum/opportunities"),
-  refreshMomentum: () =>
-    fetchJson<MomentumResponse>("/api/v2/momentum/refresh", { method: "POST" }),
-
   // Sectors
-  getSectors: () => fetchJson<Record<string, unknown>>("/api/v2/sectors"),
+  getSectors: () => fetchJson<SectorsResponse>("/api/v2/sectors"),
 
   // Combined (MR + Momentum unified)
   getCombined: () => fetchJson<CombinedResponse>("/api/v2/scan/combined"),
-  refreshAll: () =>
-    fetchJson<{ status: string; message: string }>("/api/v2/scan/refresh-all", { method: "POST" }),
+
+  // Data status (cache freshness, market session, regime)
+  getDataStatus: () => fetchJson<DataStatus>("/api/v2/data/status"),
 
   testAlertEmail: () =>
     fetchJson<{ success: boolean; message: string }>("/api/v2/alerts/test", {
