@@ -672,4 +672,214 @@ export interface CombinedResponse {
   cache_age_min?: number;
 }
 
-export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors";
+export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors" | "sim";
+
+// ── Simulator ($100k autonomous multi-strategy paper book) ──
+export interface SimPosition {
+  id: number;
+  ticker: string;
+  sleeve: "CORE" | "ALPHA";
+  strategy: string;
+  strategy_label: string;
+  strategy_short: string;
+  strategy_tier: string;
+  exit_rule: string;
+  origin: "MODEL" | "MANUAL";
+  entry_date: string;
+  entry_price: number;
+  shares: number;
+  cost_basis: number;
+  hold_days: number;
+  entry_composite: number;
+  rationale: string;
+  current_price: number;
+  value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  days_held: number;
+  days_remaining: number | null;
+  weight_pct: number;
+  price_stale: boolean;
+}
+
+export interface SimTradeStats {
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_return_pct: number;
+  best_trade_pct: number;
+  worst_trade_pct: number;
+  realized_pnl: number;
+  profit_factor: number | null;
+}
+
+export interface SimStats extends SimTradeStats {
+  max_drawdown_pct: number;
+  snapshots: number;
+  by_strategy: Record<string, SimTradeStats>;
+  by_origin: Record<string, SimTradeStats>;
+}
+
+export interface SimStrategy {
+  id: string;
+  label: string;
+  short: string;
+  tier: "A" | "B" | "C";
+  kind: "CORE" | "ALPHA";
+  source: string;
+  exit_rule: string;
+  thesis: string;
+  evidence: string;
+  enabled: boolean;
+  slots: number;
+  open_positions: number;
+  value: number;
+  weight_pct: number;
+  unrealized_pnl: number;
+  target_pct: number | null;
+  stats: SimTradeStats;
+}
+
+export interface SimCandidate {
+  ticker: string;
+  price: number;
+  signal_strategy: string;
+  composite_score: number;
+  quality_tier: string;
+  rsi2: number;
+  atr_pct: number;
+  sma50_buffer: number;
+  ret_20d: number;
+  high52_dist: number | null;
+  win_rate: number;
+  trades: number;
+  expected_return: number;
+  analyst_consensus: string;
+  sentiment_label: string;
+  held: boolean;
+  eligible_strategies: string[];
+  blocked_reason: string;
+}
+
+export interface SimCandidatesResponse {
+  candidates: SimCandidate[];
+  regime: Record<string, unknown>;
+  rotation_ranks: string[];
+  market_session: string;
+}
+
+export interface SimConfig {
+  enabled: number;
+  starting_capital: number;
+  cycle_minutes: number;
+  core_ticker: string;
+  core_target_pct: number;
+  core_band_pct: number;
+  strategy_enabled: Record<string, number>;
+  strategy_slots: Record<string, number>;
+  max_position_pct: number;
+  min_position_usd: number;
+  min_composite: number;
+  max_per_sector: number;
+  rotation_enabled: number;
+  rotation_min_gap: number;
+  rotation_min_days: number;
+  commission_usd: number;
+  slippage_bps: number;
+  cash_floor_usd: number;
+}
+
+export interface SimEquityPoint {
+  date: string;
+  equity: number;
+  cash: number;
+  positions_value: number;
+  core_value: number;
+  alpha_value: number;
+  open_positions: number;
+  bench_price: number;
+  bench_equity: number;
+  regime: string;
+}
+
+export interface SimDecision {
+  id: number;
+  ts: string;
+  cycle_id: string;
+  kind: "CYCLE" | "ENTRY" | "EXIT" | "HOLD" | "SKIP" | "REBALANCE" | "PAUSE" | "SWITCH" | "MANUAL";
+  ticker: string;
+  action: string;
+  strategy: string;
+  strategy_label: string;
+  origin: "MODEL" | "MANUAL";
+  reason: string;
+  regime: string;
+  composite: number;
+  detail: Record<string, unknown>;
+}
+
+export interface SimState {
+  timestamp: string;
+  inception: string | null;
+  days_live: number;
+  starting_capital: number;
+  equity: number;
+  cash: number;
+  positions_value: number;
+  core_value: number;
+  alpha_value: number;
+  core_pct: number;
+  alpha_pct: number;
+  cash_pct: number;
+  total_pnl: number;
+  roi_pct: number;
+  bench_ticker: string;
+  bench_equity: number;
+  bench_roi_pct: number;
+  alpha_vs_bench_pp: number;
+  positions: SimPosition[];
+  config: SimConfig;
+  strategies: SimStrategy[];
+  stats: SimStats;
+  regime: Record<string, unknown>;
+  equity_curve: SimEquityPoint[];
+  market_session: string;
+  cycle_running: boolean;
+}
+
+export interface SimClosedPosition {
+  id: number;
+  ticker: string;
+  strategy: string;
+  origin: string;
+  entry_date: string;
+  entry_price: number;
+  exit_date: string;
+  exit_price: number;
+  shares: number;
+  cost_basis: number;
+  exit_reason: string;
+  realized_pnl: number;
+}
+
+export interface SimHistoryResponse {
+  closed_positions: SimClosedPosition[];
+  transactions: Array<{
+    id: number;
+    ts: string;
+    date: string;
+    ticker: string;
+    action: string;
+    price: number;
+    shares: number;
+    fee: number;
+    cash_delta: number;
+    realized_pnl: number | null;
+    sleeve: string;
+    strategy: string;
+    origin: string;
+    reason: string;
+  }>;
+  stats: SimStats;
+}

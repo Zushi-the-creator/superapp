@@ -428,6 +428,48 @@ ALWAYS backtest expected returns BY RSI ZONE for each stock:
 
 ---
 
+## SIMULATOR — autonomous $100k paper book (NEW 2026-07-29)
+
+A second, fully isolated portfolio the model manages end-to-end. **Never touches positions.db.**
+
+| Piece | Path |
+|---|---|
+| Policy + ledger + journal | `backend/sim_engine.py` (no api_v2 import — no circular dep) |
+| Routes + live-input plumbing + loop | `backend/api_v2.py` (`/api/v2/sim/*`, `sim_engine_loop`) |
+| State DB | `backend/data/sim.db` (gitignored; prod has its own on the Fly volume) |
+| Frontend | `frontend/components/dashboard/SimTab.tsx` → sidebar "Sim $100k" |
+
+**Strategy registry** (`sim_engine.STRATEGIES`) — each sleeve carries an evidence tier that the UI renders, so an unvalidated sleeve can never look like a validated one. **Tier A** = walk-forward validated here, **B** = study-supported but not walk-forward validated here, **C** = documented weak/unvalidated.
+
+| id | Tier | Source | Exit | Default |
+|---|---|---|---|---|
+| `CORE_QQQ` | A | passive | band rebalance to `core_target_pct` (40%) | ON |
+| `MR_FIXED42` | A | MR/BOTH signals | Fixed42d timer | ON, 5 slots |
+| `SWING_RSI75` | C | MR signals w/ live RSI2<10 | RSI(2)>75 **or** 21d cap | ON, 2 slots |
+| `BREAKOUT_52W` | B | MOM signals within 5% of 252d high | Fixed90d timer | ON, 2 slots |
+| `MOM_ROT_12_1` | B | monthly top-N by 12-1 momentum (top-200 $vol, px>=20, capped 200%) | drops out of the monthly rank | ON, 3 slots |
+| `MOM_FIXED90` | C | raw momentum-scanner ranking | Fixed90d timer | OFF — strictly dominated by BREAKOUT_52W on the same pool |
+
+Slot sizing: alpha capital = equity × (100 − core_target_pct), split across every enabled slot, regime-scaled, capped at `max_position_pct` (15%). Sleeves take from the shared ranked candidate list in registry order, so the validated sleeve gets first pick of a contested name.
+
+**Signal source = `get_combined_opportunities()` called in-process**, so the sim inherits the whole prod pipeline (regime gate, live overlay, composite enrichment) with zero duplication. On top of that it re-applies the Entries-tab "validated" filter (`analyst_consensus` OR `sentiment_label` non-empty) plus the VETO chain (penny, ATR>=15, analyst Hold/Sell, <10 trades, composite < 45) and a max-3-per-sector cap. api_v2 additionally computes `high52_dist` (BREAKOUT gate), live RSI(2) with the intraday price appended (SWING exit) and the 12-1 ranking (24h cache).
+
+**Exits**: each sleeve's own rule, plus two universal ones — earnings <=7d and stock-specific negative sentiment. No stops, no targets.
+
+**Rotation / manual trading.** `rotation_enabled` (auto-switch on a composite gap) defaults **OFF**: our point-in-time test of exactly that logic returned 13-24 CAGR points below holding to the timer. Manual `POST /sim/trade|close|switch` are always available; every manual fill is tagged `origin='MANUAL'` in positions, transactions and the journal, and `get_stats()` reports `by_origin` so discretionary decisions are measured against the model's rather than blended into them.
+
+**Cadence**: `sim_engine_loop` runs every `cycle_minutes` (default 60, floor 5) during REGULAR, plus one post-close cycle that journals exits and writes the daily equity + QQQ-buy-and-hold benchmark row. Outside RTH nothing fills (`session != REGULAR` → exits log as SKIP "execute at next open").
+
+**Costs modelled**: $1.50/fill + 5bps adverse slippage each way.
+
+**Every decision is journalled** to `sim_decisions` with its reason — entries carry RSI2/ATR/buffer/52w-dist/WR/trades/analyst/sentiment/exit-plan, skips carry the exact veto, manual sells record `cut_short_by` (days clipped off the exit rule). The tab's Journal sub-tab is the audit trail.
+
+Endpoints: `GET /sim/state|strategies|candidates|decisions|history|equity`, `POST /sim/run?force=&dry_run=`, `POST /sim/config` (per-strategy dicts are MERGED, not replaced), `POST /sim/trade|close|switch`, `POST /sim/reset?confirm=RESET`.
+
+**Frontend sub-tabs**: Book (strategy + tier badge + exit rule per row, Sell/Switch buttons), Strategies (registry cards w/ thesis + evidence + toggle + slot steppers), Buy/Switch (live candidate feed w/ per-sleeve buy buttons and the block reason for everything it won't take), Journal, Closed (attribution by strategy AND by model-vs-manual), Policy.
+
+---
+
 ## File Locations
 
 | Component | Path |

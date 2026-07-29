@@ -17,13 +17,14 @@ from datetime import datetime
 # verified from the PUBLIC health endpoint (GET /) without needing fly logs.
 # 2026-07-23: staleness fixes — delist-deadlock (active tickers recover) +
 # baseline advances to last completed trading day (was lagging 1-3 days).
-BUILD_TAG = "2026-07-23-staleness-fix"
+BUILD_TAG = "2026-07-29-sim-multi-strategy"
 
 from api_v2 import (
     router as v2_router,
     background_monitor, price_level_monitor, warmup_signal_cache,
     quote_refresh_loop, cache_refresh_loop, extended_hours_refresh_loop,
     technicals_refresh_loop, signal_tracker_loop, sector_intel_loop,
+    sim_engine_loop,
 )
 
 
@@ -98,6 +99,9 @@ async def startup_event():
 
     # Sector intelligence — news narratives (45 min) + ticker->sector Finnhub backfill
     asyncio.create_task(_safe_task("sector_intel_loop", sector_intel_loop))
+
+    # Simulator — autonomous $100k paper book (hourly during RTH + close snapshot)
+    asyncio.create_task(_safe_task("sim_engine_loop", sim_engine_loop))
 
     print("Backend started successfully!")
 

@@ -79,3 +79,7 @@ ollama_data/
 # System
 .DS_Store
 Thumbs.db
+
+# Simulator runtime state (per-environment, lives on the Fly volume in prod)
+backend/data/sim.db
+backend/data/sim.db-*

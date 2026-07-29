@@ -5030,7 +5030,14 @@ async def get_combined_opportunities():
             "upgrades": upgrades,        # is_upgrade count
             "tier_counts": tier_counts,  # V3.3 SSOT — BEST/GOOD/FAIR/WEAK/POOR
             "ranked_count": len(valid),  # V3.3 SSOT — alias for "total" (frontend reads either)
-            "total_scanned": len(cached) if cached else 0,  # V3.3 SSOT — universe size
+            # total_scanned = the UNIVERSE actually evaluated (~3,038), matching the
+            # /scan path at ~L2679 and the "[Evaluator] N stocks evaluated" log line.
+            # Was len(cached) — the SAVED-SIGNAL count (~354), which read as a 12%
+            # coverage failure on the dashboard and triggered a false "we're only
+            # scanning 357 stocks" diagnosis (2026-07-29). Signal count now has its
+            # own field so both numbers are visible and neither is mislabeled.
+            "total_scanned": _cache.stats().get("total_tickers", 0),
+            "signals_generated": len(cached) if cached else 0,
             "holdings_scores": holdings_scores_list,  # V3.3 SSOT — was on /scan/opportunities only
             "worst_holding": worst_h_tkr,             # V3.3 SSOT
             "worst_score": worst_h_score,             # V3.3 SSOT
@@ -7182,3 +7189,547 @@ async def signal_tracker_loop():
 
         # Every 4 hours — catches the post-close window without thrashing
         await asyncio.sleep(4 * 3600)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SIMULATOR — $100,000 autonomous multi-strategy paper book (/api/v2/sim/*)
+# ══════════════════════════════════════════════════════════════════════════
+# A fully isolated second portfolio (data/sim.db) that the model manages on
+# its own across several named strategies, each carrying an evidence tier.
+# It never reads or writes positions.db.
+#
+# Policy + ledger live in sim_engine.py (no api_v2 import → no cycle). This
+# section is the plumbing: it gathers live inputs from the production
+# pipeline and hands them to the engine.
+
+import sim_engine as _sim
+
+_sim_cycle_running = False
+_sim_last_cycle: Optional[Dict] = None
+_sim_rotation_cache: Optional[Tuple[List[str], datetime]] = None
+_SIM_ROTATION_TTL = 24 * 3600
+
+
+async def _sim_prices(tickers: List[str]) -> Dict[str, float]:
+    """Live price map for the sim. Live quote first, last close as fallback.
+
+    Mirrors the portfolio endpoint's priority so a sim fill uses the same
+    number the dashboard shows. Only same-day quotes count as live.
+    """
+    want = {t for t in tickers if t}
+    want.add(_sim.BENCH_TICKER)
+    out: Dict[str, float] = {}
+    session = _get_market_session()
+
+    if session in ("REGULAR", "PRE_MARKET", "AFTER_HOURS") and want:
+        try:
+            await _fetch_tiingo_iex_batch(sorted(want))
+        except Exception as e:
+            print(f"[Sim] IEX batch error: {e}")
+
+    fresh = _fresh_live_px()
+    for t in want:
+        px = fresh.get(t) or 0
+        if px <= 0:
+            q = _price_cache.get(t) or {}
+            px = q.get("price") or 0
+        if px <= 0:
+            try:
+                df = _cache.get(t, 30)
+                if df is not None and len(df) >= 1:
+                    px = float(df["Close"].iloc[-1])
+            except Exception:
+                px = 0
+        if px and px > 0:
+            out[t] = float(px)
+    return out
+
+
+def _sim_rsi2(closes: List[float]) -> float:
+    """Wilder-free 2-period RSI, same formula the exit engine uses elsewhere."""
+    if len(closes) < 3:
+        return 50.0
+    deltas = [closes[-2] - closes[-3], closes[-1] - closes[-2]]
+    gains = sum(d for d in deltas if d > 0) / 2
+    losses = -sum(d for d in deltas if d < 0) / 2
+    if losses == 0:
+        return 100.0
+    return 100 - 100 / (1 + gains / losses)
+
+
+def _sim_technicals(tickers: List[str], prices: Dict[str, float]) -> Dict[str, Dict]:
+    """RSI(2) per held ticker, with today's live price appended to the bar series.
+
+    The SWING_RSI75 sleeve exits on RSI(2) crossing 75 intraday, so the value
+    must reflect the live quote — not yesterday's close.
+    """
+    out: Dict[str, Dict] = {}
+    for t in tickers:
+        try:
+            df = _cache.get(t, 30)
+            if df is None or len(df) < 3:
+                continue
+            closes = [float(c) for c in df["Close"].dropna().tolist()]
+            live = prices.get(t)
+            if live and live > 0:
+                closes = closes[:-1] + [float(live)]
+            out[t] = {"rsi2": round(_sim_rsi2(closes), 1)}
+        except Exception:
+            continue
+    return out
+
+
+def _sim_high52(tickers: List[str], prices: Dict[str, float]) -> Dict[str, float]:
+    """% below the 252-day high — the BREAKOUT_52W gate."""
+    out: Dict[str, float] = {}
+    for t in tickers:
+        try:
+            df = _cache.get(t, 400)
+            if df is None or len(df) < 60:
+                continue
+            highs = [float(h) for h in df["High"].dropna().tolist()][-252:]
+            if not highs:
+                continue
+            peak = max(highs)
+            px = float(prices.get(t) or df["Close"].iloc[-1])
+            if peak > 0 and px > 0:
+                out[t] = round(max(0.0, (peak - px) / peak * 100), 2)
+        except Exception:
+            continue
+    return out
+
+
+def _sim_rotation_ranks(top_n: int = 12) -> List[str]:
+    """Large-cap 12-1 momentum ranking, computed from the local bar cache.
+
+    Universe: top ~200 names by 60-day dollar volume, price >= $20.
+    Score: return from t-252 to t-21 (skips the 1-month reversal), capped at
+    200% so a single blow-off name can't dominate the ranking.
+    Recomputed at most once a day; the sleeve itself rebalances monthly.
+    """
+    try:
+        import pandas as _pd
+        rows = _cache.conn.execute(
+            "SELECT DISTINCT ticker FROM daily_prices"
+        ).fetchall()
+    except Exception as e:
+        print(f"[Sim] rotation universe error: {e}")
+        return []
+
+    scored = []
+    for (t,) in rows:
+        try:
+            df = _cache.get(t, 400)
+            if df is None or len(df) < 260:
+                continue
+            closes = [float(c) for c in df["Close"].dropna().tolist()]
+            vols = [float(v) for v in df["Volume"].dropna().tolist()]
+            if len(closes) < 260 or len(vols) < 60:
+                continue
+            px = closes[-1]
+            if px < 20:
+                continue
+            dollar_vol = sum(c * v for c, v in zip(closes[-60:], vols[-60:])) / 60
+            mom = (closes[-21] - closes[-252]) / closes[-252] * 100
+            scored.append((t, dollar_vol, min(mom, 200.0)))
+        except Exception:
+            continue
+
+    if not scored:
+        return []
+    scored.sort(key=lambda x: x[1], reverse=True)
+    large_caps = scored[:200]
+    large_caps.sort(key=lambda x: x[2], reverse=True)
+    return [t for t, _dv, _m in large_caps[:top_n]]
+
+
+async def _sim_rotation_ranks_cached() -> List[str]:
+    global _sim_rotation_cache
+    if _sim_rotation_cache:
+        ranks, ts = _sim_rotation_cache
+        if (datetime.now() - ts).total_seconds() < _SIM_ROTATION_TTL:
+            return ranks
+    ranks = await asyncio.to_thread(_sim_rotation_ranks)
+    _sim_rotation_cache = (ranks, datetime.now())
+    print(f"[Sim] 12-1 momentum ranks refreshed: {ranks[:8]}")
+    return ranks
+
+
+async def _sim_sentiment(tickers: List[str]) -> Dict[str, Dict]:
+    """Stock-specific sentiment for held names (exit input, not entry veto)."""
+    if not tickers:
+        return {}
+    try:
+        from sentiment import SentimentEngine
+    except Exception:
+        return {}
+    eng = SentimentEngine()
+    sem = asyncio.Semaphore(5)
+    out: Dict[str, Dict] = {}
+
+    async def _one(t: str):
+        async with sem:
+            try:
+                out[t] = await eng.get_ticker_sentiment(t) or {}
+            except Exception:
+                pass
+
+    await asyncio.gather(*[_one(t) for t in tickers], return_exceptions=True)
+    return out
+
+
+async def _sim_gather_inputs(need_signals: bool = True) -> Dict:
+    """Everything the engine needs for one decision, pulled from the live desk."""
+    regime = _check_market_regime()
+    session = _get_market_session()
+
+    signals: List[Dict] = []
+    if need_signals and not regime.get("pause_entries"):
+        try:
+            combined = await get_combined_opportunities()
+            signals = combined.get("signals", []) or []
+        except Exception as e:
+            print(f"[Sim] signal fetch error: {e}")
+
+    open_pos = _sim.get_open_positions()
+    held = [p["ticker"] for p in open_pos]
+    cand = [s.get("ticker", "") for s in signals[:60]]
+
+    rotation_ranks: List[str] = []
+    cfg = _sim.get_config()
+    if cfg.get("strategy_enabled", {}).get("MOM_ROT_12_1"):
+        try:
+            rotation_ranks = await _sim_rotation_ranks_cached()
+        except Exception as e:
+            print(f"[Sim] rotation rank error: {e}")
+
+    prices = await _sim_prices(held + cand + rotation_ranks)
+
+    earnings: Dict = {}
+    if held:
+        try:
+            earnings = await _portfolio_next_earnings_cached(held)
+        except Exception as e:
+            print(f"[Sim] earnings fetch error: {e}")
+
+    sentiment = await _sim_sentiment(held)
+    technicals = await asyncio.to_thread(_sim_technicals, held, prices)
+
+    # Attach the 52-week-high distance the BREAKOUT_52W gate needs
+    mom_cand = [s["ticker"] for s in signals
+                if s.get("strategy") in ("MOMENTUM", "BOTH") and s.get("ticker")]
+    if mom_cand:
+        high52 = await asyncio.to_thread(_sim_high52, mom_cand, prices)
+        for s in signals:
+            if s.get("ticker") in high52:
+                s["high52_dist"] = high52[s["ticker"]]
+
+    sectors: Dict[str, str] = {}
+    try:
+        sectors = _sector_store.get_all_sectors(list({*held, *cand})) or {}
+    except Exception:
+        sectors = {}
+
+    return {"regime": regime, "session": session, "signals": signals,
+            "prices": prices, "earnings": earnings, "sentiment": sentiment,
+            "technicals": technicals, "sectors": sectors,
+            "rotation_ranks": rotation_ranks}
+
+
+async def _sim_run_cycle(force_entries: bool = False, dry_run: bool = False) -> Dict:
+    """Gather live inputs, then let the engine decide.
+
+    Inputs are exactly the ones the live desk uses: `_check_market_regime()`
+    for the gate, `/scan/combined` signals (already regime-gated, live-overlaid
+    and composite-ranked) for entries, the forward Finnhub calendar for the
+    earnings exit, and Google-News sentiment for the stock-specific exit.
+    """
+    global _sim_cycle_running, _sim_last_cycle
+    if _sim_cycle_running:
+        return {"skipped": True, "reason": "cycle already running"}
+    _sim_cycle_running = True
+    try:
+        inp = await _sim_gather_inputs()
+        result = await asyncio.to_thread(
+            _sim.run_cycle,
+            regime=inp["regime"], signals=inp["signals"], prices=inp["prices"],
+            earnings=inp["earnings"], sentiment=inp["sentiment"],
+            technicals=inp["technicals"], sectors=inp["sectors"],
+            rotation_ranks=inp["rotation_ranks"], session=inp["session"],
+            force_entries=force_entries, dry_run=dry_run,
+        )
+        if not dry_run:
+            _sim_last_cycle = result
+        a = result["actions"]
+        print(f"[Sim] cycle {result['cycle_id']} — {len(a['entries'])} entries, "
+              f"{len(a['exits'])} exits, {len(a['switches'])} switches, "
+              f"equity ${result['equity']:,.0f} ({inp['regime'].get('regime')})")
+        return result
+    finally:
+        _sim_cycle_running = False
+
+
+async def sim_engine_loop():
+    """Autonomous decision loop.
+
+    Runs every `cycle_minutes` during the regular session (exits + entries),
+    plus one post-close cycle that marks the book and writes the daily equity
+    snapshot. Outside those windows it idles — no fills when the market is shut.
+    """
+    await asyncio.sleep(120)  # let the quote/cache loops warm up first
+    last_close_snapshot = ""
+
+    while True:
+        try:
+            cfg = _sim.get_config()
+            if not cfg.get("enabled"):
+                await asyncio.sleep(900)
+                continue
+
+            session = _get_market_session()
+            et = _now_et()
+            today = et.strftime("%Y-%m-%d")
+
+            if session == "REGULAR":
+                await _sim_run_cycle()
+                await asyncio.sleep(max(300, int(cfg.get("cycle_minutes", 60)) * 60))
+                continue
+
+            if (session == "AFTER_HOURS" and et.hour >= 16
+                    and last_close_snapshot != today):
+                # Mark-to-close: no fills (session != REGULAR), but exits get
+                # journalled and the daily equity/benchmark row is written.
+                await _sim_run_cycle()
+                last_close_snapshot = today
+                await asyncio.sleep(1800)
+                continue
+
+            await asyncio.sleep(900)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            import traceback
+            print(f"[Sim] loop error: {e}")
+            traceback.print_exc()
+            await asyncio.sleep(300)
+
+
+# ── Read endpoints ────────────────────────────────────────────────────────
+
+@router.get("/sim/state")
+async def sim_state():
+    """Full simulator payload: book, positions, strategies, config, stats, curve."""
+    open_pos = _sim.get_open_positions()
+    prices = await _sim_prices([p["ticker"] for p in open_pos])
+    state = _sim.get_state(prices=prices, regime=_check_market_regime())
+    state["market_session"] = _get_market_session()
+    state["cycle_running"] = _sim_cycle_running
+    state["last_cycle"] = _sim_last_cycle
+    return state
+
+
+@router.get("/sim/strategies")
+async def sim_strategies():
+    """Every registered strategy with its rules, evidence tier and live exposure."""
+    open_pos = _sim.get_open_positions()
+    prices = await _sim_prices([p["ticker"] for p in open_pos])
+    return {"strategies": _sim.get_strategy_book(prices),
+            "registry": _sim.STRATEGIES}
+
+
+@router.get("/sim/candidates")
+async def sim_candidates(limit: int = 40):
+    """What the engine is looking at right now — ranked, with per-strategy
+    eligibility and the exact veto for anything it won't take.
+
+    This is the manual-trading feed: everything here can be bought or switched
+    into via /sim/trade or /sim/switch.
+    """
+    inp = await _sim_gather_inputs()
+    cfg = _sim.get_config()
+    held = {p["ticker"] for p in _sim.get_open_positions()}
+    enabled = [s for s in _sim.ALPHA_STRATEGIES
+               if cfg["strategy_enabled"].get(s) and _sim.STRATEGIES[s]["source"] != "ROTATION"]
+
+    ranked = sorted(inp["signals"], key=lambda s: float(s.get("composite_score") or 0),
+                    reverse=True)[:limit]
+    out = []
+    for s in ranked:
+        t = s.get("ticker", "")
+        veto = _sim._entry_veto(s, cfg)
+        validated = _sim._is_validated(s)
+        eligible = []
+        for sid in enabled:
+            ok, why = _sim._matches_source(s, sid)
+            if ok and not veto and validated and t not in held:
+                eligible.append(sid)
+        out.append({
+            "ticker": t,
+            "price": inp["prices"].get(t) or s.get("price"),
+            "signal_strategy": s.get("strategy"),
+            "composite_score": s.get("composite_score"),
+            "quality_tier": s.get("quality_tier"),
+            "rsi2": s.get("rsi2"), "atr_pct": s.get("atr_pct"),
+            "sma50_buffer": s.get("sma50_buffer"), "ret_20d": s.get("ret_20d"),
+            "high52_dist": s.get("high52_dist"),
+            "win_rate": s.get("confidence"), "trades": s.get("trades"),
+            "expected_return": s.get("expected_return"),
+            "analyst_consensus": s.get("analyst_consensus"),
+            "sentiment_label": s.get("sentiment_label"),
+            "held": t in held,
+            "eligible_strategies": eligible,
+            "blocked_reason": (veto if veto else
+                               ("Already held" if t in held else
+                                ("Not Phase-3 validated" if not validated else
+                                 ("" if eligible else "No enabled sleeve takes this signal")))),
+        })
+    return {"candidates": out, "regime": inp["regime"],
+            "rotation_ranks": inp["rotation_ranks"],
+            "market_session": inp["session"]}
+
+
+@router.get("/sim/decisions")
+async def sim_decisions(limit: int = 150, kinds: str = ""):
+    """The decision journal — every entry, exit, hold, skip, switch and veto."""
+    kind_list = [k.strip().upper() for k in kinds.split(",") if k.strip()] or None
+    return {"decisions": _sim.get_decisions(limit=limit, kinds=kind_list)}
+
+
+@router.get("/sim/history")
+async def sim_history(limit: int = 200):
+    """Closed trades + cash ledger + per-strategy and model-vs-manual attribution."""
+    return {
+        "closed_positions": _sim.get_closed_positions(limit=limit),
+        "transactions": _sim.get_transactions(limit=limit),
+        "stats": _sim.get_stats(),
+    }
+
+
+@router.get("/sim/equity")
+async def sim_equity(limit: int = 400):
+    return {"curve": _sim.get_equity_curve(limit=limit)}
+
+
+# ── Write endpoints ───────────────────────────────────────────────────────
+
+@router.post("/sim/run")
+async def sim_run(force: bool = False, dry_run: bool = False):
+    """Manually trigger a decision cycle.
+
+    force=true executes even outside regular hours (fills at the last known
+    price — use only to bootstrap the book, it is not a realistic fill).
+    """
+    return await _sim_run_cycle(force_entries=force, dry_run=dry_run)
+
+
+@router.post("/sim/config")
+async def sim_set_config(patch: Dict):
+    """Update simulator policy. `strategy_enabled` / `strategy_slots` are merged,
+    so a partial patch leaves the other strategies untouched."""
+    return {"config": _sim.set_config(patch or {})}
+
+
+class SimTradeRequest(BaseModel):
+    ticker: str
+    strategy: str = "MR_FIXED42"
+    dollars: float = 0          # 0 = use the engine's current slot size
+    note: str = ""
+
+
+class SimCloseRequest(BaseModel):
+    position_id: int
+    note: str = ""
+
+
+class SimSwitchRequest(BaseModel):
+    position_id: int
+    buy_ticker: str
+    strategy: Optional[str] = None
+    note: str = ""
+
+
+async def _sim_manual_price(ticker: str) -> float:
+    prices = await _sim_prices([ticker])
+    return float(prices.get(ticker) or 0)
+
+
+def _sim_default_size() -> float:
+    cfg = _sim.get_config()
+    book = _sim.value_book({})
+    enabled = {k for k, v in cfg["strategy_enabled"].items() if v}
+    return _sim.slot_size_usd(cfg, book["equity"], enabled, 1.0)
+
+
+@router.post("/sim/trade")
+async def sim_trade(req: SimTradeRequest):
+    """Discretionary BUY into the sim book. Tagged MANUAL in the journal so it
+    never blends into the model's track record."""
+    px = await _sim_manual_price(req.ticker)
+    if px <= 0:
+        raise HTTPException(status_code=400, detail=f"No price available for {req.ticker}")
+    dollars = req.dollars if req.dollars > 0 else _sim_default_size()
+    # Attach the live signal (if this ticker is currently signalling) so the
+    # manual trade carries the same rationale a model entry would.
+    signal = None
+    try:
+        combined = await get_combined_opportunities()
+        signal = next((s for s in combined.get("signals", [])
+                       if s.get("ticker") == req.ticker.upper()), None)
+    except Exception:
+        pass
+    res = _sim.manual_buy(ticker=req.ticker, strategy_id=req.strategy,
+                          dollars=dollars, price=px, note=req.note, signal=signal)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Buy failed"))
+    return res
+
+
+@router.post("/sim/close")
+async def sim_close(req: SimCloseRequest):
+    """Discretionary SELL of a sim position before its exit rule fires."""
+    pos = next((p for p in _sim.get_open_positions() if p["id"] == req.position_id), None)
+    if not pos:
+        raise HTTPException(status_code=404, detail="No open position with that id")
+    px = await _sim_manual_price(pos["ticker"])
+    if px <= 0:
+        raise HTTPException(status_code=400, detail=f"No price available for {pos['ticker']}")
+    res = _sim.manual_close(position_id=req.position_id, price=px, note=req.note)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Close failed"))
+    return res
+
+
+@router.post("/sim/switch")
+async def sim_switch(req: SimSwitchRequest):
+    """Atomic SELL one / BUY another. Sale proceeds fund the purchase."""
+    pos = next((p for p in _sim.get_open_positions() if p["id"] == req.position_id), None)
+    if not pos:
+        raise HTTPException(status_code=404, detail="No open position with that id")
+    prices = await _sim_prices([pos["ticker"], req.buy_ticker.upper()])
+    sell_px = float(prices.get(pos["ticker"]) or 0)
+    buy_px = float(prices.get(req.buy_ticker.upper()) or 0)
+    if sell_px <= 0 or buy_px <= 0:
+        raise HTTPException(status_code=400, detail="Missing a live price for one leg")
+    signal = None
+    try:
+        combined = await get_combined_opportunities()
+        signal = next((s for s in combined.get("signals", [])
+                       if s.get("ticker") == req.buy_ticker.upper()), None)
+    except Exception:
+        pass
+    res = _sim.manual_switch(position_id=req.position_id, buy_ticker=req.buy_ticker,
+                             sell_price=sell_px, buy_price=buy_px,
+                             strategy_id=req.strategy, note=req.note, signal=signal)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Switch failed"))
+    return res
+
+
+@router.post("/sim/reset")
+async def sim_reset(confirm: str = "", starting_capital: float = 100000.0):
+    """Wipe the sim book back to day zero. Requires ?confirm=RESET."""
+    if confirm != "RESET":
+        raise HTTPException(status_code=400,
+                            detail="Pass ?confirm=RESET to wipe the simulation book")
+    _sim.reset(starting_capital=starting_capital)
+    return {"ok": True, "state": _sim.get_state()}

@@ -11,6 +11,11 @@ import type {
   CombinedResponse,
   SectorsResponse,
   DataStatus,
+  SimState,
+  SimDecision,
+  SimHistoryResponse,
+  SimConfig,
+  SimCandidatesResponse,
 } from "./types";
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
@@ -104,6 +109,42 @@ export const api = {
 
   // Data status (cache freshness, market session, regime)
   getDataStatus: () => fetchJson<DataStatus>("/api/v2/data/status"),
+
+  // ── Simulator ($100k autonomous multi-strategy paper book) ──
+  getSimState: () => fetchJson<SimState>("/api/v2/sim/state"),
+  getSimDecisions: (limit = 150, kinds = "") =>
+    fetchJson<{ decisions: SimDecision[] }>(
+      `/api/v2/sim/decisions?limit=${limit}${kinds ? `&kinds=${kinds}` : ""}`
+    ),
+  getSimHistory: (limit = 200) =>
+    fetchJson<SimHistoryResponse>(`/api/v2/sim/history?limit=${limit}`),
+  getSimCandidates: (limit = 40) =>
+    fetchJson<SimCandidatesResponse>(`/api/v2/sim/candidates?limit=${limit}`),
+  runSimCycle: (force = false) =>
+    fetchJson<{ cycle_id: string; actions: Record<string, unknown[]> }>(
+      `/api/v2/sim/run?force=${force}`,
+      { method: "POST" }
+    ),
+  setSimConfig: (patch: Partial<SimConfig>) =>
+    fetchJson<{ config: SimConfig }>("/api/v2/sim/config", {
+      method: "POST",
+      body: JSON.stringify(patch),
+    }),
+  simBuy: (ticker: string, strategy: string, dollars = 0, note = "") =>
+    fetchJson<{ ok: boolean }>("/api/v2/sim/trade", {
+      method: "POST",
+      body: JSON.stringify({ ticker, strategy, dollars, note }),
+    }),
+  simClosePosition: (position_id: number, note = "") =>
+    fetchJson<{ ok: boolean }>("/api/v2/sim/close", {
+      method: "POST",
+      body: JSON.stringify({ position_id, note }),
+    }),
+  simSwitch: (position_id: number, buy_ticker: string, strategy?: string, note = "") =>
+    fetchJson<{ ok: boolean; warning?: string }>("/api/v2/sim/switch", {
+      method: "POST",
+      body: JSON.stringify({ position_id, buy_ticker, strategy, note }),
+    }),
 
   testAlertEmail: () =>
     fetchJson<{ success: boolean; message: string }>("/api/v2/alerts/test", {
