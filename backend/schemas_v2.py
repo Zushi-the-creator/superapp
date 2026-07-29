@@ -14,6 +14,13 @@ class BuyRequest(BaseModel):
     shares: float
     price: float
     notes: str = ""
+    force: bool = False  # Bypass market-price sanity check
+
+
+class FixPositionRequest(BaseModel):
+    ticker: str
+    entry_price: Optional[float] = None
+    shares: Optional[float] = None
 
 
 class SellRequest(BaseModel):

@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from schemas_v2 import (
-    BuyRequest, SellRequest, TradeResult,
+    BuyRequest, SellRequest, TradeResult, FixPositionRequest,
     PortfolioResponse, PortfolioSummary, PositionDetail,
     HealthCheckResponse, HealthIssue,
     ScanResponse, ScanOpportunity, HoldingScore,
@@ -3098,6 +3098,28 @@ def _calc_trade_fee(ticker: str) -> float:
 MAX_POSITIONS = 6  # 5-6 optimal. 2 keepers + 4 momentum = 6 current
 
 
+def _reference_price(ticker: str) -> float:
+    """Best-effort market price for trade sanity checks: live quote cache, else last cached close."""
+    q = _price_cache.get(ticker) or {}
+    if q.get("price", 0) > 0:
+        return float(q["price"])
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(os.path.join(os.path.dirname(__file__), "data", "stock_cache.db"))
+        try:
+            row = conn.execute(
+                "SELECT close FROM daily_prices WHERE ticker=? ORDER BY date DESC LIMIT 1",
+                (ticker,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and row[0]:
+            return float(row[0])
+    except Exception:
+        pass
+    return 0.0
+
+
 @router.post("/positions/buy", response_model=TradeResult)
 async def buy_position(req: BuyRequest):
     """Record a buy and create position + transaction."""
@@ -3105,6 +3127,24 @@ async def buy_position(req: BuyRequest):
     total = req.price * req.shares
     fee = _calc_trade_fee(ticker)
     currency = "ILS" if ticker.endswith(".TA") else "USD"
+
+    # Sanity check: reject per-share prices wildly off market. Catches the classic
+    # mistake of typing the total invested amount into the price field.
+    if not req.force:
+        ref = _reference_price(ticker)
+        if ref > 0 and not (ref * 0.5 <= req.price <= ref * 1.5):
+            implied = req.price / req.shares if req.shares > 0 else 0
+            hint = ""
+            if implied > 0 and ref * 0.5 <= implied <= ref * 1.5:
+                hint = (f" Looks like ${req.price:,.2f} is the TOTAL amount: "
+                        f"${req.price:,.2f} / {req.shares:.4f} shares = ${implied:.2f}/share. "
+                        f"Resubmit with price={implied:.2f}.")
+            return TradeResult(
+                success=False,
+                message=(f"Price ${req.price:,.2f} rejected — market price for {ticker} "
+                         f"is ~${ref:.2f}.{hint} Use force=true to override."),
+                ticker=ticker,
+            )
 
     # Enforce max positions (backtested: 5 is optimal)
     open_positions = _position_mgr._get_open_positions_sync(currency)
@@ -3225,6 +3265,57 @@ async def sell_position(req: SellRequest):
         price=req.price,
         total=total,
         fee=fee,
+    )
+
+
+@router.post("/positions/fix", response_model=TradeResult)
+async def fix_position(req: FixPositionRequest):
+    """Correct a mis-entered open position (e.g. total amount typed as per-share price).
+    Updates the position row and its BUY transaction, then invalidates caches."""
+    ticker = req.ticker.upper()
+    if req.entry_price is None and req.shares is None:
+        return TradeResult(success=False, message="Nothing to fix — provide entry_price and/or shares", ticker=ticker)
+
+    positions = _position_mgr._get_open_positions_sync()
+    pos = next((p for p in positions if p["ticker"] == ticker), None)
+    if not pos:
+        return TradeResult(success=False, message=f"No open position for {ticker}", ticker=ticker)
+
+    new_price = req.entry_price if req.entry_price is not None else pos["entry_price"]
+    new_shares = req.shares if req.shares is not None else pos["shares"]
+    if new_price <= 0 or new_shares <= 0:
+        return TradeResult(success=False, message="entry_price and shares must be positive", ticker=ticker)
+
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(_position_mgr.db_path)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(
+            "UPDATE positions SET entry_price = ?, shares = ? WHERE id = ?",
+            (new_price, round(new_shares, 4), pos["id"]),
+        )
+        conn.execute(
+            "UPDATE transactions SET price = ?, shares = ?, total = ? WHERE position_id = ? AND action = 'BUY'",
+            (new_price, round(new_shares, 4), round(new_price * new_shares, 2), pos["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _signal_cache.clear()
+    _exit_strategy_cache.clear()
+    global _scan_cache
+    _scan_cache = None
+
+    return TradeResult(
+        success=True,
+        message=(f"Fixed {ticker}: entry ${pos['entry_price']:,.2f} → ${new_price:,.2f}, "
+                 f"shares {pos['shares']:.4f} → {new_shares:.4f}"),
+        ticker=ticker,
+        shares=new_shares,
+        price=new_price,
+        total=round(new_price * new_shares, 2),
+        fee=0,
     )
 
 
