@@ -3,6 +3,9 @@ Slot-limited N=5, next-open entry, fee 0.3%+slip 0.05%/side stocks (0.05%+slip E
 IS 2016-06->2022-12 / OOS 2023-01->2026-07, delisting haircut -30% when a ticker's
 series ends >10d before cache end (mitigates ffill flat-line bias)."""
 import sqlite3, numpy as np, pandas as pd
+TRADES=[0]
+TRADELOG=[]
+LOG_ON=[False]
 FEE=0.003; SLIP=0.0005; EFEE=0.0005; NSLOT=5; DELIST_HC=0.70
 con=sqlite3.connect('data/stock_cache.db')
 quar={r[0] for r in con.execute("SELECT ticker FROM ticker_quarantine")}
@@ -109,6 +112,8 @@ def stock_sim(pol,s0):
                 f=1.0
                 if x>last_valid[col] and last_valid[col]<ND-10: f=DELIST_HC;n_delist+=1
                 u+=inv*(px*f/ep)*(1-FEE-SLIP)*(1-EFEE-SLIP)/p
+                TRADES[0]+=1
+                if LOG_ON[0]: TRADELOG.append(('EXIT',dates[min(xi,ND-1)],C.columns[col],round(float(px),2),round(float(px*f/ep-1)*100,1)))
             else: k.append((x,inv,col,ep))
         op=k
         eq=u*p+sum(inv*(Cf[d,col]/ep) for (_,inv,col,ep) in op); c.append(eq)
@@ -126,6 +131,8 @@ def stock_sim(pol,s0):
                     al=min(eq/NSLOT,u*p)
                     if al<=eq*0.02:break
                     u-=al/p;al*=(1-FEE-SLIP)*(1-EFEE-SLIP);op.append((d+1+h,al,col,ep));hd.add(col);free-=1
+                    TRADES[0]+=1
+                    if LOG_ON[0]: TRADELOG.append(('ENTRY',dates[d+1],C.columns[col],round(float(ep),2),None))
     return np.array(c)
 def stock_sim_cash(pol,s0):
     cash=1.0;op=[];c=[]
@@ -136,6 +143,7 @@ def stock_sim_cash(pol,s0):
                 xi=min(x,ND-1,last_valid[col]) if last_valid[col]>=0 else min(x,ND-1)
                 f=DELIST_HC if (x>last_valid[col] and last_valid[col]<ND-10) else 1.0
                 cash+=inv*(Cf[xi,col]*f/ep)*(1-FEE-SLIP)
+                TRADES[0]+=1
             else: k.append((x,inv,col,ep))
         op=k
         eq=cash+sum(inv*(Cf[d,col]/ep) for (_,inv,col,ep) in op); c.append(eq)
@@ -153,6 +161,7 @@ def stock_sim_cash(pol,s0):
                     al=min(eq/NSLOT,cash)
                     if al<=eq*0.02:break
                     cash-=al;al*=(1-FEE-SLIP);op.append((d+1+h,al,col,ep));hd.add(col);free-=1
+                    TRADES[0]+=1
     return np.array(c)
 RATEA=np.array([0.01 if d<'2022-06-01' else (0.03 if d<'2023-01-01' else 0.05) for d in dates])
 def etf_curve(sat,mult,s0,er=0.0095):
@@ -160,7 +169,7 @@ def etf_curve(sat,mult,s0,er=0.0095):
     for i in range(s0,ND):
         dg=(er+(mult-1)*RATEA[i])/252
         r=QQ[i]/QQ[i-1]-1;w=QQ[i-1]>q200[i-1]
-        if w!=inp: eq*=1-sat*(EFEE+SLIP);inp=w
+        if w!=inp: eq*=1-sat*(EFEE+SLIP);inp=w;TRADES[0]+=1
         eq*=(1+(1-sat)*r+sat*((mult*r-dg) if inp else 0));c.append(eq)
     return np.array(c)
 def bh(arr,s0): return np.array([arr[i]/arr[s0] for i in range(s0,ND)])
@@ -188,6 +197,8 @@ def monthly_rot(score_at,univ_filter,top_n,s0,stock=True):
         if (i-1 in me) or not c:
             j=i-1;new=univ_filter(j,top_n)
             ch=len(set(new)^set(hold));eq*=1-fee*2*(ch/max(len(new)+len(hold),1));hold=new
+            TRADES[0]+=ch
+            if LOG_ON[0] and ch: TRADELOG.append(('REBAL',dates[i],'+'.join(C.columns[c] for c in new[:10]),None,None))
         c.append(eq)
     return np.array(c)
 def lc121(j,n):

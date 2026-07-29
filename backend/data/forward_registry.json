@@ -18,7 +18,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 4
+   "dsr_cohort_n": 5
   },
   {
    "name": "MOMBRK5",
@@ -34,7 +34,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 4
+   "dsr_cohort_n": 5
   },
   {
    "name": "MRDIP",
@@ -50,7 +50,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 4
+   "dsr_cohort_n": 5
   },
   {
    "name": "V4BLEND",
@@ -66,7 +66,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 4
+   "dsr_cohort_n": 5
   },
   {
    "name": "BASELINE",
@@ -77,12 +77,33 @@
    "promotion": null,
    "kill": null,
    "rule_sha256": "0498d14e6fa02b80"
+  },
+  {
+   "name": "HYB21",
+   "registered": "2026-07-29",
+   "status": "CONTINUE",
+   "rule": "MR strict gate (RSI2<10, >SMA50, ATR 3-15%, buf>=5%, vol>=1x, RSI14<60, px>=10), composite-ranked top-5, next-open entry, ALL non-paused regimes (not dip-gated). Exit = Hybrid21d: hold >=7d; from day 7, if pnl>5% trail -3% from peak (close basis); hard cap 21 trading days. No stops otherwise.",
+   "rule_sha256": "f257c677fca612ef",
+   "benchmark": "XLK (also QQQ, SPY)",
+   "promotion": "beats XLK on rolling 42d return in >=55% of windows over >=126 td AND MDD <= 1.5x XLK",
+   "kill": "-20pp cumulative vs XLK",
+   "measurement": "journal (backend/data/forward_journal/HYB21.jsonl)",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 5,
+   "context_at_registration": "Rules predate 2026 (V3.1 prod era) -> 2026 YTD is semi-clean OOS: $100K sim +54.2% YTD vs XLK +18.6 (best of all 21). 10-yr SR only 0.64 \u2014 registered to settle whether 2026 regime-fit is real. Cohort dsr_n now 5 for all candidates."
   }
  ],
  "amendment_log": [
   {
    "date": "2026-07-29",
    "change": "v1.1 same-day as registration, BEFORE first evaluation: added verdict_date/peek_dates (anti optional-stopping), measurement authority=journal, dsr_cohort_n=4 (BASELINE excluded), rule_sha256 tamper hashes. Journal begins 2026-07-28."
+  },
+  {
+   "date": "2026-07-29",
+   "change": "HYB21 registered (6th roster, semi-clean YTD evidence \u2014 rules predate 2026); dsr_cohort_n 4->5 across candidates. Pre-verdict, journal-day-1 era."
   }
  ]
 }

@@ -88,6 +88,12 @@ def mrdip_picks():
     gate=(C.iloc[i]>sma50.iloc[i])&(atrp.iloc[i]>=3)&(atrp.iloc[i]<15)&(buf.iloc[i]>=5)&(vr.iloc[i]>=1.0)&(rsi2.iloc[i]<10)&(rsi14.iloc[i]<60)&(C.iloc[i]>=10)
     picks=atrp.iloc[i][gate.fillna(False)].nlargest(5)
     return [{'ticker':t,'rank':k+1,'atr_pct':round(float(v),2),'px_at_signal':round(float(C.iloc[i][t]),2)} for k,(t,v) in enumerate(picks.items())]
+def hyb21_picks():
+    if REGIME in {'DANGER','CRISIS','WEAK'}: return []
+    i=T
+    gate=(C.iloc[i]>sma50.iloc[i])&(atrp.iloc[i]>=3)&(atrp.iloc[i]<15)&(buf.iloc[i]>=5)&(vr.iloc[i]>=1.0)&(rsi2.iloc[i]<10)&(rsi14.iloc[i]<60)&(C.iloc[i]>=10)
+    picks=atrp.iloc[i][gate.fillna(False)].nlargest(5)
+    return [{'ticker':t,'rank':k+1,'atr_pct':round(float(v),2),'px_at_signal':round(float(C.iloc[i][t]),2)} for k,(t,v) in enumerate(picks.items())]
 def baseline():
     out={}
     for t in ('XLK','QQQ','SPY'):
@@ -112,5 +118,6 @@ append('ROT10',{'signal_date':sd,'picks':rp})
 append('MOMBRK5',{'picks':mombrk5_picks()})
 append('MRDIP',{'picks':mrdip_picks()})
 append('V4BLEND',{'core':'XLK','core_w':0.5,'sleeve':'ROT10','sleeve_w':0.5,'overlay':'MRDIP(max 2x10% from core)'})
+append('HYB21',{'picks':hyb21_picks()})
 append('BASELINE',{'closes':baseline()})
 print(f'\nregime at {ASOF}: {REGIME}')
