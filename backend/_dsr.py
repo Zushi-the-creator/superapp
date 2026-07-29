@@ -68,5 +68,5 @@ if __name__ == '__main__':
     print(f"mode: {mode}   [var_sr=1/T iid-null assumption]")
     print(f"candidate SR (annual):     {a.sr:.2f}   over T={a.t} daily obs, N={a.n} trials")
     print(f"luck bar E[maxSR] annual:  {luck_bar:.2f}   (best Sharpe pure chance produces at N={a.n})")
-    print(f"Deflated Sharpe (DSR):     {d:.3f}   {'PASS (>0.95: skill likely real)' if d>0.95 else 'FAIL — indistinguishable from selection luck'}")
+    print(f"Deflated Sharpe (DSR):     {d:.3f}   {'PASS (>0.95: skill likely real)' if d>0.95 else ('FAIL — not distinguishable from zero-skill' if a.n<=1 else 'FAIL — indistinguishable from selection luck')}")
     print(f"McLean-Pontiff haircut:    expect ~42% of the backtest edge to survive live")

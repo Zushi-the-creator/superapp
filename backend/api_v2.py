@@ -1515,7 +1515,7 @@ async def get_portfolio():
         # tickers (strategy-agnostic) — so we override the cached strategy with
         # the position's actual strategy before evaluating, so MOM positions
         # don't hit the 60d cap when they should run to 90d.
-        if tech and tech.get("exit_strategy"):
+        if tech and tech.get("exit_strategy") and (pos.get("strategy") or "") != "CORE":
             df = _cache.get(ticker, 365)
             if df is not None and len(df) >= 10:
                 closes_live = df["Close"].dropna().tolist()
@@ -1762,7 +1762,11 @@ async def get_portfolio():
         # Tiingo data: Fixed42 won 8/17 windows, +30.8% compounded vs Fixed60 -26.1%,
         # smaller worst-window — 60d holds trap portfolio slots for the drift tail.
         pos_strategy = pos.get("strategy", "MEAN_REVERSION") or "MEAN_REVERSION"
-        if pos_strategy == "MOMENTUM":
+        if pos_strategy == "CORE":
+            # Ballast holding (e.g. XLK core) — no exit timer, no rotation flags.
+            exit_strat_name = "CORE"
+            exit_target_days = 0
+        elif pos_strategy == "MOMENTUM":
             exit_strat_name = "Fixed90d"
             exit_target_days = 90
         else:
@@ -7178,6 +7182,17 @@ async def signal_tracker_loop():
                 try:
                     updated = await asyncio.to_thread(_stu.backfill_returns)
                     print(f"[SignalTracker] Backfilled forward returns on {updated} rows")
+                    # Forward-test journal (2026-07-29): record registered
+                    # rosters' picks at the latest completed bar — the
+                    # authoritative evidence stream for /forward-test verdicts.
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "python3", os.path.join(os.path.dirname(__file__), "forward_journal.py"),
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                        out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+                        print(f"[ForwardJournal] {out.decode()[-300:].strip()}")
+                    except Exception as _fj_err:
+                        print(f"[ForwardJournal] error: {_fj_err}")
                 except Exception as _e:
                     print(f"[SignalTracker] Backfill error: {_e}")
             else:

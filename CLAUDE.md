@@ -12,41 +12,30 @@
 - **NO FAKE PROJECTIONS**: NEVER show projected returns without actual backtest data to back it up
 - **VERIFY BEFORE SPEAKING**: NEVER tell user any data before checking it deeply first (MANDATORY)
 - **RSI ZONE ANALYSIS — RETIRED 2026-07-04**: Per-stock zone expectations are UNCALIBRATED NOISE. Calibration test (5,481 point-in-time samples, `_zonecalib_bt.py`): Spearman IC ≈ 0.00 predicted-vs-realized; stocks "predicting" +20% realized +3.4%, stocks "predicting" negative realized +1.7% — everything converges to the strategy base rate (~+2-4%/60d). Do NOT base hold/sell/size decisions on per-stock zone returns. The behavioral rule that survives (for validated reasons): don't sell overbought winners — hold to the Fixed60d timer.
+- **BENCHMARK = XLK** (the account core since 2026-07-24; 0.97-corr with QQQ, XLK CAGR 23.7% vs QQQ 20.4% 2016-26). Any strategy claim must beat it OOS.
+- **TESTING = SKILLS ONLY**: use `/backtest` (canonical harness + 10-point checklist + DSR luck-gate) and `/forward-test` (pre-registration ledger, verdict 2027-01-27). Ad-hoc backtest scripts are not evidence.
 - **BE CONFIDENT**: Don't ask user for permission when data supports a decision - act on it
 - **SCAN FOR BETTER**: Before recommending ANY buy, ALWAYS scan 1,000+ stocks for better alternatives. Don't default to existing holdings - find the BEST opportunity (MANDATORY)
 - **PORTFOLIO BALANCE**: When recommending BUY/SELL, ALWAYS consider total portfolio spread. Target ~20% per position, no single stock >30%. Size new buys to rebalance underweight positions. Don't create new overweight positions (MANDATORY)
 - **EARNINGS CALENDAR**: ALWAYS check earnings calendar (Finnhub) before ANY buy recommendation. VETO any stock with earnings within 7 days. Also check portfolio holdings for upcoming earnings and WARN user. Use `python3 deep_scanner.py` which has built-in earnings VETO (MANDATORY)
 - **WEIGHTED ALLOCATION — RETIRED 2026-07-04**: "Weight capital by zone expected return" allocated on noise (zone IC ≈ 0, see RSI ZONE ANALYSIS above). Use roughly equal sizing across validated entries, ranked by composite_score (the validated sort key). Respect the 20%/30% position caps.
 - **TRUST BACKTESTS**: If backtests are valid (WR > 55%, 10+ trades, zone trades >= 5), trust the data regardless of stock price. Only filter penny stocks under $10 (MR scanner cap). Momentum scanner caps at $200.
-- **EXIT TRIGGERS (UPDATED 2026-06-17, V3.4)**: Hold positions until backtested per-strategy exit triggers — **Fixed60d** for MR / BOTH (exit on trading day 60; replaced Fixed30d after honest 13-window rolling walk-forward — 24mo IS / 6mo OOS / 6mo step, 17,108 PROD-filtered entries, 487-ticker quarantine). Fixed60d portfolio sim N=4 OOS-2024: +23.2% CAGR / 2.09% monthly / MDD -11.6% / Sharpe 0.78 vs Fixed30d N=4: +6.3% CAGR / 1.04% monthly / MDD -35% / Sharpe 0.59. Cross-period worst-month: Fixed60d +0.94% (never negative) vs Fixed30d -0.18%. Dynamic regime-aware exits (HonestDyn family) were tested honestly and beaten by Fixed60d once portfolio capacity constraints applied. **Fixed90d** for Momentum (unchanged). Valid early exits: (a) Earnings within 7 days — binary event risk, always EXIT. (b) Stock-specific negative sentiment (downgrade, earnings miss, product failure) — EXIT. (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT. NOT valid: market-wide crash headlines, war panic across all stocks, RSI rising (trade working). Distinguish STOCK-SPECIFIC bad news from MARKET-WIDE noise. (MANDATORY)
+- **EXIT TRIGGERS (UPDATED 2026-07-22, V3.6)**: Hold positions until backtested per-strategy exit triggers — **Fixed42d** for MR / BOTH (exit on trading day 42; replaced Fixed60d per the 17-window walk-forward in the MODEL line; historical V3.4 rationale kept for the record: Fixed60d had replaced Fixed30d after honest 13-window rolling walk-forward — 24mo IS / 6mo OOS / 6mo step, 17,108 PROD-filtered entries, 487-ticker quarantine). Fixed60d portfolio sim N=4 OOS-2024: +23.2% CAGR / 2.09% monthly / MDD -11.6% / Sharpe 0.78 vs Fixed30d N=4: +6.3% CAGR / 1.04% monthly / MDD -35% / Sharpe 0.59. Cross-period worst-month: Fixed60d +0.94% (never negative) vs Fixed30d -0.18%. Dynamic regime-aware exits (HonestDyn family) were tested honestly and beaten by Fixed60d once portfolio capacity constraints applied. **Fixed90d** for Momentum (unchanged). Valid early exits: (a) Earnings within 7 days — binary event risk, always EXIT. (b) Stock-specific negative sentiment (downgrade, earnings miss, product failure) — EXIT. (c) Model EXIT signal (both ATLAS WR + zone WR fail 65%) — EXIT. NOT valid: market-wide crash headlines, war panic across all stocks, RSI rising (trade working). Distinguish STOCK-SPECIFIC bad news from MARKET-WIDE noise. (MANDATORY)
 - **REGIME-ADAPTIVE ENTRIES (UPDATED 2026-06-12, V3.3)**: Per 35K-trade paired backtest + walk-forward validation (train pre-2022, test 2022+), entry rules adjust by regime: **DANGER (SPY -7% to -15% drawdown) → PAUSE all entries** (was -10% to -15%; widened after CORRECTION regime showed 49% WR / +0.22% avg — below threshold). **SHARP_DROP (SPY 5d < -2%) → 70% size** (still +2.27% avg / 57% WR). All other regimes unchanged. "A skip CORRECTION" returned +2.10%/trade out-of-sample vs +1.18% baseline (+78% cumulative). Dual-bucket "defensive RSI<10" approach was tested and REJECTED — Bucket A (high-vol MR) beat Bucket B and C in every regime including CRISIS. (MANDATORY)
 
 ---
 
-## Current Positions (Updated 2026-06-17, reconciled to PRODUCTION API — source of truth)
+## Current Positions (Updated 2026-07-29, reconciled to PRODUCTION API)
 
-> The local positions.db and this file had both drifted ~6 weeks stale (showed an April PRAX/GHM/AMSC/CAMT/APEI/IREN set). Reconciled to the live production portfolio (`superapp-ke5bhg.fly.dev/api/v2/portfolio`, the frontend source) on 2026-06-17. The April set was CLOSED; deposits grew to $20,907.
+| Ticker | Shares | Avg Entry | Current | P&L | Role / exit |
+|--------|--------|-----------|---------|-----|-------------|
+| XLK | 68.0542 | $176.33 | ~$171 | ~-3% | **CORE ballast — no timer** (strategy='CORE'; bought 2026-07-24 as $12,000; a book bug recorded price=$12,000 — fixed 2026-07-29) |
+| CECO | 27.399 | $91.24 | ~$80 | ~-26% | MR Fixed42d day ~22/42; **earnings Aug 4 → exit before, on a GREEN day** |
+| ENTG | 15.4 | $162.28 | ~$137 | ~-27% | MR Fixed42d day ~22/42; **earnings Aug 4 → exit before, on a GREEN day** |
 
-### USD Portfolio (live 2026-06-17)
-
-| Ticker | Shares | Avg Entry | Cost Basis | Current | Value | P&L | Weight | Days | RSI2 |
-|--------|--------|-----------|------------|---------|-------|-----|--------|------|------|
-| NVDA | 15.2646 | $197.45 | $3,014.00 | $207.23 | $3,163.6 | +$149 (+5.0%) | 18.5% | 30 | 59 |
-| SFM | 37.8924 | $79.17 | $2,999.94 | $80.72 | $3,058.7 | +$59 (+2.0%) | 17.9% | 29 | 0 |
-| BE | 10.1786 | $294.73 | $2,999.94 | $290.90 | $2,961.0 | -$39 (-1.3%) | 17.4% | 15 | 100 |
-| CLS | 5.5429 | $377.23 | $2,090.95 | $387.49 | $2,147.6 | +$57 (+2.7%) | 12.6% | 28 | 32 |
-| CELC | 22.5773 | $132.88 | $3,000.07 | $87.62 | $1,978.4 | -$1,022 (-34.1%) | 11.6% | 28 | 0 |
-| DAC | 14.8286 | $128.00 | $1,898.06 | $127.49 | $1,890.5 | -$8 (-0.4%) | 11.1% | 15 | 1 |
-| APP | 3.7902 | $568.83 | $2,155.98 | $491.98 | $1,864.7 | -$291 (-13.5%) | 10.9% | 10 | 81 |
-
-**Cash: $4,302.75 | Positions Value: ~$17,064 | Total Portfolio: ~$21,367**
-**Total Deposited: $20,907.44 | Realized P&L: +$1,967.68 | Total Fees: $110 | Total Tax: $317**
-**Open P&L: -$1,094.80 (-6.03%) — drag is CELC (-$1,022, sell-the-news + convertible dilution; thesis intact)**
-
-### Exit status (Fixed60d, all entered May–June → none at day 60 yet)
-- No holding has earnings within 7 days (verified vs Finnhub calendar 2026-06-17 — portfolio_check/scanner news-based earnings detector is throwing false positives on ALL tickers; do not trust it).
-- No stock-specific negative-sentiment exit: all 7 hold POSITIVE sentiment.
-- NVDA prod UI shows "EXIT NOW" = stale Fixed30d logic (prod not yet redeployed to V3.4 Fixed60d). Under Fixed60d it HOLDS to day 60.
+**Cash ~$3,215 | Total ~$18.5K | Realized 2026: ~-$522 (BE/CLS earnings-exits 07-24 realized losses — offsets prior gains, tax-useful)**
+**Market state 2026-07-29: tech/momentum unwind — QQQ -9.5% from peak, SPY -2.5%, regime PULLBACK; MR dip-satellite arms at SPY -3% (DIP_BUY)**
+**Forward tests running: 5 rosters frozen 2026-07-29 (`backend/data/forward_registry.json`), nightly journal, verdict 2027-01-27**
 
 ### ILS Portfolio
 - **SOLD** TA-35 3x ETF on 2026-02-10 for ~+2,871 ILS profit (+14.5%)

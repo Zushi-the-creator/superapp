@@ -551,13 +551,14 @@ const PositionRow = memo(function PositionRow({
                   <div>
                     <span className="text-neutral-500">Strategy</span>
                     <div className="font-medium text-amber-400">
-                      {pos.strategy === "MOMENTUM" ? "MOM 90d" : "MR 42d"}
+                      {pos.strategy === "CORE" ? "CORE (no timer)" : pos.strategy === "MOMENTUM" ? "MOM 90d" : "MR 42d"}
                     </div>
                   </div>
                   <div>
                     <span className="text-neutral-500">Days Held</span>
                     {(() => {
-                      const target = pos.strategy === "MOMENTUM" ? 90 : 42;
+                      const target = pos.strategy === "CORE" ? 0 : pos.strategy === "MOMENTUM" ? 90 : 42;
+                      if (target === 0) return <div className="font-medium text-neutral-400">{pos.days_held}d (core)</div>;
                       const warn = target - 5;
                       return (
                         <div className={cn(
@@ -587,7 +588,8 @@ const PositionRow = memo(function PositionRow({
                 )}
                 {/* Visual hold progress bar */}
                 {(() => {
-                  const target = pos.strategy === "MOMENTUM" ? 90 : 42;  // V3.6 MR Fixed42d
+                  const target = pos.strategy === "CORE" ? 0 : pos.strategy === "MOMENTUM" ? 90 : 42;  // V3.6 MR Fixed42d; CORE = no timer
+                  if (target === 0) return null;
                   const warn = target - 5;
                   return (
                     <>
