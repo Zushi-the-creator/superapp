@@ -144,6 +144,7 @@ def stock_sim_cash(pol,s0):
                 f=DELIST_HC if (x>last_valid[col] and last_valid[col]<ND-10) else 1.0
                 cash+=inv*(Cf[xi,col]*f/ep)*(1-FEE-SLIP)
                 TRADES[0]+=1
+                if LOG_ON[0]: TRADELOG.append(('EXIT',dates[min(xi,ND-1)],C.columns[col],round(float(Cf[xi,col]),2),round(float(Cf[xi,col]*f/ep-1)*100,1)))
             else: k.append((x,inv,col,ep))
         op=k
         eq=cash+sum(inv*(Cf[d,col]/ep) for (_,inv,col,ep) in op); c.append(eq)
@@ -162,6 +163,7 @@ def stock_sim_cash(pol,s0):
                     if al<=eq*0.02:break
                     cash-=al;al*=(1-FEE-SLIP);op.append((d+1+h,al,col,ep));hd.add(col);free-=1
                     TRADES[0]+=1
+                    if LOG_ON[0]: TRADELOG.append(('ENTRY',dates[d+1],C.columns[col],round(float(ep),2),None))
     return np.array(c)
 RATEA=np.array([0.01 if d<'2022-06-01' else (0.03 if d<'2023-01-01' else 0.05) for d in dates])
 def etf_curve(sat,mult,s0,er=0.0095):
