@@ -432,7 +432,7 @@ A second, fully isolated portfolio the model manages end-to-end. **Never touches
 
 | id | Tier | Source | Exit | Default |
 |---|---|---|---|---|
-| `CORE_QQQ` | A | passive | band rebalance to `core_target_pct` (40%) | ON |
+| `CORE_INDEX` | A | passive **XLK** (house benchmark) | band rebalance to `core_target_pct` (40%) | ON |
 | `MR_FIXED42` | A | MR/BOTH signals | Fixed42d timer | ON, 5 slots |
 | `SWING_RSI75` | C | MR signals w/ live RSI2<10 | RSI(2)>75 **or** 21d cap | ON, 2 slots |
 | `BREAKOUT_52W` | B | MOM signals within 5% of 252d high | Fixed90d timer | ON, 2 slots |
@@ -447,7 +447,7 @@ Slot sizing: alpha capital = equity × (100 − core_target_pct), split across e
 
 **Rotation / manual trading.** `rotation_enabled` (auto-switch on a composite gap) defaults **OFF**: our point-in-time test of exactly that logic returned 13-24 CAGR points below holding to the timer. Manual `POST /sim/trade|close|switch` are always available; every manual fill is tagged `origin='MANUAL'` in positions, transactions and the journal, and `get_stats()` reports `by_origin` so discretionary decisions are measured against the model's rather than blended into them.
 
-**Cadence**: `sim_engine_loop` runs every `cycle_minutes` (default 60, floor 5) during REGULAR, plus one post-close cycle that journals exits and writes the daily equity + QQQ-buy-and-hold benchmark row. Outside RTH nothing fills (`session != REGULAR` → exits log as SKIP "execute at next open").
+**Cadence**: `sim_engine_loop` runs every `cycle_minutes` (default 60, floor 5) during REGULAR, plus one post-close cycle that journals exits and writes the daily equity + **XLK**-buy-and-hold benchmark row. Outside RTH nothing fills (`session != REGULAR` → exits log as SKIP "execute at next open").
 
 **Costs modelled**: $1.50/fill + 5bps adverse slippage each way.
 

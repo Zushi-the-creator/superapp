@@ -32,7 +32,11 @@ from typing import Dict, List, Optional, Tuple
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sim.db")
 
 STARTING_CAPITAL = 100_000.0
-BENCH_TICKER = "QQQ"
+BENCH_TICKER = "XLK"   # house benchmark since 2026-07-24 (CLAUDE.md):
+                       # XLK is the live account core, 0.97-corr with QQQ,
+                       # 23.7% CAGR vs QQQ 20.4% (2016-26). Any strategy
+                       # claim has to beat XLK out-of-sample, so the sim is
+                       # scored against it.
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -49,8 +53,8 @@ BENCH_TICKER = "QQQ"
 # exits: earnings <=7d and stock-specific negative sentiment).
 
 STRATEGIES: Dict[str, Dict] = {
-    "CORE_QQQ": {
-        "label": "Core · QQQ passive",
+    "CORE_INDEX": {
+        "label": "Core · XLK passive",
         "short": "CORE",
         "tier": "A",
         "kind": "CORE",
@@ -58,8 +62,9 @@ STRATEGIES: Dict[str, Dict] = {
         "exit": {"type": "rebalance"},
         "default_enabled": 1,
         "default_slots": 0,          # sized by core_target_pct, not slots
-        "thesis": "Hold beta. Every always-on active config in the master-harness "
-                  "study lost to QQQ out-of-sample by 13-29pp, and time-in-market "
+        "thesis": "Hold beta — the same XLK ballast the live account carries. Every "
+                  "always-on active config in the master-harness "
+                  "study lost to the index out-of-sample by 13-29pp, and time-in-market "
                   "explained ~90% of return variance.",
         "evidence": "_master_harness3.py (2026-07-24); needle-movers study (2026-07-24)",
     },
@@ -149,7 +154,8 @@ _LEGACY_STRATEGY_MAP = {
     "MEAN_REVERSION": "MR_FIXED42",
     "BOTH": "MR_FIXED42",
     "MOMENTUM": "MOM_FIXED90",
-    "CORE": "CORE_QQQ",
+    "CORE": "CORE_INDEX",
+    "CORE_QQQ": "CORE_INDEX",   # books opened before the XLK benchmark switch
 }
 
 DEFAULT_CONFIG = {
@@ -945,7 +951,7 @@ def run_cycle(*, regime: Dict, signals: List[Dict], prices: Dict[str, float],
 
         # ── 2. CORE SLEEVE ────────────────────────────────────────────────
         # Rebalanced at most once a day, and only outside the drift band.
-        if (tradable and not dry_run and "CORE_QQQ" in enabled
+        if (tradable and not dry_run and "CORE_INDEX" in enabled
                 and float(cfg["core_target_pct"]) > 0):
             already = conn.execute(
                 """SELECT COUNT(*) c FROM sim_decisions
@@ -986,7 +992,7 @@ def _rebalance_core(conn, cycle_id: str, cfg: Dict, prices: Dict[str, float],
     ticker = cfg["core_ticker"]
     px = float(prices.get(ticker) or 0)
     if px <= 0:
-        _log(conn, cycle_id, "SKIP", ticker=ticker, strategy="CORE_QQQ",
+        _log(conn, cycle_id, "SKIP", ticker=ticker, strategy="CORE_INDEX",
              reason="No live price for core sleeve", regime=regime_name)
         return
     book = value_book(prices, conn)
@@ -1000,7 +1006,7 @@ def _rebalance_core(conn, cycle_id: str, cfg: Dict, prices: Dict[str, float],
     band = float(cfg["core_band_pct"])
 
     if abs(drift_pct) <= band:
-        _log(conn, cycle_id, "REBALANCE", ticker=ticker, action="NONE", strategy="CORE_QQQ",
+        _log(conn, cycle_id, "REBALANCE", ticker=ticker, action="NONE", strategy="CORE_INDEX",
              reason=f"Core {current_val / equity * 100:.1f}% vs target "
                     f"{cfg['core_target_pct']:.0f}% — inside ±{band:.0f}pp band",
              regime=regime_name,
@@ -1014,11 +1020,11 @@ def _rebalance_core(conn, cycle_id: str, cfg: Dict, prices: Dict[str, float],
         buy_usd = min(need, cash_avail)
         if buy_usd < float(cfg["min_position_usd"]):
             _log(conn, cycle_id, "REBALANCE", ticker=ticker, action="NONE",
-                 strategy="CORE_QQQ",
+                 strategy="CORE_INDEX",
                  reason=f"Core underweight {drift_pct:+.1f}pp but only "
                         f"${max(0, buy_usd):,.0f} deployable", regime=regime_name)
             return
-        res = open_position(conn, ticker=ticker, strategy_id="CORE_QQQ", price=px,
+        res = open_position(conn, ticker=ticker, strategy_id="CORE_INDEX", price=px,
                             dollars=buy_usd, cfg=cfg,
                             rationale={"summary": f"Core sleeve top-up to "
                                                   f"{cfg['core_target_pct']:.0f}% target",
@@ -1026,7 +1032,7 @@ def _rebalance_core(conn, cycle_id: str, cfg: Dict, prices: Dict[str, float],
         if res:
             actions["rebalance"].append(res)
             _log(conn, cycle_id, "REBALANCE", ticker=ticker, action="BUY",
-                 strategy="CORE_QQQ",
+                 strategy="CORE_INDEX",
                  reason=f"Core {drift_pct:+.1f}pp underweight → buy ${buy_usd:,.0f}",
                  regime=regime_name, detail=res)
     else:
@@ -1041,7 +1047,7 @@ def _rebalance_core(conn, cycle_id: str, cfg: Dict, prices: Dict[str, float],
                 actions["rebalance"].append(res)
                 excess -= sell_usd
                 _log(conn, cycle_id, "REBALANCE", ticker=ticker, action="SELL",
-                     strategy="CORE_QQQ",
+                     strategy="CORE_INDEX",
                      reason=f"Core {drift_pct:+.1f}pp overweight → trim ${sell_usd:,.0f}",
                      regime=regime_name, detail=res)
 
@@ -1062,7 +1068,7 @@ def slot_size_usd(cfg: Dict, equity: float, enabled: set, size_mult: float) -> f
                       for s in enabled if STRATEGIES[s]["kind"] == "ALPHA")
     if total_slots <= 0:
         return 0.0
-    core_pct = float(cfg["core_target_pct"]) if "CORE_QQQ" in enabled else 0.0
+    core_pct = float(cfg["core_target_pct"]) if "CORE_INDEX" in enabled else 0.0
     alpha_target = equity * (100.0 - core_pct) / 100.0
     size = (alpha_target / total_slots) * size_mult
     return min(size, equity * float(cfg["max_position_pct"]) / 100.0)
