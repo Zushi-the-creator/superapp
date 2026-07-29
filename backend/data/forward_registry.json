@@ -1,0 +1,88 @@
+{
+ "protocol_version": "1.1",
+ "created": "2026-07-29",
+ "note": "Append-only pre-registration ledger. Rules frozen at registration. Editing an entry is forbidden; supersede with a new entry (name-v2). See .claude/skills/forward-test/SKILL.md",
+ "registrations": [
+  {
+   "name": "ROT10",
+   "registered": "2026-07-29",
+   "status": "CONTINUE",
+   "rule": "Monthly at month-end close, execute next open: universe = top-200 by 63d avg dollar-volume, price>=20, 12-1 momentum (c[-21]/c[-252]-1) capped <=200%; hold top-10 equal-weight. DANGER/CRISIS: freeze (hold, no rotation). No stops.",
+   "benchmark": "XLK (also track QQQ, SPY)",
+   "promotion": "beats XLK on rolling 42d return in >=55% of windows over >=126 trading days AND MDD <= 1.5x XLK MDD in the window",
+   "kill": "-20pp cumulative vs XLK at any point",
+   "context_at_registration": "registered 19 days into a momentum crash; backtest OOS +17.8pp vs QQQ (tier B, in-sample-searched); live first-19d: -13.7pp vs QQQ",
+   "rule_sha256": "1162bd55cd9ad7cb",
+   "measurement": "journal (backend/data/forward_journal/*.jsonl) \u2014 sim/tracker are corroborating only",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 4
+  },
+  {
+   "name": "MOMBRK5",
+   "registered": "2026-07-29",
+   "status": "CONTINUE",
+   "rule": "Daily: Minervini gate (px 10-200, > SMA50/150/200 stacked, within 5% of 252d high, low>252d low+30%, ret20>5%, daychg<10%, ret5<=15%), rank by 126d return, top-5, enter next open, Fixed90d exit. Only in HEALTHY/PULLBACK/DIP_BUY regimes.",
+   "benchmark": "XLK",
+   "promotion": "beats XLK on rolling 42d in >=55% of windows over >=126 td",
+   "kill": "-20pp cumulative vs XLK",
+   "rule_sha256": "25604cc6961b8571",
+   "measurement": "journal (backend/data/forward_journal/*.jsonl) \u2014 sim/tracker are corroborating only",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 4
+  },
+  {
+   "name": "MRDIP",
+   "registered": "2026-07-29",
+   "status": "CONTINUE",
+   "rule": "MR strict gate (RSI2<10, >SMA50, ATR 3-15%, buf>=5%, vol>=1x, RSI14<60, px>=10), composite-ranked top-5, next-open entry, Fixed42d exit. Deploy ONLY in DIP_BUY/SHARP_DROP/BEAR_BOUNCE. Earnings<=7d veto.",
+   "benchmark": "XLK during deployment windows",
+   "promotion": "positive mean edge vs XLK across its deployment windows, >=20 closed positions",
+   "kill": "mean edge < -2pp per deployment after 20 positions",
+   "rule_sha256": "09fdb45d198b0ea6",
+   "measurement": "journal (backend/data/forward_journal/*.jsonl) \u2014 sim/tracker are corroborating only",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 4
+  },
+  {
+   "name": "V4BLEND",
+   "registered": "2026-07-29",
+   "status": "CONTINUE",
+   "rule": "50% core (XLK) + 50% ROT10, monthly rebalance to weights; MRDIP overlay funded from core (max 2x10%); DANGER/CRISIS = no new buys, no rotation.",
+   "benchmark": "XLK",
+   "promotion": "beats XLK cumulative at >=126 td with MDD <= 1.3x XLK",
+   "kill": "-15pp cumulative vs XLK",
+   "rule_sha256": "5f0e7946fac3d55d",
+   "measurement": "journal (backend/data/forward_journal/*.jsonl) \u2014 sim/tracker are corroborating only",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 4
+  },
+  {
+   "name": "BASELINE",
+   "registered": "2026-07-29",
+   "status": "REFERENCE",
+   "rule": "Buy-hold XLK, QQQ, SPY.",
+   "benchmark": null,
+   "promotion": null,
+   "kill": null,
+   "rule_sha256": "0498d14e6fa02b80"
+  }
+ ],
+ "amendment_log": [
+  {
+   "date": "2026-07-29",
+   "change": "v1.1 same-day as registration, BEFORE first evaluation: added verdict_date/peek_dates (anti optional-stopping), measurement authority=journal, dsr_cohort_n=4 (BASELINE excluded), rule_sha256 tamper hashes. Journal begins 2026-07-28."
+  }
+ ]
+}
