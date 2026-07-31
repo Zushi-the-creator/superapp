@@ -14,6 +14,7 @@ import {
   Repeat,
   Scale,
   ShieldAlert,
+  SlidersHorizontal,
   TrendingDown,
   TrendingUp,
   X,
@@ -44,6 +45,7 @@ const DECISION_STYLE: Record<string, { icon: React.ElementType; cls: string }> =
   SKIP: { icon: Ban, cls: "text-neutral-500" },
   PAUSE: { icon: ShieldAlert, cls: "text-amber-400" },
   HOLD: { icon: Clock, cls: "text-neutral-500" },
+  CONFIG: { icon: SlidersHorizontal, cls: "text-blue-300" },
   CYCLE: { icon: Activity, cls: "text-neutral-600" },
 };
 
@@ -1004,7 +1006,7 @@ function CandidatesPanel({ state, onTraded }: { state: SimState; onTraded: () =>
 
 function Journal({ decisions }: { decisions: SimDecision[] }) {
   const [filter, setFilter] = useState<string>("ALL");
-  const kinds = ["ALL", "ENTRY", "EXIT", "MANUAL", "SWITCH", "REBALANCE", "SKIP", "PAUSE", "HOLD"];
+  const kinds = ["ALL", "ENTRY", "EXIT", "MANUAL", "SWITCH", "CONFIG", "REBALANCE", "SKIP", "PAUSE", "HOLD"];
   const rows = decisions.filter((d) => (filter === "ALL" ? d.kind !== "CYCLE" : d.kind === filter));
 
   return (

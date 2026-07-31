@@ -344,12 +344,19 @@ def get_config() -> Dict:
     return cfg
 
 
-def set_config(patch: Dict) -> Dict:
+def set_config(patch: Dict, origin: str = "MANUAL") -> Dict:
     """Update config keys. Unknown keys are ignored (no silent typo damage).
     The two per-strategy dicts are merged, not replaced, so a partial patch
-    like {"strategy_enabled": {"SWING_RSI75": 1}} leaves the rest intact."""
+    like {"strategy_enabled": {"SWING_RSI75": 1}} leaves the rest intact.
+
+    Every effective change is journalled. Policy edits change what the book
+    does for months, so "when did this sleeve get turned on, and by what?" has
+    to be answerable from the record — on 2026-07-31 MOM_FIXED90 was found
+    enabled with no way to tell what enabled it.
+    """
     _ensure()
     cur = get_config()
+    changes: Dict[str, Dict] = {}
     conn = _connect()
     try:
         for k, v in (patch or {}).items():
@@ -359,10 +366,18 @@ def set_config(patch: Dict) -> Dict:
                 merged = dict(cur[k])
                 merged.update({sk: sv for sk, sv in v.items() if sk in STRATEGIES})
                 v = merged
+            if cur.get(k) == v:
+                continue
+            changes[k] = {"from": cur.get(k), "to": v}
             conn.execute(
                 "INSERT OR REPLACE INTO sim_config (key, value) VALUES (?,?)",
                 (k, json.dumps(v)),
             )
+        if changes:
+            _log(conn, datetime.now().strftime("%Y%m%d-%H%M%S"), "CONFIG",
+                 origin=origin, action="NONE",
+                 reason="Policy changed: " + ", ".join(sorted(changes)),
+                 detail=changes)
         conn.commit()
     finally:
         conn.close()

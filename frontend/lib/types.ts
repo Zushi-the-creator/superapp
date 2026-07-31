@@ -807,7 +807,7 @@ export interface SimDecision {
   id: number;
   ts: string;
   cycle_id: string;
-  kind: "CYCLE" | "ENTRY" | "EXIT" | "HOLD" | "SKIP" | "REBALANCE" | "PAUSE" | "SWITCH" | "MANUAL";
+  kind: "CYCLE" | "ENTRY" | "EXIT" | "HOLD" | "SKIP" | "REBALANCE" | "PAUSE" | "SWITCH" | "MANUAL" | "CONFIG";
   ticker: string;
   action: string;
   strategy: string;
