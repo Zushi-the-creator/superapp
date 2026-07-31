@@ -2,6 +2,11 @@
 Slot-limited N=5, next-open entry, fee 0.3%+slip 0.05%/side stocks (0.05%+slip ETFs),
 IS 2016-06->2022-12 / OOS 2023-01->2026-07, delisting haircut -30% when a ticker's
 series ends >10d before cache end (mitigates ffill flat-line bias)."""
+# NOTE: every rolling() below carries min_periods. A bare rolling(N) lets ONE NaN
+# bar poison the next N outputs; comparisons against NaN are False, so signal
+# gates silently drop tickers instead of erroring. 127 tickers have interior gaps
+# (4,952 cells). Fixing this moved MIX9-SPY OOS MDD -24.1% -> -18.8%, Sharpe
+# 1.61 -> 1.76. See feedback_nan_poison_rolling in memory.
 import sqlite3, numpy as np, pandas as pd
 TRADES=[0]
 TRADELOG=[]
@@ -19,17 +24,17 @@ V=df.pivot(index='date',columns='ticker',values='volume').astype('float32')
 del df
 dates=C.index.tolist(); ND=len(dates)
 last_valid=C.apply(lambda s: s.last_valid_index()).map(lambda d: dates.index(d) if d is not None else -1).values
-sma50=C.rolling(50).mean();sma150=C.rolling(150).mean();sma200=C.rolling(200).mean()
+sma50=C.rolling(50,min_periods=45).mean();sma150=C.rolling(150,min_periods=135).mean();sma200=C.rolling(200,min_periods=180).mean()
 d1=C.diff();g=d1.clip(lower=0);l=(-d1).clip(lower=0)
 def rsi(p):
     a=g.ewm(alpha=1/p,adjust=False,min_periods=p*3).mean();b=l.ewm(alpha=1/p,adjust=False,min_periods=p*3).mean()
     return 100-100/(1+a/b.replace(0,np.nan))
 rsi2=rsi(2);rsi14=rsi(14);pc=C.shift(1)
 TR=pd.concat([H-L,(H-pc).abs(),(L-pc).abs()]).groupby(level=0).max().reindex(C.index)
-atrp=TR.rolling(14).mean()/C*100;vr=V/V.rolling(20).mean()
+atrp=TR.rolling(14,min_periods=12).mean()/C*100;vr=V/V.rolling(20,min_periods=18).mean()
 r20=C.pct_change(20,fill_method=None)*100;r5=C.pct_change(5,fill_method=None)*100
 r126=C.pct_change(126,fill_method=None)*100;d1p=C.pct_change(1,fill_method=None)*100
-hi=C.rolling(252).max();lo=C.rolling(252).min();buf=(C/sma50-1)*100
+hi=C.rolling(252,min_periods=200).max();lo=C.rolling(252,min_periods=200).min();buf=(C/sma50-1)*100
 mrg=((C>sma50)&(atrp>=3)&(atrp<15)&(buf>=5)&(vr>=1.0)&(rsi2<10)&(rsi14<60)&(C>=10)).values
 a_=atrp.values;r2v=rsi2.values;r20v=r20.values;vrv=vr.values;bfv=buf.values;pv=C.values
 ap=np.select([a_>=15,a_>=10,a_>=8,a_>=6,a_>=5,a_>=4,a_>=3],[-5,35,40,35,30,20,15],default=0)
