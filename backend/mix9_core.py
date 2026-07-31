@@ -76,10 +76,11 @@ class Mix9Data:
         # volume's stock_cache.db has no ticker_quarantine table, and an empty
         # quarantine silently WIDENS the universe — different selector picks,
         # different component curves, different DD-stop. Same failure mode as the
-        # VIX gap. Ship the list as tracked data and treat the DB as a top-up.
+        # VIX gap. Ship the list in mix9_data/ (NOT data/, which the Fly volume
+        # mount shadows) and treat the DB table as a top-up when present.
         quar = set()
         try:
-            with open(os.path.join(HERE, 'data', 'ticker_quarantine.csv')) as fh:
+            with open(os.path.join(HERE, 'mix9_data', 'ticker_quarantine.csv')) as fh:
                 quar = {ln.strip() for ln in fh if ln.strip() and ln.strip() != 'ticker'}
         except FileNotFoundError:
             pass
@@ -177,7 +178,7 @@ class Mix9Data:
         # up from the cache DB for any recent bars the file predates.
         vixmap = {}
         for path in ([vix_csv] if vix_csv else
-                     [os.path.join(HERE, 'data', 'vix.csv'), '/tmp/vix.csv']):
+                     [os.path.join(HERE, 'mix9_data', 'vix.csv'), '/tmp/vix.csv']):
             try:
                 for row in csv.reader(open(path)):
                     try: vixmap[row[0]] = float(row[1])
