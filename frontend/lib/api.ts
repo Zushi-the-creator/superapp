@@ -16,6 +16,7 @@ import type {
   SimHistoryResponse,
   SimConfig,
   SimCandidatesResponse,
+  Mix9State,
 } from "./types";
 
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
@@ -111,6 +112,10 @@ export const api = {
   getDataStatus: () => fetchJson<DataStatus>("/api/v2/data/status"),
 
   // ── Simulator ($100k autonomous multi-strategy paper book) ──
+  // MIX9 engine
+  getMix9State: () => fetchJson<Mix9State>("/api/v2/mix9/state"),
+  runMix9: () => fetchJson<Mix9State>("/api/v2/mix9/run", { method: "POST" }),
+
   getSimState: () => fetchJson<SimState>("/api/v2/sim/state"),
   getSimDecisions: (limit = 150, kinds = "") =>
     fetchJson<{ decisions: SimDecision[] }>(

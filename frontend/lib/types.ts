@@ -672,7 +672,7 @@ export interface CombinedResponse {
   cache_age_min?: number;
 }
 
-export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors" | "sim" | "mix9";
+export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors" | "sim";
 
 // ── Simulator ($100k autonomous multi-strategy paper book) ──
 export interface SimPosition {
@@ -882,4 +882,23 @@ export interface SimHistoryResponse {
     reason: string;
   }>;
   stats: SimStats;
+}
+
+
+// ── MIX9 engine ──
+export interface Mix9Pick { ticker: string; target_usd: number; price: number; shares: number }
+export interface Mix9Trade {
+  ticker: string; side: string; usd: number; current_usd: number; target_usd: number;
+}
+export interface Mix9State {
+  pending?: boolean; message?: string; computed_at?: string;
+  target?: {
+    asof: string; regime: string; active_strategy: string; dd_pct: number;
+    dd_stop_pct: number; parked: boolean; equity_usd: number; sleeve_usd: number;
+    core: { ticker: string; target_usd: number; price: number; shares: number };
+    sleeve: Mix9Pick[]; preview_sleeve?: Mix9Pick[];
+    components: Record<string, { dd_pct: number; parked: boolean }>;
+  };
+  trades?: Mix9Trade[];
+  engine?: { core_ticker: string; enabled: boolean; dd_stop_pct: number; note: string };
 }

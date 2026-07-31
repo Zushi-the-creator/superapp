@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { API_BASE } from "@/lib/api";
+import { api } from "@/lib/api";
+import type { Mix9State } from "@/lib/types";
 
 /** MIX9 — the live entry/exit engine (regime-switching, 30% XLK core).
  *
@@ -11,20 +12,6 @@ import { API_BASE } from "@/lib/api";
  * -15% threshold — and says plainly which state it is in.
  */
 
-interface Pick { ticker: string; target_usd: number; price: number; shares: number }
-interface Trade { ticker: string; side: string; usd: number; current_usd: number; target_usd: number }
-interface Mix9State {
-  pending?: boolean; message?: string; computed_at?: string;
-  target?: {
-    asof: string; regime: string; active_strategy: string; dd_pct: number;
-    dd_stop_pct: number; parked: boolean; equity_usd: number; sleeve_usd: number;
-    core: { ticker: string; target_usd: number; price: number; shares: number };
-    sleeve: Pick[]; preview_sleeve?: Pick[];
-    components: Record<string, { dd_pct: number; parked: boolean }>;
-  };
-  trades?: Trade[];
-  engine?: { core_ticker: string; enabled: boolean; dd_stop_pct: number; note: string };
-}
 
 const money = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
@@ -35,8 +22,7 @@ export function Mix9Tab() {
 
   const load = () => {
     setLoading(true);
-    fetch(`${API_BASE}/api/v2/mix9/state`)
-      .then(r => r.json())
+    api.getMix9State()
       .then(d => { setS(d); setErr(null); })
       .catch(e => setErr(String(e)))
       .finally(() => setLoading(false));
@@ -70,7 +56,7 @@ export function Mix9Tab() {
       {/* header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-neutral-100">MIX9 Engine</h1>
+          <h1 className="text-xl font-semibold text-neutral-100">Entries — MIX9</h1>
           <p className="text-sm text-neutral-400">
             {t.asof} · regime <span className="text-neutral-200">{t.regime}</span> →{" "}
             <span className="text-neutral-200">{t.active_strategy}</span>

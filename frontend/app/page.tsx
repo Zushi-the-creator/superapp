@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { DataStatusBar } from "@/components/layout/DataStatusBar";
 import { PortfolioTab } from "@/components/dashboard/PortfolioTab";
-import { OpportunitiesTab } from "@/components/dashboard/OpportunitiesTab";
 import { TradeTab } from "@/components/dashboard/TradeTab";
 import { PerformanceTab } from "@/components/dashboard/PerformanceTab";
 import { HistoryTab } from "@/components/dashboard/HistoryTab";
@@ -26,12 +25,13 @@ export default function DashboardPage() {
         <DataStatusBar />
         <main className="flex-1 overflow-hidden">
           {activeTab === "portfolio" && <PortfolioTab />}
-          {activeTab === "opportunities" && <OpportunitiesTab />}
+          {/* Entries IS MIX9 now — the MR scanner it used to show was retired
+              (PROD V3.6 ranked 32/32, -1.9% OOS). One engine, one view. */}
+          {activeTab === "opportunities" && <Mix9Tab />}
           {activeTab === "trade" && <TradeTab />}
           {activeTab === "performance" && <PerformanceTab />}
           {activeTab === "sectors" && <SectorsTab />}
           {activeTab === "sim" && <SimTab />}
-          {activeTab === "mix9" && <Mix9Tab />}
           {activeTab === "history" && <HistoryTab />}
         </main>
       </div>
