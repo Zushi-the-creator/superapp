@@ -826,6 +826,21 @@ def _matches_source(sig: Dict, strategy_id: str) -> Tuple[bool, str]:
 # Exits
 # ──────────────────────────────────────────────────────────────────────────
 
+def earnings_block(ticker: str, earnings: Optional[Dict]) -> str:
+    """Binary-event guard. Used BOTH as an exit and as an entry veto.
+
+    Entry and exit must agree on this, or the book churns: before 2026-07-31 the
+    rotation sleeve bought straight off the 12-1 ranking without an earnings
+    check while the exit pass sold on earnings <=7d, so AMD/SNDK were sold and
+    re-bought every single cycle — 26 round trips in two days, pure fee bleed.
+    """
+    e = (earnings or {}).get(ticker) or {}
+    dt = e.get("days_to")
+    if dt is not None and 0 <= dt <= 7:
+        return f"Earnings in {dt}d — binary event risk"
+    return ""
+
+
 def _exit_check(pos: Dict, *, today: str, earnings: Dict, sentiment: Dict,
                 technicals: Dict, rotation_target: Optional[List[str]]) -> Tuple[bool, str]:
     """Per-strategy exit rule plus the two universal exits.
@@ -837,12 +852,13 @@ def _exit_check(pos: Dict, *, today: str, earnings: Dict, sentiment: Dict,
     held = days_held(pos, today)
 
     # Universal exit 1: binary event risk
-    e = (earnings or {}).get(ticker) or {}
-    dt = e.get("days_to")
-    if dt is not None and 0 <= dt <= 7:
-        return True, f"Earnings in {dt}d — binary event risk"
+    blocked = earnings_block(ticker, earnings)
+    if blocked:
+        return True, blocked
 
-    # Universal exit 2: stock-specific bad news (NOT market-wide noise)
+    # Universal exit 2: stock-specific bad news (NOT market-wide noise).
+    # Deliberately NOT mirrored as an entry veto — sentiment vetoes on entry
+    # were tested at -0.43% edge and removed (feedback_veto_rules).
     s = (sentiment or {}).get(ticker) or {}
     label = (s.get("sentiment_label") or "").upper()
     if label in ("NEGATIVE", "VERY_NEGATIVE") and float(s.get("sentiment_score") or 0) < -0.3:
@@ -970,7 +986,7 @@ def run_cycle(*, regime: Dict, signals: List[Dict], prices: Dict[str, float],
                  regime=regime_name)
         else:
             _run_entries(conn, cycle_id, cfg, regime, signals, prices, sectors or {},
-                         enabled, rot_target, actions, dry_run)
+                         enabled, rot_target, earnings or {}, actions, dry_run)
             if cfg.get("rotation_enabled") and not dry_run:
                 _run_rotation(conn, cycle_id, cfg, regime, signals, prices,
                               enabled, actions)
@@ -1076,7 +1092,8 @@ def slot_size_usd(cfg: Dict, equity: float, enabled: set, size_mult: float) -> f
 
 def _run_entries(conn, cycle_id: str, cfg: Dict, regime: Dict, signals: List[Dict],
                  prices: Dict[str, float], sectors: Dict, enabled: set,
-                 rot_target: Optional[List[str]], actions: Dict, dry_run: bool) -> None:
+                 rot_target: Optional[List[str]], earnings: Dict, actions: Dict,
+                 dry_run: bool) -> None:
     regime_name = regime.get("regime", "UNKNOWN")
     size_mult = float(regime.get("position_size_pct", 100)) / 100.0
     sector_of = _sector_normalizer(sectors)
@@ -1115,7 +1132,7 @@ def _run_entries(conn, cycle_id: str, cfg: Dict, regime: Dict, signals: List[Dic
 
         if strat["source"] == "ROTATION":
             _run_rotation_sleeve(conn, cycle_id, cfg, regime_name, sid, rot_target,
-                                 prices, held, slot_usd, actions, dry_run)
+                                 prices, held, slot_usd, earnings, actions, dry_run)
             continue
 
         opened = 0
@@ -1140,7 +1157,7 @@ def _run_entries(conn, cycle_id: str, cfg: Dict, regime: Dict, signals: List[Dic
                      strategy=sid, reason="Not Phase-3 validated (no analyst/sentiment data)",
                      regime=regime_name)
                 continue
-            veto = _entry_veto(sig, cfg)
+            veto = _entry_veto(sig, cfg) or earnings_block(ticker, earnings)
             if veto:
                 _log(conn, cycle_id, "SKIP", ticker=ticker, composite=composite,
                      strategy=sid, reason=f"VETO: {veto}", regime=regime_name,
@@ -1223,16 +1240,27 @@ def _build_rationale(sig: Dict, sid: str, composite: float, regime: Dict,
 
 def _run_rotation_sleeve(conn, cycle_id: str, cfg: Dict, regime_name: str, sid: str,
                          rot_target: Optional[List[str]], prices: Dict[str, float],
-                         held: set, slot_usd: float, actions: Dict,
+                         held: set, slot_usd: float, earnings: Dict, actions: Dict,
                          dry_run: bool) -> None:
     """Monthly 12-1 momentum sleeve: buy into whatever the ranking says is missing.
-    Exits are handled by the `monthly_rank` exit rule in the exit pass."""
+    Exits are handled by the `monthly_rank` exit rule in the exit pass.
+
+    This sleeve bypasses the signal pipeline (it buys straight off the ranking),
+    so the earnings veto that validate_top_signals applies to signal-sourced
+    entries has to be re-applied here explicitly — otherwise it fights the
+    earnings exit and churns the same name every cycle.
+    """
     if not rot_target:
         _log(conn, cycle_id, "SKIP", strategy=sid, regime=regime_name,
              reason="No 12-1 momentum ranking available this cycle")
         return
     for ticker in rot_target:
         if ticker in held:
+            continue
+        blocked = earnings_block(ticker, earnings)
+        if blocked:
+            _log(conn, cycle_id, "SKIP", ticker=ticker, strategy=sid, regime=regime_name,
+                 reason=f"VETO: {blocked}")
             continue
         px = float(prices.get(ticker) or 0)
         if px <= 0:

@@ -7420,10 +7420,16 @@ async def _sim_gather_inputs(need_signals: bool = True) -> Dict:
 
     prices = await _sim_prices(held + cand + rotation_ranks)
 
+    # Earnings must cover CANDIDATES as well as holdings. The engine uses the
+    # same <=7d rule to veto an entry and to force an exit; if the entry side
+    # can't see the date it re-buys whatever the exit side just sold (the
+    # AMD/SNDK churn loop, 2026-07-31). Rotation names especially — they never
+    # pass through validate_top_signals, so this is their only earnings check.
+    earn_universe = list({*held, *rotation_ranks, *cand[:25]})
     earnings: Dict = {}
-    if held:
+    if earn_universe:
         try:
-            earnings = await _portfolio_next_earnings_cached(held)
+            earnings = await _portfolio_next_earnings_cached(earn_universe)
         except Exception as e:
             print(f"[Sim] earnings fetch error: {e}")
 
@@ -7571,7 +7577,7 @@ async def sim_candidates(limit: int = 40):
     out = []
     for s in ranked:
         t = s.get("ticker", "")
-        veto = _sim._entry_veto(s, cfg)
+        veto = _sim._entry_veto(s, cfg) or _sim.earnings_block(t, inp["earnings"])
         validated = _sim._is_validated(s)
         eligible = []
         for sid in enabled:
