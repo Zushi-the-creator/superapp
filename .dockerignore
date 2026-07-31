@@ -12,7 +12,12 @@ ralph/
 client/
 data/
 claude-scientific-skills/
-# stock_cache.db included — seeds Fly.io volume with 10yr data on cold deploy
+# stock_cache.db EXCLUDED 2026-07-31. It is 753MB and the Fly volume mounts over
+# /app/data, so the copy in the image is shadowed at runtime and never read — it
+# only ever seeded a COLD volume. Shipping it re-pushed 753MB on every deploy and
+# was timing the deploy out. If the volume is ever recreated from scratch, either
+# temporarily remove this line for one deploy or let the app refetch from Tiingo.
+backend/data/stock_cache.db
 backend/data/stock_cache.db-shm
 backend/data/stock_cache.db-wal
 backend/data/historical.db
