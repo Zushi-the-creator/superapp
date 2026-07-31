@@ -7182,19 +7182,25 @@ async def signal_tracker_loop():
                 try:
                     updated = await asyncio.to_thread(_stu.backfill_returns)
                     print(f"[SignalTracker] Backfilled forward returns on {updated} rows")
-                    # Forward-test journal (2026-07-29): record registered
-                    # rosters' picks at the latest completed bar — the
-                    # authoritative evidence stream for /forward-test verdicts.
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "python3", os.path.join(os.path.dirname(__file__), "forward_journal.py"),
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-                        out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
-                        print(f"[ForwardJournal] {out.decode()[-300:].strip()}")
-                    except Exception as _fj_err:
-                        print(f"[ForwardJournal] error: {_fj_err}")
                 except Exception as _e:
                     print(f"[SignalTracker] Backfill error: {_e}")
+
+                # Forward-test journal (2026-07-29): record registered rosters'
+                # picks at the latest completed bar — the authoritative evidence
+                # stream for /forward-test verdicts.
+                # MUST be its own try-block, NOT nested inside the backfill one:
+                # a missed night is an unrecoverable hole in the ledger (the
+                # protocol forbids retro-reconstruction), so the journal cannot
+                # be made a dependent of backfill_returns succeeding. That
+                # coupling is what lost the 2026-07-29 observation.
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "python3", os.path.join(os.path.dirname(__file__), "forward_journal.py"),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+                    print(f"[ForwardJournal] {out.decode()[-300:].strip()}")
+                except Exception as _fj_err:
+                    print(f"[ForwardJournal] error: {_fj_err}")
             else:
                 print(f"[SignalTracker] ET {_et_hour}:00 — outside snapshot window, skipping")
         except Exception as e:

@@ -34,7 +34,8 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 9
+   "dsr_cohort_n": 9,
+   "context_at_registration": "registered 2026-07-29 from tier-B backtest (56.4% WR / +4.62% OOS per trade at Fixed90d); no live track record at registration. Retro-added 2026-07-31 during full QA \u2014 field was introduced in protocol v1.1 after these three were written."
   },
   {
    "name": "MRDIP",
@@ -50,7 +51,8 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 9
+   "dsr_cohort_n": 9,
+   "context_at_registration": "registered 2026-07-29 as the dips-only variant of the deployed MR sleeve; backtest OOS 8.2% CAGR / Sharpe 0.42, the weakest candidate registered. Retro-added 2026-07-31 during full QA."
   },
   {
    "name": "V4BLEND",
@@ -66,7 +68,8 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 9
+   "dsr_cohort_n": 9,
+   "context_at_registration": "registered 2026-07-29 as a blended sleeve over the same candidate pool; no independent walk-forward at registration. Retro-added 2026-07-31 during full QA."
   },
   {
    "name": "BASELINE",
@@ -76,7 +79,14 @@
    "benchmark": null,
    "promotion": null,
    "kill": null,
-   "rule_sha256": "0498d14e6fa02b80"
+   "rule_sha256": "0498d14e6fa02b80",
+   "measurement": "journal (backend/data/forward_journal/BASELINE.jsonl)",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": null,
+   "note": "REFERENCE arm: no promotion/kill bar by design, and excluded from the DSR cohort count. Present so every candidate is scored against a contemporaneously-journalled passive benchmark rather than a retro-computed one."
   },
   {
    "name": "HYB21",
@@ -167,6 +177,10 @@
   {
    "date": "2026-07-31",
    "change": "MIX9 registered (9th roster) \u2014 best OOS Sharpe found (1.41) but DSR 0.680 FAIL; double selection bias documented. dsr_cohort_n -> 9."
+  },
+  {
+   "date": "2026-07-31",
+   "change": "FULL QA. (1) DATA-INTEGRITY DEFECT, harness-only: _master_harness3.py and forward_journal.py computed regime inputs with STRICT rolling windows; one NaN SPY bar (2026-02-16 holiday row) poisoned the next 252/200/50 bars, every NaN comparison returned False, and the regime chain fell through to HEALTHY/SHARP_DROP on the 5d return alone. 37 of 145 2026 days (26%) mislabelled \u2014 the Mar 26-30 DANGER episode (SPY -9.1%, VIX 30.6) read HEALTHY. 2017-2025 unaffected (0 NaN days). PROD _check_market_regime was NEVER affected (it uses dropna + min(252,len)) and is verified matching. Fixed via ffill + min_periods in both files; VIX gaps now carry forward instead of reading 0 (which silently disabled the CRISIS/FEAR branches). Result impact: <=1.5pp on 2026 YTD, <=0.4pp on OOS CAGR, rankings unchanged. (2) MISSING OBSERVATION: no journal row exists for 2026-07-29 \u2014 the journal call was nested inside the signal-tracker backfill try-block, so a backfill error skipped it. NOT backfilled: the protocol forbids retro-reconstruction, so this stands as a permanent hole in the ledger. Coupling fixed in api_v2.py (journal now has its own try-block). (3) METADATA: context_at_registration retro-added to MOMBRK5/MRDIP/V4BLEND (field postdates them); BASELINE given measurement/verdict_date/peek_dates and an explicit REFERENCE-arm note. NO rule text or rule_sha256 was touched \u2014 all 9 hashes re-verified intact."
   }
  ]
 }

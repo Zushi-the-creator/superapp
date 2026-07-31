@@ -20,7 +20,7 @@ L=df.pivot(index='date',columns='ticker',values='low').astype('float64')
 V=df.pivot(index='date',columns='ticker',values='volume').astype('float64')
 dates=C.index.tolist(); T=len(dates)-1; ASOF=dates[T]
 # indicators at ASOF (point-in-time by construction: only bars <= ASOF loaded)
-sma50=C.rolling(50,min_periods=45).mean(); sma150=C.rolling(150).mean(); sma200=C.rolling(200,min_periods=180).mean()
+sma50=C.rolling(50,min_periods=45).mean(); sma150=C.rolling(150,min_periods=135).mean(); sma200=C.rolling(200,min_periods=180).mean()
 d1=C.diff();g=d1.clip(lower=0);l=(-d1).clip(lower=0)
 rsi2=100-100/(1+g.ewm(alpha=.5,adjust=False,min_periods=6).mean()/l.ewm(alpha=.5,adjust=False,min_periods=6).mean().replace(0,np.nan))
 rsi14=100-100/(1+g.ewm(alpha=1/14,adjust=False,min_periods=42).mean()/l.ewm(alpha=1/14,adjust=False,min_periods=42).mean().replace(0,np.nan))
@@ -28,7 +28,7 @@ pc=C.shift(1)
 TR=pd.concat([H-L,(H-pc).abs(),(L-pc).abs()]).groupby(level=0).max().reindex(C.index)
 atrp=TR.rolling(14,min_periods=12).mean()/C*100; vr=V/V.rolling(20,min_periods=18).mean()
 r20=C.pct_change(20,fill_method=None)*100; r5=C.pct_change(5,fill_method=None)*100
-hi=C.rolling(252,min_periods=200).max(); lo=C.rolling(252).min(); buf=(C/sma50-1)*100
+hi=C.rolling(252,min_periods=200).max(); lo=C.rolling(252,min_periods=200).min(); buf=(C/sma50-1)*100
 dv=(C*V).rolling(63,min_periods=55).mean()
 # long history for 12-1 momentum
 CL=pd.read_sql_query("SELECT ticker,date,close FROM daily_prices WHERE date>='2024-01-01'",con)
@@ -40,12 +40,22 @@ try:
     vixmap={r[0]:float(r[1]) for r in csv.reader(open('/tmp/vix.csv')) if r and r[1].replace('.','',1).isdigit()}
 except FileNotFoundError:
     vixmap={}
-spy=C['SPY']
-ddn=(spy.iloc[T]/spy.rolling(252).max().iloc[T]-1)*100
-g200=(spy.iloc[T]/spy.rolling(200).mean().iloc[T]-1)*100
-g50=(spy.iloc[T]/spy.rolling(50).mean().iloc[T]-1)*100
+# Prod `_check_market_regime` calls spy_df["Close"].dropna() then min(252,len).
+# A strict rolling window does NOT match that: one NaN SPY bar (holiday row)
+# poisons the next 252/200/50 bars, every NaN comparison is False, and the
+# chain below silently falls through to HEALTHY on the 5d return alone.
+# ffill (= prod's dropna) + min_periods. Same fix as _master_harness3.py.
+spy=C['SPY'].ffill()
+ddn=(spy.iloc[T]/spy.rolling(252,min_periods=20).max().iloc[T]-1)*100
+g200=(spy.iloc[T]/spy.rolling(200,min_periods=20).mean().iloc[T]-1)*100
+g50=(spy.iloc[T]/spy.rolling(50,min_periods=10).mean().iloc[T]-1)*100
 r5s=(spy.iloc[T]/spy.iloc[T-5]-1)*100
+# VIX: fall back to the most recent available close rather than 0, which would
+# silently disable the CRISIS (>40) and FEAR (>30) branches.
 vix=vixmap.get(ASOF,0)
+if vix<=0:
+    for _d in sorted((d for d in vixmap if d<=ASOF), reverse=True)[:10]:
+        if vixmap[_d]>0: vix=vixmap[_d]; break
 if -15<=ddn<=-7: REGIME='DANGER'
 elif vix>40: REGIME='CRISIS'
 elif -2<g200<0: REGIME='WEAK'

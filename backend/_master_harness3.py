@@ -50,8 +50,22 @@ for row in csv.reader(open('/tmp/vix.csv')):
     try: VIXM[row[0]]=float(row[1])
     except Exception: pass
 VIXA=np.array([VIXM.get(d,0.0) for d in dates])
-spy=C['SPY'];dd=((spy/spy.rolling(252).max())-1)*100;g2=((spy/spy.rolling(200).mean())-1)*100
-g5=((spy/spy.rolling(50).mean())-1)*100;sr5=spy.pct_change(5,fill_method=None)*100
+# VIX gaps: prod reads the last cached close, so carry the previous value forward
+# rather than letting a missing row read as 0 (which silently disables CRISIS/FEAR).
+for _i in range(1,len(VIXA)):
+    if VIXA[_i]<=0: VIXA[_i]=VIXA[_i-1]
+# REGIME INPUTS — must mirror prod `_check_market_regime`, which calls
+# spy_df["Close"].dropna() and then min(252, len(closes)). A STRICT rolling
+# window here does not: one NaN SPY bar (e.g. the 2026-02-16 holiday row)
+# poisons the next 252/200/50 bars, every comparison against NaN returns False,
+# and the regime chain falls through to HEALTHY/SHARP_DROP on the 5d return
+# alone. That mislabelled 26% of 2026 — the March -9.1% drawdown read HEALTHY
+# instead of DANGER. Fix: ffill the close (= prod's dropna) + min_periods.
+spy=C['SPY'].ffill()
+dd=((spy/spy.rolling(252,min_periods=20).max())-1)*100
+g2=((spy/spy.rolling(200,min_periods=20).mean())-1)*100
+g5=((spy/spy.rolling(50,min_periods=10).mean())-1)*100
+sr5=spy.pct_change(5,fill_method=None)*100
 ddv=dd.values;g2v=g2.values;g5v=g5.values;sr5v=sr5.values
 def REGf(i):
     d,gg,g5x,rr=ddv[i],g2v[i],g5v[i],sr5v[i]
