@@ -13,10 +13,12 @@ WHAT MIX9 IS (frozen rule, forward registry roster 9):
   own equity is >15% below its running peak, its 70% sleeve sits in the core
   until that strategy recovers. No position-level stops.
 
-DEPLOY VARIANT: core = SPY (chosen 2026-07-31). The registered roster-9 variant
-uses XLK; SPY was selected for a better Sharpe (1.76 vs 1.66) and much shallower
-OOS drawdown (-18.8% vs -25.7%), and because an XLK core makes the ballast 100%
-tech — the same thing the sleeve is exposed to in a tech selloff.
+DEPLOY VARIANT: core = XLK (chosen 2026-07-31), which MATCHES the registered
+roster-9 rule. XLK core was picked over SPY for compounding: it wins 7/10
+calendar years and turns $19,511 into $982K vs $737K over the decade. The
+accepted costs are a worse 2022 (-27.4% vs -17.7%), a deeper OOS drawdown
+(-25.7% vs -18.8%) and a lower luck-adjusted score (DSR@40 0.826 vs 0.869).
+The ballast being 100% tech is a known, deliberate concentration.
 
 DD-STOP STATE IS RECOMPUTED FROM INCEPTION ON EVERY RUN, never persisted.
 Persisting it would let live state drift away from what the backtest produces;

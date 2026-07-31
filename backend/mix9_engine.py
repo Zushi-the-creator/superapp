@@ -1,4 +1,4 @@
-"""MIX9 ENGINE — live entry/exit engine. Deployed variant: SPY core.
+"""MIX9 ENGINE — live entry/exit engine. Deployed variant: XLK core.
 
 Imports mix9_core (proven byte-identical to the backtest by _mix9_equiv_test.py),
 adds the pieces a live book needs that a backtest does not:
@@ -16,7 +16,7 @@ WHAT IT DOES EACH RUN
   2. look up the frozen regime -> strategy map
   3. recompute all 7 component equity curves; check whether the ACTIVE one is
      >15% below its own running peak
-  4. if it is -> the 70% sleeve parks in the core (SPY), else it holds the
+  4. if it is -> the 70% sleeve parks in the core (XLK), else it holds the
      active strategy's top-10
   5. build the dollar target: 30% core + 70% sleeve
   6. emit the trade list to reach it (only on month-end, or on a DD-stop flip)
@@ -36,7 +36,16 @@ from mix9_core import (Mix9Data, REGMAP, STRATEGIES, DD_STOP, CORE_WEIGHT,
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, 'data', 'mix9.db')
 
-CORE_TICKER = 'SPY'          # deploy variant (see mix9_core docstring)
+# DEPLOY VARIANT: XLK core (user decision 2026-07-31, after a head-to-head test).
+# XLK core beat SPY core in 7/10 calendar years and compounds $19,511 -> $982K vs
+# $737K over the decade. The cost is real and was accepted knowingly: 2022 was
+# -27.4% vs -17.7%, OOS MDD -25.7% vs -18.8%, and DSR@40 0.826 vs 0.869.
+# NOTE the ETF gap does NOT transmit proportionally — XLK-the-ETF beats SPY by
+# 13-15pp over recent windows, but MIX9-XLK beats MIX9-SPY by only ~2pp (and
+# LOSES by 4.6pp over the last 12 months), because the core is just 30% of the
+# book and is bypassed entirely whenever the sleeve is active.
+# This matches the registered roster-9 rule, which also specifies an XLK core.
+CORE_TICKER = 'XLK'
 MIN_POSITION_USD = 300.0     # below this a slot is not worth a fill
 REBALANCE_DRIFT_PCT = 25.0   # off-cycle correction only if a leg drifts this far
 
