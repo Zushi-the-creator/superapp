@@ -20,16 +20,16 @@ L=df.pivot(index='date',columns='ticker',values='low').astype('float64')
 V=df.pivot(index='date',columns='ticker',values='volume').astype('float64')
 dates=C.index.tolist(); T=len(dates)-1; ASOF=dates[T]
 # indicators at ASOF (point-in-time by construction: only bars <= ASOF loaded)
-sma50=C.rolling(50).mean(); sma150=C.rolling(150).mean(); sma200=C.rolling(200).mean()
+sma50=C.rolling(50,min_periods=45).mean(); sma150=C.rolling(150).mean(); sma200=C.rolling(200,min_periods=180).mean()
 d1=C.diff();g=d1.clip(lower=0);l=(-d1).clip(lower=0)
 rsi2=100-100/(1+g.ewm(alpha=.5,adjust=False,min_periods=6).mean()/l.ewm(alpha=.5,adjust=False,min_periods=6).mean().replace(0,np.nan))
 rsi14=100-100/(1+g.ewm(alpha=1/14,adjust=False,min_periods=42).mean()/l.ewm(alpha=1/14,adjust=False,min_periods=42).mean().replace(0,np.nan))
 pc=C.shift(1)
 TR=pd.concat([H-L,(H-pc).abs(),(L-pc).abs()]).groupby(level=0).max().reindex(C.index)
-atrp=TR.rolling(14).mean()/C*100; vr=V/V.rolling(20).mean()
+atrp=TR.rolling(14,min_periods=12).mean()/C*100; vr=V/V.rolling(20,min_periods=18).mean()
 r20=C.pct_change(20,fill_method=None)*100; r5=C.pct_change(5,fill_method=None)*100
-hi=C.rolling(252).max(); lo=C.rolling(252).min(); buf=(C/sma50-1)*100
-dv=(C*V).rolling(63).mean()
+hi=C.rolling(252,min_periods=200).max(); lo=C.rolling(252).min(); buf=(C/sma50-1)*100
+dv=(C*V).rolling(63,min_periods=55).mean()
 # long history for 12-1 momentum
 CL=pd.read_sql_query("SELECT ticker,date,close FROM daily_prices WHERE date>='2024-01-01'",con)
 CL=CL[~CL.ticker.isin(quar)&~CL.ticker.str.endswith('USD')&(CL.ticker!='VIX')]
@@ -94,6 +94,17 @@ def hyb21_picks():
     gate=(C.iloc[i]>sma50.iloc[i])&(atrp.iloc[i]>=3)&(atrp.iloc[i]<15)&(buf.iloc[i]>=5)&(vr.iloc[i]>=1.0)&(rsi2.iloc[i]<10)&(rsi14.iloc[i]<60)&(C.iloc[i]>=10)
     picks=atrp.iloc[i][gate.fillna(False)].nlargest(5)
     return [{'ticker':t,'rank':k+1,'atr_pct':round(float(v),2),'px_at_signal':round(float(C.iloc[i][t]),2)} for k,(t,v) in enumerate(picks.items())]
+def trend10_picks():
+    i=T; j=i
+    dvv=dv.iloc[j]; px=C.iloc[j]
+    sma200=C.rolling(200,min_periods=180).mean().iloc[j]; sma50v=C.rolling(50,min_periods=45).mean().iloc[j]
+    hi252=C.rolling(252,min_periods=200).max().iloc[j]; r126v=(C.iloc[j]/C.iloc[j-126]-1) if j>=126 else None
+    if r126v is None: return []
+    ok=(px>=15)&dvv.notna()&(dvv>3e6)&px.notna()&sma200.notna()&(px>sma200)&(px>sma50v)&hi252.notna()&((px/hi252)>0.90)&r126v.notna()
+    cand=dvv[ok.fillna(False)].nlargest(300).index
+    picks=r126v[cand].nlargest(10)
+    return [{'ticker':t,'rank':k+1,'r126':round(float(v),4),'px_at_signal':round(float(px[t]),2),
+             'pct_of_52wk_high':round(float(px[t]/hi252[t]),3)} for k,(t,v) in enumerate(picks.items())]
 def baseline():
     out={}
     for t in ('XLK','QQQ','SPY'):
@@ -119,5 +130,6 @@ append('MOMBRK5',{'picks':mombrk5_picks()})
 append('MRDIP',{'picks':mrdip_picks()})
 append('V4BLEND',{'core':'XLK','core_w':0.5,'sleeve':'ROT10','sleeve_w':0.5,'overlay':'MRDIP(max 2x10% from core)'})
 append('HYB21',{'picks':hyb21_picks()})
+append('TREND10',{'picks':trend10_picks()})
 append('BASELINE',{'closes':baseline()})
 print(f'\nregime at {ASOF}: {REGIME}')

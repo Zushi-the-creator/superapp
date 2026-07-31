@@ -18,7 +18,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 5
+   "dsr_cohort_n": 6
   },
   {
    "name": "MOMBRK5",
@@ -34,7 +34,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 5
+   "dsr_cohort_n": 6
   },
   {
    "name": "MRDIP",
@@ -50,7 +50,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 5
+   "dsr_cohort_n": 6
   },
   {
    "name": "V4BLEND",
@@ -66,7 +66,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 5
+   "dsr_cohort_n": 6
   },
   {
    "name": "BASELINE",
@@ -92,8 +92,25 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 5,
+   "dsr_cohort_n": 6,
    "context_at_registration": "Rules predate 2026 (V3.1 prod era) -> 2026 YTD is semi-clean OOS: $100K sim +54.2% YTD vs XLK +18.6 (best of all 21). 10-yr SR only 0.64 \u2014 registered to settle whether 2026 regime-fit is real. Cohort dsr_n now 5 for all candidates."
+  },
+  {
+   "name": "TREND10",
+   "registered": "2026-07-29",
+   "status": "CONTINUE",
+   "rule": "Monthly (rank at month-end close, execute next open): universe = top-300 by 63d avg dollar-volume with price>=$15 and dollar-vol>$3M. Filter: close > SMA200 AND close > SMA50 AND close/252d-high > 0.90. Rank survivors by 126d return; hold top-10 equal-weight until next month-end. No stops, no intramonth exits.",
+   "rule_sha256": "ba3276d8230074a8",
+   "benchmark": "XLK (also QQQ, SPY)",
+   "promotion": "beats XLK on rolling 42d return in >=55% of windows over >=126 td AND MDD <= 1.5x XLK MDD",
+   "kill": "-20pp cumulative vs XLK",
+   "measurement": "journal (backend/data/forward_journal/TREND10.jsonl)",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 6,
+   "context_at_registration": "BACKTEST: 17-window WF compounded +992%, median +11.2%, worst -23.7%, 65% positive; decade $100K -> $1.62M vs XLK $772K; beat XLK 5 of last 7 yrs incl 2026 YTD +74.6% vs +18.6% and 2022 -17.7% vs -29.1%. DSR 0.948 at N=12 \u2014 JUST BELOW the 0.95 gate, so NOT statistically proven. Tier-B survivorship (trend-following is the most survivor-sensitive family; live analog MTUM/SPMO ~ index). Concentration-sensitive: top5 $5.2M vs top25 $749K. Lags in calm bulls (2017/2019/2021/2023 all lost to XLK), -19.4% in 2018."
   }
  ],
  "amendment_log": [
@@ -104,6 +121,10 @@
   {
    "date": "2026-07-29",
    "change": "HYB21 registered (6th roster, semi-clean YTD evidence \u2014 rules predate 2026); dsr_cohort_n 4->5 across candidates. Pre-verdict, journal-day-1 era."
+  },
+  {
+   "date": "2026-07-29",
+   "change": "TREND10 registered (7th roster; first strategy to beat XLK on WF+decade+YTD+MDD, DSR 0.948 near-miss). dsr_cohort_n -> 6."
   }
  ]
 }
