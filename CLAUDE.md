@@ -25,16 +25,15 @@
 
 ---
 
-## Current Positions (Updated 2026-07-29, reconciled to PRODUCTION API)
+## Current Positions (Updated 2026-07-31, reconciled to PRODUCTION API)
 
 | Ticker | Shares | Avg Entry | Current | P&L | Role / exit |
 |--------|--------|-----------|---------|-----|-------------|
-| XLK | 68.0542 | $176.33 | ~$171 | ~-3% | **CORE ballast — no timer** (strategy='CORE'; bought 2026-07-24 as $12,000; a book bug recorded price=$12,000 — fixed 2026-07-29) |
-| CECO | 27.399 | $91.24 | ~$80 | ~-26% | MR Fixed42d day ~22/42; **earnings Aug 4 → exit before, on a GREEN day** |
-| ENTG | 15.4 | $162.28 | ~$137 | ~-27% | MR Fixed42d day ~22/42; **earnings Aug 4 → exit before, on a GREEN day** |
+| XLK | 68.0542 | $176.33 | ~$175.73 | ~-0.3% | **CORE ballast — no timer** (strategy='CORE', house benchmark) |
+| MU | 4.0611 | $792.34 | ~$874.66 | ~+10.4% | MR Fixed42d day 0/42; no earnings inside 80d (next 2026-09-21) |
 
-**Cash ~$3,215 | Total ~$18.5K | Realized 2026: ~-$522 (BE/CLS earnings-exits 07-24 realized losses — offsets prior gains, tax-useful)**
-**Market state 2026-07-29: tech/momentum unwind — QQQ -9.5% from peak, SPY -2.5%, regime PULLBACK; MR dip-satellite arms at SPY -3% (DIP_BUY)**
+**Cash ~$3,999 | Total ~$19,511 | Total P&L +$293 (+1.93%)**
+**CECO and ENTG were exited before their Aug 4 earnings — the risk flagged in the 07-29 table is closed.**
 **Forward tests running: 5 rosters frozen 2026-07-29 (`backend/data/forward_registry.json`), nightly journal, verdict 2027-01-27**
 
 ### ILS Portfolio
