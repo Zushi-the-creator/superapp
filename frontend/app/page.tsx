@@ -10,6 +10,7 @@ import { PerformanceTab } from "@/components/dashboard/PerformanceTab";
 import { HistoryTab } from "@/components/dashboard/HistoryTab";
 import { SectorsTab } from "@/components/dashboard/SectorsTab";
 import { SimTab } from "@/components/dashboard/SimTab";
+import { Mix9Tab } from "@/components/dashboard/Mix9Tab";
 import type { TabId } from "@/lib/types";
 
 export default function DashboardPage() {
@@ -30,6 +31,7 @@ export default function DashboardPage() {
           {activeTab === "performance" && <PerformanceTab />}
           {activeTab === "sectors" && <SectorsTab />}
           {activeTab === "sim" && <SimTab />}
+          {activeTab === "mix9" && <Mix9Tab />}
           {activeTab === "history" && <HistoryTab />}
         </main>
       </div>

@@ -672,7 +672,7 @@ export interface CombinedResponse {
   cache_age_min?: number;
 }
 
-export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors" | "sim";
+export type TabId = "portfolio" | "opportunities" | "trade" | "performance" | "history" | "sectors" | "sim" | "mix9";
 
 // ── Simulator ($100k autonomous multi-strategy paper book) ──
 export interface SimPosition {

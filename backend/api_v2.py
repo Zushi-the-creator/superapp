@@ -7980,6 +7980,34 @@ async def mix9_snapshot_push(payload: Dict[str, Any]):
             "trades": len(payload.get("trades") or [])}
 
 
+@router.get("/mix9/preview")
+async def mix9_preview():
+    """What the sleeve WOULD hold if the DD-stop were not firing.
+
+    Served from the snapshot so it costs nothing. When MIX9 is parked (54.7% of
+    backtest days) the live target is 100% core and the Entries tab has nothing
+    to show — this is the queue that fills the moment the active strategy
+    recovers above its -15% threshold.
+    """
+    import mix9_snapshot as _snap
+    import mix9_engine as _m9
+    snap = await asyncio.to_thread(_snap.load)
+    if not snap:
+        return {"pending": True, "message": "No MIX9 snapshot yet"}
+    t = snap.get("target", {})
+    return {
+        "asof": t.get("asof"), "regime": t.get("regime"),
+        "active_strategy": t.get("active_strategy"),
+        "parked": t.get("parked"), "dd_pct": t.get("dd_pct"),
+        "dd_stop_pct": t.get("dd_stop_pct"),
+        "queued": t.get("preview_sleeve") or t.get("sleeve") or [],
+        "core_ticker": _m9.CORE_TICKER,
+        "note": ("Parked: the 70% sleeve is in the core until this strategy climbs back "
+                 "above -15% from its own peak. These are the names it would buy today."
+                 if t.get("parked") else "Live: these positions are the current target."),
+    }
+
+
 @router.post("/mix9/enable")
 async def mix9_enable(enabled: bool):
     """Master switch. OFF by default — the engine computes and journals but the

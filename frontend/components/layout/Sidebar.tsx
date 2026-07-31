@@ -18,6 +18,7 @@ const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "trade", label: "Trade", icon: ShoppingCart },
   { id: "sectors", label: "Sectors", icon: Rocket },
   { id: "sim", label: "Sim $100k", icon: Bot },
+  { id: "mix9", label: "MIX9 Engine", icon: Bot },
   { id: "performance", label: "Performance", icon: TrendingUp },
   { id: "history", label: "History", icon: History },
 ];

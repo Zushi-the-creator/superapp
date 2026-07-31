@@ -246,6 +246,21 @@ def compute_target(equity_usd: float, asof: Optional[str] = None,
     core_usd = equity_usd * CORE_WEIGHT
     sleeve_usd = equity_usd * SLEEVE_WEIGHT
 
+    # Always compute what the sleeve WOULD hold, even when parked, so the UI can
+    # show the queue. Parked is the normal state (54.7% of backtest days) and an
+    # empty Entries tab with no explanation reads like a broken feed.
+    preview: List[Dict] = []
+    sel_p = D.selector(active)
+    if sel_p:
+        cols_p = sel_p(i, TOP_N)
+        if cols_p:
+            per_p = (equity_usd * SLEEVE_WEIGHT) / len(cols_p)
+            for c in cols_p:
+                px = float(D.Cf[i, c])
+                if np.isfinite(px) and px > 0:
+                    preview.append({'ticker': D.cols[c], 'target_usd': round(per_p, 2),
+                                    'price': round(px, 2), 'shares': round(per_p / px, 4)})
+
     picks: List[Dict] = []
     if parked:
         core_usd += sleeve_usd
@@ -270,6 +285,7 @@ def compute_target(equity_usd: float, asof: Optional[str] = None,
         'core': {'ticker': CORE_TICKER, 'target_usd': round(core_usd, 2),
                  'price': round(core_px, 2), 'shares': round(core_usd / core_px, 4)},
         'sleeve': picks,
+        'preview_sleeve': preview,
         'sleeve_usd': round(sleeve_usd, 2),
         'equity_usd': round(equity_usd, 2),
         'is_rebalance_day': (i - 1) in D.month_end or i in D.month_end,
