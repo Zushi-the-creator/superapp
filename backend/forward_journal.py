@@ -105,6 +105,17 @@ def trend10_picks():
     picks=r126v[cand].nlargest(10)
     return [{'ticker':t,'rank':k+1,'r126':round(float(v),4),'px_at_signal':round(float(px[t]),2),
              'pct_of_52wk_high':round(float(px[t]/hi252[t]),3)} for k,(t,v) in enumerate(picks.items())]
+def relstr10_picks():
+    i=T
+    if i<252: return []
+    dvv=dv.iloc[i]; px=C.iloc[i]
+    r252=(C.iloc[i]/C.iloc[i-252]-1); r63=(C.iloc[i]/C.iloc[i-63]-1)
+    b252=float(C['XLK'].iloc[i]/C['XLK'].iloc[i-252]-1); b63=float(C['XLK'].iloc[i]/C['XLK'].iloc[i-63]-1)
+    ok=(px>=15)&dvv.notna()&(dvv>3e6)&r252.notna()&r63.notna()&(r252>b252)&(r63>b63)
+    cand=dvv[ok.fillna(False)].nlargest(300).index
+    picks=r252[cand].nlargest(10)
+    return [{'ticker':t,'rank':k+1,'r252':round(float(v),4),'r63':round(float(r63[t]),4),
+             'px_at_signal':round(float(px[t]),2)} for k,(t,v) in enumerate(picks.items())]
 def baseline():
     out={}
     for t in ('XLK','QQQ','SPY'):
@@ -131,5 +142,6 @@ append('MRDIP',{'picks':mrdip_picks()})
 append('V4BLEND',{'core':'XLK','core_w':0.5,'sleeve':'ROT10','sleeve_w':0.5,'overlay':'MRDIP(max 2x10% from core)'})
 append('HYB21',{'picks':hyb21_picks()})
 append('TREND10',{'picks':trend10_picks()})
+append('RELSTR10',{'picks':relstr10_picks()})
 append('BASELINE',{'closes':baseline()})
 print(f'\nregime at {ASOF}: {REGIME}')

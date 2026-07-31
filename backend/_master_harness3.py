@@ -223,7 +223,109 @@ def _blend(a,b,w):
     return np.concatenate([[1.0],np.cumprod(1+(1-w)*ra+w*rb)])
 DIP={'DIP_BUY','SHARP_DROP','BEAR_BOUNCE','CORRECTION'}
 NONPAUSE=lambda d: R[d] not in {'DANGER','WEAK','CRISIS'}
+
+# ===== 2026-07-30: ported from exploration scripts into the canonical harness =====
+# Sector map: trailing 504d max-correlation to SPDRs, cached per ~quarter (point-in-time).
+_SPDR=[s for s in ['XLK','XLV','XLF','XLE','XLI','XLP','XLY','XLU','XLB','XLRE'] if s in C.columns]
+_SPI={s:list(C.columns).index(s) for s in _SPDR}
+_rets=C.pct_change(fill_method=None)
+_seccache={}
+def _sectors_at(j):
+    key=j//63
+    if key in _seccache: return _seccache[key]
+    a=max(0,j-504); w=_rets.iloc[a:j+1]; etf=w[_SPDR]
+    sub=w.dropna(axis=1,thresh=int((j-a)*0.6)); out={}
+    _cl=list(C.columns)
+    for tk in sub.columns:
+        if tk in _SPDR: out[_cl.index(tk)]=tk; continue
+        s=sub[tk]; best=None; bv=-9.0
+        for e in _SPDR:
+            cc=s.corr(etf[e])
+            if cc==cc and cc>bv: bv=cc; best=e
+        if best and bv>0.25: out[_cl.index(tk)]=best
+    _seccache[key]=out; return out
+_r252=(C/C.shift(252)-1).values; _r63=(C/C.shift(63)-1).values; _r126m=(C/C.shift(126)-1).values
+_s200=C.rolling(200,min_periods=180).mean().values
+_s50h=C.rolling(50,min_periods=45).mean().values
+_hi252=C.rolling(252,min_periods=200).max().values
+def _liquid(j,n=300):
+    ok=np.isfinite(Cv[j])&(Cv[j]>=15)&np.isfinite(dvol[j])&(dvol[j]>3e6)
+    e=np.where(ok)[0]
+    return e[np.argsort(-dvol[j,e])][:n] if len(e) else np.array([],int)
+def mk_relstr(cap=99,bench='XLK'):
+    bi=C.columns.get_loc(bench)
+    def f(j,n):
+        if j<252: return []
+        u=_liquid(j)
+        if not len(u): return []
+        b252=Cf[j,bi]/Cf[j-252,bi]-1; b63=Cf[j,bi]/Cf[j-63,bi]-1
+        cand=[c for c in u if np.isfinite(_r252[j,c]) and _r252[j,c]>b252 and np.isfinite(_r63[j,c]) and _r63[j,c]>b63]
+        cand.sort(key=lambda c:-_r252[j,c])
+        if cap>=99: return cand[:n]
+        sec=_sectors_at(j); out=[]; cnt={}
+        for c in cand:
+            s=sec.get(c,'?')
+            if cnt.get(s,0)>=cap: continue
+            out.append(c); cnt[s]=cnt.get(s,0)+1
+            if len(out)==n: break
+        return out
+    return f
+def _trend_sel(j,n):
+    u=_liquid(j)
+    ok=[c for c in u if np.isfinite(_s200[j,c]) and Cv[j,c]>_s200[j,c] and np.isfinite(_s50h[j,c])
+        and Cv[j,c]>_s50h[j,c] and np.isfinite(_hi252[j,c]) and Cv[j,c]/_hi252[j,c]>0.90 and np.isfinite(_r126m[j,c])]
+    return sorted(ok,key=lambda c:-_r126m[j,c])[:n]
+def _leadsec_sel(j,n):
+    u=_liquid(j)
+    if not len(u): return []
+    sm={s:(Cf[j,_SPI[s]]/Cf[j-126,_SPI[s]]-1) if j>=126 else -9 for s in _SPDR}
+    lead=[s for s,_ in sorted(sm.items(),key=lambda kv:-kv[1])[:5]]
+    sec=_sectors_at(j); per=max(1,n//len(lead)); out=[]
+    for s in lead:
+        mem=[c for c in u if sec.get(c)==s and np.isfinite(_r126m[j,c])]
+        mem.sort(key=lambda c:-_r126m[j,c]); out+=mem[:per]
+    return out[:n]
+def monthly_rot_g(sel,top_n,s0,pos_stop=None,dd_guard=None):
+    """monthly rotation with optional position trailing-stop and portfolio DD guard.
+    NULL-CHECK: sel returning [] every month must reproduce cash (flat 1.0)."""
+    fee=FEE+SLIP; eq=1.0; hold={}; peak=1.0; parked=False; c=[1.0]
+    for i in range(s0,ND):
+        if parked: eq*=Cf[i,SPYi]/Cf[i-1,SPYi]
+        elif hold:
+            rs=[]
+            for col,(ep,pk) in list(hold.items()):
+                if not (np.isfinite(Cv[i,col]) and np.isfinite(Cv[i-1,col]) and Cv[i-1,col]>0 and i<=last_valid[col]): continue
+                rs.append(Cv[i,col]/Cv[i-1,col]-1); hold[col]=(ep,max(pk,Cv[i,col]))
+            eq*=(1+np.mean(rs)) if rs else 1
+        peak=max(peak,eq)
+        if pos_stop and hold and not parked:
+            drop=[col for col,(ep,pk) in hold.items() if np.isfinite(Cv[i,col]) and Cv[i,col]<pk*(1-pos_stop)]
+            if drop:
+                eq*=1-fee*(len(drop)/max(len(hold),1))
+                for col in drop: hold.pop(col,None)
+        if dd_guard:
+            if not parked and eq<peak*(1-dd_guard): eq*=1-fee; hold={}; parked=True
+            elif parked and eq>peak*(1-dd_guard/2): parked=False
+        if (i-1 in me) and not parked:
+            new=sel(i-1,top_n)
+            if new:
+                ch=len(set(new)^set(hold)); eq*=1-fee*2*(ch/max(len(new)+len(hold),1))
+                hold={}
+                for col in new:
+                    p=Ov[i,col] if (np.isfinite(Ov[i,col]) and Ov[i,col]>0) else Cv[i-1,col]
+                    hold[col]=(p,p)
+        c.append(eq)
+    return np.array(c)
+SPYi=C.columns.get_loc('SPY')
+
 STRATS=[
+ ('B','RELSTR10 (beat XLK 252d+63d) [ported]',lambda s:monthly_rot_g(mk_relstr(99,'XLK'),10,s)),
+ ('B','RELSTR10 sector-cap2 [ported]',lambda s:monthly_rot_g(mk_relstr(2,'XLK'),10,s)),
+ ('B','RELSTR10 bench=SPY cap2 [ported]',lambda s:monthly_rot_g(mk_relstr(2,'SPY'),10,s)),
+ ('B','RELSTR10 cap2 + stop15 + DD12 [ported]',lambda s:monthly_rot_g(mk_relstr(2,'SPY'),10,s,pos_stop=0.15,dd_guard=0.12)),
+ ('B','TREND10 (>200SMA near 52wk-hi) [ported]',lambda s:monthly_rot_g(_trend_sel,10,s)),
+ ('B','Leading-sector rotation [ported]',lambda s:monthly_rot_g(_leadsec_sel,10,s)),
+ ('X','NULL CHECK (selector returns nothing)',lambda s:monthly_rot_g(lambda j,n:[],10,s)),
  ('A','QQQ buy-hold [BENCHMARK]',lambda s:bh(QQ,s)),
  ('A','SPY buy-hold',lambda s:bh(SP,s)),
  ('A','XLK buy-hold [ACCOUNT CORE]',lambda s:bh(XL,s)),
