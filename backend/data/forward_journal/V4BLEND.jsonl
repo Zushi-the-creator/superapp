@@ -1,1 +1,2 @@
 {"asof": "2026-07-28", "regime": "PULLBACK", "core": "XLK", "core_w": 0.5, "sleeve": "ROT10", "sleeve_w": 0.5, "overlay": "MRDIP(max 2x10% from core)", "row_sha256": "044d9e719a585110"}
+{"asof": "2026-07-30", "regime": "PULLBACK", "core": "XLK", "core_w": 0.5, "sleeve": "ROT10", "sleeve_w": 0.5, "overlay": "MRDIP(max 2x10% from core)", "row_sha256": "2a02402ae92c4681"}

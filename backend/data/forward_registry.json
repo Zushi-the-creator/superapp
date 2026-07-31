@@ -18,7 +18,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8
+   "dsr_cohort_n": 9
   },
   {
    "name": "MOMBRK5",
@@ -34,7 +34,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8
+   "dsr_cohort_n": 9
   },
   {
    "name": "MRDIP",
@@ -50,7 +50,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8
+   "dsr_cohort_n": 9
   },
   {
    "name": "V4BLEND",
@@ -66,7 +66,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8
+   "dsr_cohort_n": 9
   },
   {
    "name": "BASELINE",
@@ -92,7 +92,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8,
+   "dsr_cohort_n": 9,
    "context_at_registration": "Rules predate 2026 (V3.1 prod era) -> 2026 YTD is semi-clean OOS: $100K sim +54.2% YTD vs XLK +18.6 (best of all 21). 10-yr SR only 0.64 \u2014 registered to settle whether 2026 regime-fit is real. Cohort dsr_n now 5 for all candidates."
   },
   {
@@ -109,7 +109,7 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8,
+   "dsr_cohort_n": 9,
    "context_at_registration": "BACKTEST: 17-window WF compounded +992%, median +11.2%, worst -23.7%, 65% positive; decade $100K -> $1.62M vs XLK $772K; beat XLK 5 of last 7 yrs incl 2026 YTD +74.6% vs +18.6% and 2022 -17.7% vs -29.1%. DSR 0.948 at N=12 \u2014 JUST BELOW the 0.95 gate, so NOT statistically proven. Tier-B survivorship (trend-following is the most survivor-sensitive family; live analog MTUM/SPMO ~ index). Concentration-sensitive: top5 $5.2M vs top25 $749K. Lags in calm bulls (2017/2019/2021/2023 all lost to XLK), -19.4% in 2018."
   },
   {
@@ -126,8 +126,25 @@
    "peek_dates": [
     "2026-10-27 (+63 td, logged peek, no verdict)"
    ],
-   "dsr_cohort_n": 8,
+   "dsr_cohort_n": 9,
    "context_at_registration": "OFFICIAL HARNESS (_master_harness3.py, null-check passed 0.0%): IS 20.0% / OOS 42.4% CAGR, OOS MDD -41.3%, +11.5pp vs QQQ. Tier B (survivor universe = ceiling). DSR 0.475 at N=27 \u2014 FAILS luck gate. WF median -0.6% with only 47% positive windows: decade result is a few explosive windows, not consistency. Concentration is the engine AND the risk: July 2026 book was 8/10 AI-memory/semis, -34.1% in 30 days, -40.2% from the June peak. Sector caps and guardrails were tested and REDUCED returns (cap2 OOS 24.6%, cap2+stop15+DD12 OOS 19.5%) while cutting drawdown -41.3%->-26.1%."
+  },
+  {
+   "name": "MIX9",
+   "registered": "2026-07-31",
+   "status": "CONTINUE",
+   "rule": "Daily regime read (prod _check_market_regime chain incl. VIX tiers). Map regime -> active strategy, FROZEN from IS-only (2016-06..2022-12) mean daily return per regime: HEALTHY->MOM-breakout-F90, PULLBACK->TREND10, SHARP_DROP->TREND10, FEAR->TREND10, DANGER->RELSTR10, CORRECTION->RELSTR10, DIP_BUY->LeadingSector, BEAR_BOUNCE->RELSTR10-cap2+guard, CRISIS->LC-12-1, WEAK->MR-dips-F90. Allocation: 70% active strategy + 30% XLK core, rebalanced monthly. GUARDRAIL: if the active strategy's own equity is >15% below its running peak, its 70% sleeve sits in XLK until that strategy recovers above the threshold. No position-level stops.",
+   "rule_sha256": "fcdd63803f83b530",
+   "benchmark": "XLK (also QQQ, SPY)",
+   "promotion": "beats XLK on rolling 42d return in >=55% of windows over >=126 td AND MDD <= 1.2x XLK MDD",
+   "kill": "-20pp cumulative vs XLK, or 3 consecutive months below benchmark",
+   "measurement": "journal (backend/data/forward_journal/MIX9.jsonl) \u2014 records regime, active strategy, guard state, picks",
+   "verdict_date": "2027-01-27 (+126 td, single look)",
+   "peek_dates": [
+    "2026-10-27 (+63 td, logged peek, no verdict)"
+   ],
+   "dsr_cohort_n": 9,
+   "context_at_registration": "Regime-switch + per-strategy DD-stop(15%) + 30% XLK core. OFFICIAL: OOS(2023+) CAGR 40.7% vs XLK 34.2%, OOS Sharpe 1.41 vs 1.34, beat XLK 8/10 calendar years, $100K->$3.83M vs XLK $889K, MDD -35.4% vs XLK -34.0%, 2026 YTD +23.6% vs +21.8% with YTD MDD -12.0% vs -16.0%. DSR 0.680 at N=40 \u2014 FAILS luck gate (edge 1.41 vs 1.34 Sharpe is inside the 1.16 luck bar). CONTAMINATION: regime map fitted on IS 2016-22, AND this rule was selected after comparing 16 mixing variants over the full period \u2014 double selection bias. Tier B. ~32 strategy switches/yr = heavy tax at 25% CGT (unmodeled). Sub-strategies are 0.79-0.90 correlated; MR-dips (corr 0.22-0.51) is the only true diversifier. Rules that FAILED and must not be silently substituted: chasing the 126d-best strategy (OOS 25.8%, YTD -0.3%), equal-weight blending (32.5%), inverse-vol (29.1%), vol-targeting (22.6%)."
   }
  ],
  "amendment_log": [
@@ -146,6 +163,10 @@
   {
    "date": "2026-07-30",
    "change": "RELSTR10 registered (8th roster) after porting to canonical harness + null check. dsr_cohort_n -> 8. Note: all candidates FAIL DSR at honest N=27; forward test is the only promotion path."
+  },
+  {
+   "date": "2026-07-31",
+   "change": "MIX9 registered (9th roster) \u2014 best OOS Sharpe found (1.41) but DSR 0.680 FAIL; double selection bias documented. dsr_cohort_n -> 9."
   }
  ]
 }

@@ -116,6 +116,21 @@ def relstr10_picks():
     picks=r252[cand].nlargest(10)
     return [{'ticker':t,'rank':k+1,'r252':round(float(v),4),'r63':round(float(r63[t]),4),
              'px_at_signal':round(float(px[t]),2)} for k,(t,v) in enumerate(picks.items())]
+MIX9_MAP={'HEALTHY':'MOM-breakout-F90','PULLBACK':'TREND10','SHARP_DROP':'TREND10','FEAR':'TREND10',
+           'DANGER':'RELSTR10','CORRECTION':'RELSTR10','DIP_BUY':'LeadingSector',
+           'BEAR_BOUNCE':'RELSTR10-cap2-guard','CRISIS':'LC-12-1','WEAK':'MR-dips-F90','BELOW200':'RELSTR10'}
+def mix9_state():
+    """MIX9: which strategy is active today + which picks it would hold.
+    Guard state (strategy >15% below own peak) is tracked forward from the journal
+    itself once history accumulates; day-1 records the mapping and the active book."""
+    active=MIX9_MAP.get(REGIME,'TREND10')
+    picks=[]
+    if active=='TREND10': picks=trend10_picks()
+    elif active=='RELSTR10': picks=relstr10_picks()
+    elif active=='MR-dips-F90': picks=mrdip_picks()
+    elif active=='MOM-breakout-F90': picks=mombrk5_picks()
+    return {'regime':REGIME,'active_strategy':active,'core_pct':30,'sleeve_pct':70,
+            'guard':'none (day-1 baseline)','picks':picks}
 def baseline():
     out={}
     for t in ('XLK','QQQ','SPY'):
@@ -143,5 +158,6 @@ append('V4BLEND',{'core':'XLK','core_w':0.5,'sleeve':'ROT10','sleeve_w':0.5,'ove
 append('HYB21',{'picks':hyb21_picks()})
 append('TREND10',{'picks':trend10_picks()})
 append('RELSTR10',{'picks':relstr10_picks()})
+append('MIX9',mix9_state())
 append('BASELINE',{'closes':baseline()})
 print(f'\nregime at {ASOF}: {REGIME}')
