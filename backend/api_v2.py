@@ -121,6 +121,46 @@ def _total_deposited_now() -> float:
     return round(HISTORICAL_DEPOSIT_BASELINE + _sum_db_deposits(), 2)
 
 
+def _merge_lots(rows: List[Dict]) -> List[Dict]:
+    """Collapse multiple OPEN lots of the same ticker into ONE row.
+
+    Adding to a holding creates a second lot, and the tab then showed the same
+    ticker twice with two different entries and — worse — two different exit
+    strategies, so one line could show a Fixed42d timer on what is actually
+    untimed CORE. The book holds ONE position in a ticker; show it that way.
+
+    Entry price is share-weighted. entry_date is the OLDEST lot, so day-counters
+    reflect how long the position has really been held. Strategy resolves to the
+    oldest lot's, since that is the thesis the position was opened under; a later
+    top-up does not silently re-label it.
+    """
+    by: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by.setdefault((r.get("ticker") or "").upper(), []).append(r)
+    out: List[Dict] = []
+    for tk, lots in by.items():
+        if len(lots) == 1:
+            out.append(lots[0]); continue
+        lots = sorted(lots, key=lambda x: (x.get("entry_date") or "9999", x.get("id") or 0))
+        tot = sum(float(l.get("shares") or 0) for l in lots)
+        if tot <= 0:
+            out.append(lots[0]); continue
+        wavg = sum(float(l.get("shares") or 0) * float(l.get("entry_price") or 0)
+                   for l in lots) / tot
+        base = dict(lots[0])
+        base["shares"] = round(tot, 6)
+        base["entry_price"] = round(wavg, 4)
+        base["entry_date"] = lots[0].get("entry_date")
+        base["strategy"] = lots[0].get("strategy")
+        base["lot_count"] = len(lots)
+        base["lots"] = [{"id": l.get("id"), "shares": l.get("shares"),
+                         "entry_price": l.get("entry_price"),
+                         "entry_date": l.get("entry_date"),
+                         "strategy": l.get("strategy")} for l in lots]
+        out.append(base)
+    return out
+
+
 def _compute_cash_balance(total_deposited: float) -> float:
     """Derive cash from the transaction ledger:
         cash = total_deposited
@@ -1448,6 +1488,7 @@ def _strategy_health() -> dict:
 async def get_portfolio():
     """Get portfolio with live prices, technicals, signals, and P&L."""
     positions = _position_mgr._get_open_positions_sync("USD")
+    positions = _merge_lots(positions)
 
     if not positions:
         return PortfolioResponse(
