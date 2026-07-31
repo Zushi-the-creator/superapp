@@ -7250,7 +7250,12 @@ async def _sim_prices(tickers: List[str]) -> Dict[str, float]:
             px = q.get("price") or 0
         if px <= 0:
             try:
-                df = _cache.get(t, 30)
+                # 365d, NOT 30d: DataCache.get() returns None for anything under
+                # 50 rows, so a 30-day window (~21 bars) always failed — the
+                # last-close fallback was dead code. Outside RTH that left held
+                # names unpriced, which blocked their exits ("no live price")
+                # and let the daily equity snapshot fall back to entry price.
+                df = _cache.get(t, 365)
                 if df is not None and len(df) >= 1:
                     px = float(df["Close"].iloc[-1])
             except Exception:
@@ -7281,7 +7286,10 @@ def _sim_technicals(tickers: List[str], prices: Dict[str, float]) -> Dict[str, D
     out: Dict[str, Dict] = {}
     for t in tickers:
         try:
-            df = _cache.get(t, 30)
+            # 365d for the same 50-row-minimum reason as _sim_prices — with a
+            # 30d window this returned None every time, so SWING_RSI75 never
+            # saw an RSI and could only ever exit on its 21-day cap.
+            df = _cache.get(t, 365)
             if df is None or len(df) < 3:
                 continue
             closes = [float(c) for c in df["Close"].dropna().tolist()]
