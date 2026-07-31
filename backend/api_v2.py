@@ -7845,10 +7845,6 @@ async def sim_reset(confirm: str = "", starting_capital: float = 100000.0):
 # on every call so the DD-stop can never drift from the backtest). So it is
 # always run in a thread, cached, and never invoked from a hot request path.
 
-_mix9_cache: Dict[str, Any] = {"ts": None, "payload": None}
-_MIX9_TTL = 3600  # seconds; the inputs only change on a new daily bar
-
-
 def _mix9_equity_and_book(prices: Optional[Dict[str, float]] = None) -> Tuple[float, Dict[str, float]]:
     """Current account equity and {ticker: usd} from the live positions DB.
 
@@ -7878,33 +7874,60 @@ def _mix9_equity_and_book(prices: Optional[Dict[str, float]] = None) -> Tuple[fl
     return equity, holdings
 
 
-async def _mix9_payload(force: bool = False) -> Dict[str, Any]:
-    now = datetime.now()
-    c = _mix9_cache
-    if (not force and c["payload"] is not None and c["ts"]
-            and (now - c["ts"]).total_seconds() < _MIX9_TTL):
-        return c["payload"]
-    import mix9_engine as _m9
+async def _mix9_snapshot_refresh() -> Dict[str, Any]:
+    """Recompute the snapshot in a SUBPROCESS.
+
+    Mix9Data needs several hundred MB. Computing it inside the API process
+    OOM-killed the whole 2GB machine (twice) — the app already runs the scanner,
+    cache, sim engine and sector intel. A subprocess returns every byte to the OS
+    when it exits, so the API never carries the peak.
+    """
+    # HARD MEMORY GATE. Measured peak RSS of the snapshot job is ~4.5GB (the
+    # indicator build holds ~25 float32 frames of 2,910 x 2,619 plus pandas
+    # rolling intermediates). On a 2GB machine this OOM-killed the ENTIRE app
+    # twice, not just the job. Refuse to start rather than take prod down.
+    import shutil
+    try:
+        with open('/proc/meminfo') as fh:
+            total_kb = int(next(l for l in fh if l.startswith('MemTotal')).split()[1])
+    except Exception:
+        total_kb = 0
+    if 0 < total_kb < 6 * 1024 * 1024:
+        raise RuntimeError(
+            f"MIX9 snapshot needs ~4.5GB peak; this machine has {total_kb/1024/1024:.1f}GB. "
+            "Refusing to run — it OOM-kills the app. Either scale the machine "
+            "(fly machine update --vm-memory 8192) or compute the snapshot off-box "
+            "and load it into mix9.db.")
     equity, holdings = await asyncio.to_thread(_mix9_equity_and_book)
     if equity <= 0:
-        equity = 19511.0  # fall back to a nominal book so the tab still renders
-    # run_cycle's dry_run/force are KEYWORD-ONLY (after *), so they cannot be
-    # passed positionally through to_thread — wrap in a lambda.
-    res = await asyncio.to_thread(lambda: _m9.run_cycle(equity, holdings, dry_run=True, force=True))
-    res["holdings"] = holdings
-    res["computed_at"] = now.isoformat()
-    _mix9_cache.update({"ts": now, "payload": res})
-    return res
+        equity = 19511.0
+    proc = await asyncio.create_subprocess_exec(
+        "python3", os.path.join(os.path.dirname(__file__), "mix9_snapshot.py"),
+        str(equity), json.dumps(holdings),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), timeout=900)
+    print(f"[MIX9] snapshot: {out.decode()[-300:].strip()}")
+    import mix9_snapshot as _snap
+    return await asyncio.to_thread(_snap.load)
 
 
 @router.get("/mix9/state")
-async def mix9_state(force: bool = False):
-    """Target book, trade list to reach it, and every component's drawdown."""
-    try:
-        res = await _mix9_payload(force=force)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"MIX9 engine error: {e}")
+async def mix9_state():
+    """Serve the last snapshot. Cheap — no matrix is loaded in this process.
+
+    The snapshot is refreshed nightly by mix9_engine_loop, or on demand via
+    POST /mix9/run. MIX9 rebalances monthly, so a once-daily snapshot is not
+    stale in any way that affects the decision.
+    """
+    import mix9_snapshot as _snap
     import mix9_engine as _m9
+    res = await asyncio.to_thread(_snap.load)
+    if not res:
+        return {"pending": True,
+                "message": "No MIX9 snapshot yet — POST /api/v2/mix9/run to build one "
+                           "(takes ~2-5 min), or wait for the nightly cycle.",
+                "engine": {"core_ticker": _m9.CORE_TICKER,
+                           "enabled": bool(_m9.get_state().get("enabled", 0))}}
     res["engine"] = {
         "core_ticker": _m9.CORE_TICKER,
         "dd_stop_pct": _m9.DD_STOP * 100,
@@ -7926,16 +7949,14 @@ async def mix9_decisions(limit: int = 200):
 
 
 @router.post("/mix9/run")
-async def mix9_run(dry_run: bool = True, force: bool = True):
-    """Recompute now. dry_run=false persists the active-strategy / park state."""
-    import mix9_engine as _m9
-    equity, holdings = await asyncio.to_thread(_mix9_equity_and_book)
-    if equity <= 0:
-        raise HTTPException(status_code=400, detail="No live equity found in positions DB")
-    res = await asyncio.to_thread(
-        lambda: _m9.run_cycle(equity, holdings, dry_run=dry_run, force=force))
-    _mix9_cache.update({"ts": datetime.now(), "payload": res})
-    return res
+async def mix9_run():
+    """Rebuild the snapshot now, in a subprocess. Takes ~2-5 min on prod hardware."""
+    try:
+        return await _mix9_snapshot_refresh()
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="MIX9 snapshot timed out (>15 min)")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MIX9 snapshot failed: {e}")
 
 
 @router.post("/mix9/enable")
@@ -7954,7 +7975,7 @@ async def mix9_engine_loop():
         try:
             _et = datetime.now(ZoneInfo("America/New_York"))
             if _et.weekday() < 5 and _et.hour >= 17:
-                res = await _mix9_payload(force=True)
+                res = await _mix9_snapshot_refresh()
                 t = res.get("target", {})
                 print(f"[MIX9] {t.get('asof')} regime={t.get('regime')} "
                       f"-> {t.get('active_strategy')} dd={t.get('dd_pct')}% "

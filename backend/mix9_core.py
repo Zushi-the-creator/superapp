@@ -153,6 +153,9 @@ class Mix9Data:
                      & (C / lo - 1 > 0.30) & (r20 > 5) & (d1p < 10) & (r5 <= 15)).values
         self.MOMS = np.where(self.momg, r126.values, -1e9)
 
+        # MEMORY: this class held ~20 float32 frames of 2,910 x 2,619 simultaneously
+        # (~800MB) and OOM-killed the 2GB Fly machine. Everything downstream reads
+        # .values, so drop each frame as soon as its array is taken.
         self.dvol = (C * V).rolling(63, min_periods=55).mean().values
         self._r252 = (C / C.shift(252) - 1).values
         self._r63 = (C / C.shift(63) - 1).values
@@ -204,6 +207,10 @@ class Mix9Data:
         self._g200 = ((spy / spy.rolling(200, min_periods=20).mean()) - 1).values * 100
         self._g50 = ((spy / spy.rolling(50, min_periods=10).mean()) - 1).values * 100
         self._sr5 = (spy.pct_change(5, fill_method=None) * 100).values
+
+        del H, L, V, TR, pc, d1, g, l, rsi2, rsi14, atrp, vr, r20, r5, r126, d1p, hi, lo, buf
+        del sma50, sma150, sma200
+        import gc; gc.collect()
 
         self.mr_sig, self.mom_sig = {}, {}
         gr, gc = np.where(self.mrg)
