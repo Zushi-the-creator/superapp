@@ -7888,7 +7888,9 @@ async def _mix9_payload(force: bool = False) -> Dict[str, Any]:
     equity, holdings = await asyncio.to_thread(_mix9_equity_and_book)
     if equity <= 0:
         equity = 19511.0  # fall back to a nominal book so the tab still renders
-    res = await asyncio.to_thread(_m9.run_cycle, equity, holdings, True, True)
+    # run_cycle's dry_run/force are KEYWORD-ONLY (after *), so they cannot be
+    # passed positionally through to_thread — wrap in a lambda.
+    res = await asyncio.to_thread(lambda: _m9.run_cycle(equity, holdings, dry_run=True, force=True))
     res["holdings"] = holdings
     res["computed_at"] = now.isoformat()
     _mix9_cache.update({"ts": now, "payload": res})
@@ -7930,7 +7932,8 @@ async def mix9_run(dry_run: bool = True, force: bool = True):
     equity, holdings = await asyncio.to_thread(_mix9_equity_and_book)
     if equity <= 0:
         raise HTTPException(status_code=400, detail="No live equity found in positions DB")
-    res = await asyncio.to_thread(_m9.run_cycle, equity, holdings, dry_run, force)
+    res = await asyncio.to_thread(
+        lambda: _m9.run_cycle(equity, holdings, dry_run=dry_run, force=force))
     _mix9_cache.update({"ts": datetime.now(), "payload": res})
     return res
 
