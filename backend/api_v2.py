@@ -7959,6 +7959,27 @@ async def mix9_run():
         raise HTTPException(status_code=500, detail=f"MIX9 snapshot failed: {e}")
 
 
+@router.post("/mix9/snapshot")
+async def mix9_snapshot_push(payload: Dict[str, Any]):
+    """Accept a snapshot computed OFF-BOX and store it.
+
+    The snapshot job peaks at ~4.5GB; this machine has 1GB. Rather than paying
+    for an 8GB instance to run a job once a day, the heavy compute runs where
+    RAM already exists (dev box / CI) and the result is pushed here. The payload
+    is pure data — the decision was made by the same mix9_engine code that is
+    deployed, against the same tracked mix9_data/ inputs.
+    """
+    t = (payload or {}).get("target") or {}
+    if not t.get("asof") or not t.get("active_strategy"):
+        raise HTTPException(status_code=400,
+                            detail="Malformed snapshot: needs target.asof and target.active_strategy")
+    import mix9_snapshot as _snap
+    await asyncio.to_thread(_snap.save, payload)
+    return {"ok": True, "asof": t["asof"], "regime": t.get("regime"),
+            "active_strategy": t["active_strategy"], "parked": t.get("parked"),
+            "trades": len(payload.get("trades") or [])}
+
+
 @router.post("/mix9/enable")
 async def mix9_enable(enabled: bool):
     """Master switch. OFF by default — the engine computes and journals but the
