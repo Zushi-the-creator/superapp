@@ -199,7 +199,7 @@ def faber(s0):
         c.append(eq)
     return np.array(c)
 mo=[d[:7] for d in dates];me={i for i in range(ND-1) if mo[i]!=mo[i+1]}
-dvol=(C*V).rolling(63).mean().values
+dvol=(C*V).rolling(63,min_periods=55).mean().values  # min_periods: a bare rolling lets one NaN volume bar silently drop the ticker from the liquid universe
 def monthly_rot(score_at,univ_filter,top_n,s0,stock=True):
     fee=(FEE if stock else EFEE)+SLIP
     eq=1.;hold=[];c=[];n_delist=0
