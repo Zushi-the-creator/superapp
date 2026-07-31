@@ -72,7 +72,24 @@ class Mix9Data:
 
     def __init__(self, db_path: str = DB, vix_csv: Optional[str] = None):
         con = sqlite3.connect(db_path)
-        quar = {r[0] for r in con.execute("SELECT ticker FROM ticker_quarantine")}
+        # QUARANTINE must come from a source that exists in production. The Fly
+        # volume's stock_cache.db has no ticker_quarantine table, and an empty
+        # quarantine silently WIDENS the universe — different selector picks,
+        # different component curves, different DD-stop. Same failure mode as the
+        # VIX gap. Ship the list as tracked data and treat the DB as a top-up.
+        quar = set()
+        try:
+            with open(os.path.join(HERE, 'data', 'ticker_quarantine.csv')) as fh:
+                quar = {ln.strip() for ln in fh if ln.strip() and ln.strip() != 'ticker'}
+        except FileNotFoundError:
+            pass
+        try:
+            quar |= {r[0] for r in con.execute("SELECT ticker FROM ticker_quarantine")}
+        except sqlite3.OperationalError:
+            pass   # table absent in prod; the shipped list is authoritative
+        if not quar:
+            raise RuntimeError("MIX9: quarantine list empty — refusing to run on a "
+                               "wider universe than the backtest used")
         df = pd.read_sql_query(
             "SELECT ticker,date,open,high,low,close,volume FROM daily_prices", con)
         con.close()
