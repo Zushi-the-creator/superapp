@@ -26,6 +26,7 @@ recomputation is deterministic and costs ~1-2 minutes.
 """
 from __future__ import annotations
 import sqlite3, os, csv
+from typing import Optional
 import numpy as np
 import pandas as pd
 
@@ -69,7 +70,7 @@ class Mix9Data:
     signal gates silently DROP tickers rather than erroring.
     """
 
-    def __init__(self, db_path: str = DB, vix_csv: str = '/tmp/vix.csv'):
+    def __init__(self, db_path: str = DB, vix_csv: Optional[str] = None):
         con = sqlite3.connect(db_path)
         quar = {r[0] for r in con.execute("SELECT ticker FROM ticker_quarantine")}
         df = pd.read_sql_query(
@@ -150,12 +151,31 @@ class Mix9Data:
         self._seccache = {}
 
         # ── regime inputs: mirror prod _check_market_regime (dropna + min(252,len)) ──
+        # VIX MUST come from a source that exists in production. /tmp/vix.csv is a
+        # local research artifact; on Fly it does not exist, vixmap would be empty,
+        # every VIX read would be 0.0 and the CRISIS (>40) and FEAR (>30) branches
+        # would NEVER fire — silently changing the regime series, the component
+        # curves and therefore the DD-stop. Ship the history as tracked data
+        # (data/vix.csv) so prod and the backtest read identical inputs, and top it
+        # up from the cache DB for any recent bars the file predates.
         vixmap = {}
+        for path in ([vix_csv] if vix_csv else
+                     [os.path.join(HERE, 'data', 'vix.csv'), '/tmp/vix.csv']):
+            try:
+                for row in csv.reader(open(path)):
+                    try: vixmap[row[0]] = float(row[1])
+                    except Exception: pass
+                if vixmap: break
+            except FileNotFoundError:
+                continue
         try:
-            for row in csv.reader(open(vix_csv)):
-                try: vixmap[row[0]] = float(row[1])
-                except Exception: pass
-        except FileNotFoundError:
+            con2 = sqlite3.connect(db_path)
+            for d_, v_ in con2.execute(
+                    "SELECT date, close FROM daily_prices WHERE ticker='VIX'"):
+                if v_ and float(v_) > 0 and d_ not in vixmap:
+                    vixmap[d_] = float(v_)
+            con2.close()
+        except Exception:
             pass
         vix = np.array([vixmap.get(d, 0.0) for d in self.dates])
         for i in range(1, len(vix)):
