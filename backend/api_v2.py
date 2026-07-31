@@ -7370,6 +7370,61 @@ async def _sim_rotation_ranks_cached() -> List[str]:
     return ranks
 
 
+_sim_earnings_cache: Dict[str, Tuple[Optional[str], datetime]] = {}  # ticker -> (date|None, fetched_at)
+_SIM_EARN_TTL_HIT = 12 * 3600   # a confirmed date barely moves
+_SIM_EARN_TTL_MISS = 900        # no date usually means the API failed — retry soon
+
+
+async def _sim_earnings(tickers: List[str]) -> Dict[str, Dict]:
+    """Next-earnings date per ticker, cached PER TICKER (not per ticker-set).
+
+    next_earnings_batch issues one Finnhub call per ticker. Keying the cache on
+    the whole ticker set (what _portfolio_next_earnings_cached does, fine for a
+    3-name portfolio) means any change to the candidate list re-fetches all ~35
+    names every cycle. That exceeds the 60/min Finnhub budget, the calls come
+    back empty, and the earnings guard silently switches OFF on both the entry
+    and the exit side — which is exactly how AMD/SNDK sat in the book with
+    earnings 4 days out (2026-07-31).
+
+    Stores the DATE, never days_to, so a cached row stays correct as days pass.
+    Misses get a short TTL because a miss is far more often a failed call than
+    a company with no earnings inside 80 days.
+    """
+    now = datetime.now()
+    today = now.date()
+    want = sorted({t for t in tickers if t})
+    missing = [
+        t for t in want
+        if t not in _sim_earnings_cache
+        or (now - _sim_earnings_cache[t][1]).total_seconds() >
+           (_SIM_EARN_TTL_HIT if _sim_earnings_cache[t][0] else _SIM_EARN_TTL_MISS)
+    ]
+    if missing:
+        try:
+            from tiingo_earnings import next_earnings_batch
+            async with aiohttp.ClientSession() as ses:
+                fetched = await next_earnings_batch(ses, missing, forward_days=80)
+        except Exception as e:
+            print(f"[Sim] earnings fetch error: {e}")
+            fetched = {}
+        for t in missing:
+            _sim_earnings_cache[t] = ((fetched.get(t) or {}).get("date"), now)
+        print(f"[Sim] earnings: fetched {len(missing)}, "
+              f"{sum(1 for t in missing if _sim_earnings_cache[t][0])} with a date")
+
+    out: Dict[str, Dict] = {}
+    for t in want:
+        entry = _sim_earnings_cache.get(t)
+        if not entry or not entry[0]:
+            continue
+        try:
+            d = datetime.strptime(str(entry[0])[:10], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        out[t] = {"date": entry[0], "days_to": (d - today).days}
+    return out
+
+
 async def _sim_sentiment(tickers: List[str]) -> Dict[str, Dict]:
     """Stock-specific sentiment for held names (exit input, not entry veto)."""
     if not tickers:
@@ -7425,13 +7480,7 @@ async def _sim_gather_inputs(need_signals: bool = True) -> Dict:
     # can't see the date it re-buys whatever the exit side just sold (the
     # AMD/SNDK churn loop, 2026-07-31). Rotation names especially — they never
     # pass through validate_top_signals, so this is their only earnings check.
-    earn_universe = list({*held, *rotation_ranks, *cand[:25]})
-    earnings: Dict = {}
-    if earn_universe:
-        try:
-            earnings = await _portfolio_next_earnings_cached(earn_universe)
-        except Exception as e:
-            print(f"[Sim] earnings fetch error: {e}")
+    earnings = await _sim_earnings(list({*held, *rotation_ranks, *cand[:25]}))
 
     sentiment = await _sim_sentiment(held)
     technicals = await asyncio.to_thread(_sim_technicals, held, prices)

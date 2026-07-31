@@ -1199,10 +1199,17 @@ def _run_entries(conn, cycle_id: str, cfg: Dict, regime: Dict, signals: List[Dic
 
             rationale = _build_rationale(sig, sid, composite, regime, sector)
             if dry_run:
+                # Reserve the name and the sector slot exactly as a real fill
+                # would, or the preview shows two sleeves both taking the same
+                # ticket — a dry run has to predict the real cycle, not a
+                # looser version of it.
                 actions["entries"].append({"ticker": ticker, "strategy": sid,
                                            "size": round(size, 2), "composite": composite,
                                            "dry_run": True})
                 opened += 1
+                held.add(ticker)
+                if sector:
+                    sector_counts[sector] = sector_counts.get(sector, 0) + 1
                 continue
             res = open_position(conn, ticker=ticker, strategy_id=sid, price=px,
                                 dollars=size, cfg=cfg, rationale=rationale,
@@ -1296,6 +1303,7 @@ def _run_rotation_sleeve(conn, cycle_id: str, cfg: Dict, regime_name: str, sid: 
         if dry_run:
             actions["entries"].append({"ticker": ticker, "strategy": sid,
                                        "size": round(size, 2), "dry_run": True})
+            held.add(ticker)
             continue
         res = open_position(conn, ticker=ticker, strategy_id=sid, price=px,
                             dollars=size, cfg=cfg, rationale=rationale)
