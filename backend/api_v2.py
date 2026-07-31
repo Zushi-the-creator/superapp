@@ -14,7 +14,7 @@ import sys
 import time
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -7833,3 +7833,131 @@ async def sim_reset(confirm: str = "", starting_capital: float = 100000.0):
                             detail="Pass ?confirm=RESET to wipe the simulation book")
     _sim.reset(starting_capital=starting_capital)
     return {"ok": True, "state": _sim.get_state()}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# MIX9 — regime-switching entry/exit engine (deploy variant: SPY core)
+# ══════════════════════════════════════════════════════════════════════════
+# Replaces the always-on MR engine. Rules frozen in mix9_core.REGMAP; selectors
+# proven byte-identical to the backtest by _mix9_equiv_test.py (21 checks).
+#
+# Runs SLOW (~56s: all 7 component equity curves are recomputed from inception
+# on every call so the DD-stop can never drift from the backtest). So it is
+# always run in a thread, cached, and never invoked from a hot request path.
+
+_mix9_cache: Dict[str, Any] = {"ts": None, "payload": None}
+_MIX9_TTL = 3600  # seconds; the inputs only change on a new daily bar
+
+
+def _mix9_equity_and_book(prices: Optional[Dict[str, float]] = None) -> Tuple[float, Dict[str, float]]:
+    """Current account equity and {ticker: usd} from the live positions DB.
+
+    Uses the module-level PositionManager (positions.py exposes a class, not
+    module functions). Values open lots at the supplied live prices, falling
+    back to the stored avg entry when a quote is missing — a missing quote must
+    never silently zero a position and make MIX9 think it should buy it again.
+    """
+    prices = prices or {}
+    rows = _position_mgr._get_all_positions_sync(include_closed=False)
+    holdings: Dict[str, float] = {}
+    equity = 0.0
+    for p in rows:
+        tk = (p.get("ticker") or "").upper()
+        sh = float(p.get("shares") or 0.0)
+        if not tk or sh <= 0:
+            continue
+        px = float(prices.get(tk) or p.get("entry_price") or 0.0)
+        val = sh * px
+        if val > 0:
+            holdings[tk] = holdings.get(tk, 0.0) + val
+            equity += val
+    try:
+        equity += float(_compute_cash_balance(_total_deposited_now()))
+    except Exception:
+        pass   # positions-only equity still gives a usable target book
+    return equity, holdings
+
+
+async def _mix9_payload(force: bool = False) -> Dict[str, Any]:
+    now = datetime.now()
+    c = _mix9_cache
+    if (not force and c["payload"] is not None and c["ts"]
+            and (now - c["ts"]).total_seconds() < _MIX9_TTL):
+        return c["payload"]
+    import mix9_engine as _m9
+    equity, holdings = await asyncio.to_thread(_mix9_equity_and_book)
+    if equity <= 0:
+        equity = 19511.0  # fall back to a nominal book so the tab still renders
+    res = await asyncio.to_thread(_m9.run_cycle, equity, holdings, True, True)
+    res["holdings"] = holdings
+    res["computed_at"] = now.isoformat()
+    _mix9_cache.update({"ts": now, "payload": res})
+    return res
+
+
+@router.get("/mix9/state")
+async def mix9_state(force: bool = False):
+    """Target book, trade list to reach it, and every component's drawdown."""
+    try:
+        res = await _mix9_payload(force=force)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MIX9 engine error: {e}")
+    import mix9_engine as _m9
+    res["engine"] = {
+        "core_ticker": _m9.CORE_TICKER,
+        "dd_stop_pct": _m9.DD_STOP * 100,
+        "core_weight_pct": _m9.CORE_WEIGHT * 100,
+        "top_n": _m9.TOP_N,
+        "enabled": bool(_m9.get_state().get("enabled", 0)),
+        "note": ("Exits are NOT timers. A name leaves when it drops out of the active "
+                 "strategy's monthly top-10, when the regime switches strategy, or when "
+                 "that strategy falls >15% below its own peak (sleeve parks in the core)."),
+    }
+    return res
+
+
+@router.get("/mix9/decisions")
+async def mix9_decisions(limit: int = 200):
+    """Journal: every cycle, every trade instruction, with its reason."""
+    import mix9_engine as _m9
+    return {"decisions": await asyncio.to_thread(_m9.get_decisions, limit)}
+
+
+@router.post("/mix9/run")
+async def mix9_run(dry_run: bool = True, force: bool = True):
+    """Recompute now. dry_run=false persists the active-strategy / park state."""
+    import mix9_engine as _m9
+    equity, holdings = await asyncio.to_thread(_mix9_equity_and_book)
+    if equity <= 0:
+        raise HTTPException(status_code=400, detail="No live equity found in positions DB")
+    res = await asyncio.to_thread(_m9.run_cycle, equity, holdings, dry_run, force)
+    _mix9_cache.update({"ts": datetime.now(), "payload": res})
+    return res
+
+
+@router.post("/mix9/enable")
+async def mix9_enable(enabled: bool):
+    """Master switch. OFF by default — the engine computes and journals but the
+    trade list is advisory until this is turned on."""
+    import mix9_engine as _m9
+    _m9.set_state(enabled=int(enabled))
+    return {"ok": True, "enabled": enabled}
+
+
+async def mix9_engine_loop():
+    """Daily post-close cycle: recompute the target book and journal it."""
+    await asyncio.sleep(150)
+    while True:
+        try:
+            _et = datetime.now(ZoneInfo("America/New_York"))
+            if _et.weekday() < 5 and _et.hour >= 17:
+                res = await _mix9_payload(force=True)
+                t = res.get("target", {})
+                print(f"[MIX9] {t.get('asof')} regime={t.get('regime')} "
+                      f"-> {t.get('active_strategy')} dd={t.get('dd_pct')}% "
+                      f"parked={t.get('parked')} trades={len(res.get('trades', []))}")
+            else:
+                print(f"[MIX9] ET {_et.hour}:00 — outside post-close window, skipping")
+        except Exception as e:
+            print(f"[MIX9] loop error: {e}")
+        await asyncio.sleep(4 * 3600)
