@@ -42,7 +42,7 @@ TOP_N = 10
 FEE, SLIP, EFEE = 0.003, 0.0005, 0.0005
 
 # MIN_DWELL_DAYS — the guardrail between components. THIS IS NOT IN THE ORIGINAL
-# BACKTEST and it is not optional.
+# BACKTEST. Justified on COST, not on return (see the corrected numbers below).
 #
 # The mixing sim swaps which RETURN STREAM it earns (`ra = Rmat[active, t]`) and
 # charges NOTHING to move a real book from one component's holdings to another's.
@@ -52,12 +52,29 @@ FEE, SLIP, EFEE = 0.003, 0.0005, 0.0005
 # ~73% of the sleeve would turn over each time. Charged honestly that is a
 # 16-33%/yr drag, and it cut OOS CAGR 52.7% -> 38.4%.
 #
-# Requiring a component to stay active >= 21 trading days before it can be
-# replaced cuts switches to 8.8/yr and recovers OOS to 51.1% (Sharpe 1.59).
-# The surface is FLAT (5d 48.6%, 10d 48.5%, 21d 51.1%, month-end-only 48.5%) —
-# a plateau, not a tuned spike — and it is a cost-control parameter, not a
-# return-seeking one. Note it was still chosen after seeing this table, so treat
-# 51.1% as optimistic; 48.5% (the flat part) is the safer expectation.
+# CORRECTION (2026-08-01): the 16-33%/yr figure above came from a 0.35%/side
+# PERCENTAGE fee model. The broker's ACTUAL structure is 10 free trades/month
+# then $1.50 flat, and on a ~$19K book that makes commissions almost irrelevant —
+# slippage dominates. Re-modelled honestly:
+#
+#   config       sw/yr  fills/yr  billable  cost drag   OOS CAGR  Sharpe
+#   no dwell      33.6       398       313      2.40%      50.4%    1.60
+#   dwell 5       20.4       237       149      1.33%      57.6%    1.77
+#   dwell 10      13.3       152        65      0.81%      54.6%    1.70
+#   dwell 21       8.8       102        15      0.47%      55.3%    1.68
+#   dwell 42       5.2        61         8      0.29%      57.7%    1.74
+#   month-end      5.3        60         7      0.28%      50.9%    1.64
+#   XLK B&H          -         -         -          -      35.1%    1.37
+#
+# So no-dwell costs 2.40%/yr, not 16-33%. The RETURN column is NOISE — no dwell
+# setting ranks consistently across sub-periods, and the 50-58% spread is path
+# luck. Dwell is therefore chosen purely on COST:
+#   * 21 days holds fills to ~102/yr against a 120/yr free allowance, so
+#     COMMISSIONS ARE EFFECTIVELY ZERO (15 billable trades/yr, ~$22).
+#   * drag falls 2.40% -> 0.47%/yr, a real 1.93pp/yr saving.
+#   * no-dwell burns 313 billable trades/yr (~$469) AND churns a 2-day-median
+#     book that reverses 59% of the time.
+# Expect ~50-55% OOS, not 57%; the exact figure is not distinguishable from noise.
 MIN_DWELL_DAYS = 21
 
 # regime -> active strategy. FROZEN from IS-only (2016-06..2022-12) mean daily
