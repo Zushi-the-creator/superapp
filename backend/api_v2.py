@@ -8015,7 +8015,27 @@ async def mix9_snapshot_push(payload: Dict[str, Any]):
         raise HTTPException(status_code=400,
                             detail="Malformed snapshot: needs target.asof and target.active_strategy")
     import mix9_snapshot as _snap
+    import mix9_engine as _m9
     await asyncio.to_thread(_snap.save, payload)
+    # Also journal it here. The compute runs OFF-BOX, so its decision rows land in
+    # the dev machine's mix9.db and prod's audit trail would stay empty — which is
+    # exactly the record you need when reconstructing why a trade happened.
+    def _journal():
+        _m9.init_db()
+        with _m9._connect() as c:
+            _m9._log(c, (payload.get("cycle_id") or "pushed")[:12], "SNAPSHOT",
+                     asof=t["asof"], regime=t.get("regime", ""),
+                     strategy=t.get("active_strategy", ""), dd_pct=t.get("dd_pct", 0.0),
+                     reason=(f"off-box snapshot pushed; parked={t.get('parked')}; "
+                             f"dd {t.get('dd_pct')}% vs stop -{t.get('dd_stop_pct')}%; "
+                             f"{len(payload.get('trades') or [])} trade(s)"))
+            for tr in (payload.get("trades") or []):
+                _m9._log(c, (payload.get("cycle_id") or "pushed")[:12], tr.get("side", "?"),
+                         asof=t["asof"], ticker=tr.get("ticker", ""),
+                         regime=t.get("regime", ""), strategy=t.get("active_strategy", ""),
+                         target_usd=tr.get("target_usd", 0.0),
+                         reason=f"{tr.get('side')} ${tr.get('usd')} to reach target")
+    await asyncio.to_thread(_journal)
     return {"ok": True, "asof": t["asof"], "regime": t.get("regime"),
             "active_strategy": t["active_strategy"], "parked": t.get("parked"),
             "trades": len(payload.get("trades") or [])}

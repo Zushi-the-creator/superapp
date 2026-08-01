@@ -219,10 +219,17 @@ def component_equities(D: Mix9Data, asof_i: int) -> Dict[str, Dict]:
     }
     out = {}
     for k, c in curves.items():
-        eq = float(c[-1]); peak = float(np.maximum.accumulate(c)[-1])
+        pk_series = np.maximum.accumulate(c)
+        dd_series = (c / np.where(pk_series > 0, pk_series, 1) - 1) * 100
+        eq = float(c[-1]); peak = float(pk_series[-1])
+        # TRAJECTORY: the last 180 sessions of this strategy's drawdown vs its own
+        # peak. The sleeve unparks when this climbs back above -15%, so the shape
+        # of the recovery is the single most useful thing to look at while parked.
+        tail = dd_series[-180:]
         out[k] = {'equity': eq, 'peak': peak,
                   'dd_pct': (eq / peak - 1) * 100 if peak > 0 else 0.0,
-                  'parked': eq < peak * (1 - DD_STOP)}
+                  'parked': eq < peak * (1 - DD_STOP),
+                  'dd_history': [round(float(x), 2) for x in tail]}
     return out
 
 
@@ -250,28 +257,41 @@ def compute_target(equity_usd: float, asof: Optional[str] = None,
     # show the queue. Parked is the normal state (54.7% of backtest days) and an
     # empty Entries tab with no explanation reads like a broken feed.
     preview: List[Dict] = []
+    cols_p: List[int] = []
+    n_slots = TOP_N
     sel_p = D.selector(active)
     if sel_p:
         cols_p = sel_p(i, TOP_N)
-        if cols_p:
-            per_p = (equity_usd * SLEEVE_WEIGHT) / len(cols_p)
-            for c in cols_p:
-                px = float(D.Cf[i, c])
-                if np.isfinite(px) and px > 0:
-                    preview.append({'ticker': D.cols[c], 'target_usd': round(per_p, 2),
-                                    'price': round(px, 2), 'shares': round(per_p / px, 4)})
+    elif active in ('MOM-brk90', 'MR-dips90'):
+        # The two SIGNAL sleeves have no monthly selector — they fill up to 5 slots
+        # from that day's signal list, ranked by score. Without this branch the
+        # Entries tab was blank whenever HEALTHY was active (MOM-brk90), which is
+        # the MOST COMMON regime (58% of days) — the tab would look broken exactly
+        # when it matters most.
+        n_slots = 5
+        if active == 'MOM-brk90':
+            sig, score = D.mom_sig.get(i, []), D.MOMS
+        else:
+            sig, score = D.mr_sig.get(i, []), D.MRS
+        cols_p = sorted(sig, key=lambda c: -score[i, c])[:n_slots]
+    if cols_p:
+        per_p = (equity_usd * SLEEVE_WEIGHT) / n_slots
+        for c in cols_p:
+            px = float(D.Cf[i, c])
+            if np.isfinite(px) and px > 0:
+                preview.append({'ticker': D.cols[c], 'target_usd': round(per_p, 2),
+                                'price': round(px, 2), 'shares': round(per_p / px, 4)})
 
     picks: List[Dict] = []
     if parked:
         core_usd += sleeve_usd
         sleeve_usd = 0.0
     else:
-        sel = D.selector(active)
-        cols = sel(i, TOP_N) if sel else []
-        if not cols:                       # selector empty -> park rather than guess
+        cols = cols_p                      # same candidates the preview computed
+        if not cols:                       # nothing qualifies -> park rather than guess
             core_usd += sleeve_usd; sleeve_usd = 0.0; parked = True
         else:
-            per = sleeve_usd / len(cols)
+            per = sleeve_usd / n_slots     # signal sleeves size by SLOTS, not by fill count
             for c in cols:
                 px = float(D.Cf[i, c])
                 if not np.isfinite(px) or px <= 0: continue
@@ -291,6 +311,14 @@ def compute_target(equity_usd: float, asof: Optional[str] = None,
         'is_rebalance_day': (i - 1) in D.month_end or i in D.month_end,
         'components': {k: {'dd_pct': round(v['dd_pct'], 2), 'parked': v['parked']}
                        for k, v in comps.items()},
+        # what the UI needs to show "how close are we to entering?"
+        'dd_history': ddinfo.get('dd_history', []),
+        'dd_dates': [D.dates[j] for j in range(max(0, i - len(ddinfo.get('dd_history', [])) + 1), i + 1)],
+        'gap_to_unpark_pp': round(max(0.0, -DD_STOP * 100 - ddinfo['dd_pct']), 2),
+        'pct_of_way_back': round(
+            min(100.0, max(0.0, 100.0 * (1 - (abs(ddinfo['dd_pct']) - DD_STOP * 100) /
+                                         max(abs(min(ddinfo.get('dd_history', [ddinfo['dd_pct']]))) - DD_STOP * 100, 1e-9)))), 1)
+            if ddinfo['dd_pct'] < -DD_STOP * 100 else 100.0,
     }
 
 
