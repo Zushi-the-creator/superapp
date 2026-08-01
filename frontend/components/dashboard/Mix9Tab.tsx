@@ -13,6 +13,75 @@ import type { Mix9State } from "@/lib/types";
  */
 
 
+
+/** Drawdown trajectory: how far the active strategy is from its own peak, and
+ *  how close that is to the -15% line where the sleeve deploys. This is the
+ *  single most useful thing to look at while parked — the LEVEL says how far
+ *  there is to go, the SHAPE says whether it is closing. */
+function DDTrajectory({ hist, dates, stop, gap, pct }: {
+  hist: number[]; dates: string[]; stop: number; gap: number; pct: number;
+}) {
+  if (!hist?.length) return null;
+  const W = 900, H = 170, PL = 44, PR = 12, PT = 12, PB = 22;
+  const lo = Math.min(...hist, -stop) * 1.08;
+  const hi = Math.max(...hist, 0) * 1.08 || 2;
+  const x = (i: number) => PL + (i / Math.max(hist.length - 1, 1)) * (W - PL - PR);
+  const y = (v: number) => PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB);
+  const line = hist.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(hist.length - 1).toFixed(1)},${y(lo).toFixed(1)} L${x(0).toFixed(1)},${y(lo).toFixed(1)} Z`;
+  const last = hist[hist.length - 1];
+  const armed = last >= -stop;
+  return (
+    <div className="rounded border border-neutral-800">
+      <div className="flex items-baseline justify-between border-b border-neutral-800 px-4 py-2">
+        <span className="text-sm font-medium text-neutral-200">
+          Trajectory to entry
+          <span className="ml-2 text-xs font-normal text-neutral-500">
+            active strategy vs its own peak · {hist.length} sessions
+          </span>
+        </span>
+        <span className="text-xs text-neutral-400">
+          {armed ? <span className="text-emerald-400">above the line — sleeve deploys</span>
+                 : <><span className="text-amber-400">{gap.toFixed(1)}pp</span> to go · {pct.toFixed(0)}% of the way back</>}
+        </span>
+      </div>
+      <div className="overflow-x-auto p-3">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 520 }}>
+          <defs>
+            <linearGradient id="ddg" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={armed ? "#10b981" : "#f59e0b"} stopOpacity="0.28" />
+              <stop offset="100%" stopColor={armed ? "#10b981" : "#f59e0b"} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {[0, -stop, Math.floor(lo / 10) * 10].map((g, i) => (
+            <g key={i}>
+              <line x1={PL} x2={W - PR} y1={y(g)} y2={y(g)}
+                    stroke={g === -stop ? "#f59e0b" : "#262626"}
+                    strokeWidth={g === -stop ? 1.5 : 1}
+                    strokeDasharray={g === -stop ? "5 4" : undefined} />
+              <text x={4} y={y(g) + 4} fontSize="10"
+                    fill={g === -stop ? "#f59e0b" : "#525252"}>
+                {g === -stop ? `${-stop}% stop` : `${g}%`}
+              </text>
+            </g>
+          ))}
+          <path d={area} fill="url(#ddg)" />
+          <path d={line} fill="none" stroke={armed ? "#10b981" : "#f59e0b"} strokeWidth="1.8" />
+          <circle cx={x(hist.length - 1)} cy={y(last)} r="3.5" fill={armed ? "#10b981" : "#f59e0b"} />
+          <text x={x(hist.length - 1) - 6} y={y(last) - 9} fontSize="11" textAnchor="end"
+                fill={armed ? "#10b981" : "#f59e0b"}>{last.toFixed(1)}%</text>
+          {dates?.length === hist.length && [0, Math.floor(hist.length / 2), hist.length - 1].map(i => (
+            <text key={i} x={x(i)} y={H - 6} fontSize="9" fill="#525252"
+                  textAnchor={i === 0 ? "start" : i === hist.length - 1 ? "end" : "middle"}>
+              {dates[i]}
+            </text>
+          ))}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 const money = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
 export function Mix9Tab() {
@@ -85,6 +154,13 @@ export function Mix9Tab() {
             {t.active_strategy} is {t.dd_pct?.toFixed(1)}% from its own peak (stop −{t.dd_stop_pct}%)
           </span>
         </div>
+        {t.dwell_blocked && (
+          <p className="mt-1 text-xs text-blue-300">
+            Regime wants <b>{t.wanted_strategy}</b>, but {t.active_strategy} holds the sleeve for
+            another {t.dwell_days_left}d ({t.min_dwell_days}d minimum). This guardrail exists because
+            the regime flips every ~2 days and reverses 59% of the time.
+          </p>
+        )}
         <p className="mt-1 text-xs text-neutral-400">
           {live
             ? "The 70% sleeve is deployed in the names below."
@@ -132,6 +208,11 @@ export function Mix9Tab() {
           </table>
         </div>
       )}
+
+      {/* how close are we to entering? */}
+      <DDTrajectory hist={t.dd_history ?? []} dates={t.dd_dates ?? []}
+                    stop={t.dd_stop_pct} gap={t.gap_to_unpark_pp ?? 0}
+                    pct={t.pct_of_way_back ?? 0} />
 
       {/* ENTRIES — the queue, shown whether live or parked */}
       <div className="rounded border border-neutral-800">

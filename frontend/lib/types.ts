@@ -898,6 +898,10 @@ export interface Mix9State {
     core: { ticker: string; target_usd: number; price: number; shares: number };
     sleeve: Mix9Pick[]; preview_sleeve?: Mix9Pick[];
     components: Record<string, { dd_pct: number; parked: boolean }>;
+    dd_history?: number[]; dd_dates?: string[];
+    gap_to_unpark_pp?: number; pct_of_way_back?: number;
+    wanted_strategy?: string; dwell_blocked?: boolean;
+    dwell_days_left?: number; min_dwell_days?: number;
   };
   trades?: Mix9Trade[];
   engine?: { core_ticker: string; enabled: boolean; dd_stop_pct: number; note: string };
