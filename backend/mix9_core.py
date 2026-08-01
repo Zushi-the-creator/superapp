@@ -41,6 +41,25 @@ SLEEVE_WEIGHT = 0.70
 TOP_N = 10
 FEE, SLIP, EFEE = 0.003, 0.0005, 0.0005
 
+# MIN_DWELL_DAYS — the guardrail between components. THIS IS NOT IN THE ORIGINAL
+# BACKTEST and it is not optional.
+#
+# The mixing sim swaps which RETURN STREAM it earns (`ra = Rmat[active, t]`) and
+# charges NOTHING to move a real book from one component's holdings to another's.
+# Measured on the live rule: 33.6 strategy switches/yr, median active run of just
+# 2 DAYS, 36% of runs lasting exactly one day, and 59% of switches reversing
+# within 5 days. Consecutive components share only ~27% of their holdings, so
+# ~73% of the sleeve would turn over each time. Charged honestly that is a
+# 16-33%/yr drag, and it cut OOS CAGR 52.7% -> 38.4%.
+#
+# Requiring a component to stay active >= 21 trading days before it can be
+# replaced cuts switches to 8.8/yr and recovers OOS to 51.1% (Sharpe 1.59).
+# The surface is FLAT (5d 48.6%, 10d 48.5%, 21d 51.1%, month-end-only 48.5%) —
+# a plateau, not a tuned spike — and it is a cost-control parameter, not a
+# return-seeking one. Note it was still chosen after seeing this table, so treat
+# 51.1% as optimistic; 48.5% (the flat part) is the safer expectation.
+MIN_DWELL_DAYS = 21
+
 # regime -> active strategy. FROZEN from IS-only (2016-06..2022-12) mean daily
 # return per regime. Do NOT re-fit this on newer data: re-deriving it after
 # seeing 2023+ is exactly the lookahead the walk-forward was built to exclude.

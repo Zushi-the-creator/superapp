@@ -31,7 +31,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from mix9_core import (Mix9Data, REGMAP, STRATEGIES, DD_STOP, CORE_WEIGHT,
-                       SLEEVE_WEIGHT, TOP_N, INCEPTION, FEE, SLIP, EFEE)
+                       SLEEVE_WEIGHT, TOP_N, INCEPTION, FEE, SLIP, EFEE,
+                       MIN_DWELL_DAYS)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, 'data', 'mix9.db')
@@ -67,7 +68,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS mix9_state (
             id INTEGER PRIMARY KEY CHECK (id=1),
             core_ticker TEXT, enabled INTEGER DEFAULT 0,
-            last_rebalance_date TEXT, last_active_strategy TEXT,
+            last_rebalance_date TEXT, last_active_strategy TEXT, last_switch_date TEXT,
             dd_parked INTEGER DEFAULT 0, updated_at TEXT);
         CREATE TABLE IF NOT EXISTS mix9_decisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, cycle_id TEXT, ts TEXT,
@@ -243,7 +244,25 @@ def compute_target(equity_usd: float, asof: Optional[str] = None,
     i = D.ND - 1 if asof is None else D.index_of_date(asof)
     asof_d = D.dates[i]
     regime = D.regime_at(i)
-    active = REGMAP.get(regime, 'TREND10')
+    wanted = REGMAP.get(regime, 'TREND10')
+
+    # DWELL GUARDRAIL: a component must hold the sleeve for MIN_DWELL_DAYS before
+    # anything can displace it. Without this the book chased a regime that flips
+    # every ~2 days and reverses 59% of the time — see MIN_DWELL_DAYS in mix9_core.
+    st_prev = get_state()
+    active = wanted
+    dwell_block = False
+    prev_active = st_prev.get('last_active_strategy')
+    since = st_prev.get('last_switch_date')
+    if prev_active and prev_active != wanted and since:
+        try:
+            held = sum(1 for j in range(D.ND) if since < D.dates[j] <= asof_d)
+        except Exception:
+            held = MIN_DWELL_DAYS
+        if held < MIN_DWELL_DAYS:
+            active = prev_active
+            dwell_block = True
+            dwell_left = MIN_DWELL_DAYS - held
     comps = component_equities(D, i)
     ddinfo = comps[active]
     parked = bool(ddinfo['parked'])
@@ -309,6 +328,10 @@ def compute_target(equity_usd: float, asof: Optional[str] = None,
         'sleeve_usd': round(sleeve_usd, 2),
         'equity_usd': round(equity_usd, 2),
         'is_rebalance_day': (i - 1) in D.month_end or i in D.month_end,
+        'wanted_strategy': wanted,
+        'dwell_blocked': dwell_block,
+        'dwell_days_left': (dwell_left if dwell_block else 0),
+        'min_dwell_days': MIN_DWELL_DAYS,
         'components': {k: {'dd_pct': round(v['dd_pct'], 2), 'parked': v['parked']}
                        for k, v in comps.items()},
         # what the UI needs to show "how close are we to entering?"
@@ -373,6 +396,8 @@ def run_cycle(equity_usd: float, current: Dict[str, float],
                       "(asof, strategy, equity, peak, dd_pct) VALUES (?,?,?,?,?)",
                       (tgt['asof'], k, 0.0, 0.0, v['dd_pct']))
     if not dry_run:
+        if st.get('last_active_strategy') != tgt['active_strategy']:
+            set_state(last_switch_date=tgt['asof'])
         set_state(last_active_strategy=tgt['active_strategy'],
                   dd_parked=int(tgt['parked']),
                   last_rebalance_date=tgt['asof'] if should_trade else st.get('last_rebalance_date'))
