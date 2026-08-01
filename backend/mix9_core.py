@@ -45,36 +45,45 @@ FEE, SLIP, EFEE = 0.003, 0.0005, 0.0005
 # BACKTEST. Justified on COST, not on return (see the corrected numbers below).
 #
 # The mixing sim swaps which RETURN STREAM it earns (`ra = Rmat[active, t]`) and
-# charges NOTHING to move a real book from one component's holdings to another's.
-# Measured on the live rule: 33.6 strategy switches/yr, median active run of just
-# 2 DAYS, 36% of runs lasting exactly one day, and 59% of switches reversing
-# within 5 days. Consecutive components share only ~27% of their holdings, so
-# ~73% of the sleeve would turn over each time. Charged honestly that is a
-# 16-33%/yr drag, and it cut OOS CAGR 52.7% -> 38.4%.
+# charges NOTHING to move a real book between components. Measured on the live
+# rule: 33.6 raw switches/yr, median active run of 2 DAYS, 36% of runs lasting
+# exactly one day, 61% of costly switches reversing within 5 days.
 #
 # CORRECTION (2026-08-01): the 16-33%/yr figure above came from a 0.35%/side
 # PERCENTAGE fee model. The broker's ACTUAL structure is 10 free trades/month
 # then $1.50 flat, and on a ~$19K book that makes commissions almost irrelevant —
 # slippage dominates. Re-modelled honestly:
 #
-#   config       sw/yr  fills/yr  billable  cost drag   OOS CAGR  Sharpe
-#   no dwell      33.6       398       313      2.40%      50.4%    1.60
-#   dwell 5       20.4       237       149      1.33%      57.6%    1.77
-#   dwell 10      13.3       152        65      0.81%      54.6%    1.70
-#   dwell 21       8.8       102        15      0.47%      55.3%    1.68
-#   dwell 42       5.2        61         8      0.29%      57.7%    1.74
-#   month-end      5.3        60         7      0.28%      50.9%    1.64
-#   XLK B&H          -         -         -          -      35.1%    1.37
+# TWO further errors were found and fixed, pulling OPPOSITE ways:
+#   (a) 38% of switches cost NOTHING — when the sleeve is already parked in the
+#       core and the incoming component is also parked, no book moves. So only
+#       20.8 of the 33.6 switches/yr generate any fill at all.
+#   (b) holdings overlap on COSTLY switches is 6% (median 0%), not 27% — rotation
+#       <-> signal-sleeve pairs share nothing. So ~94% turns over, not 73%.
 #
-# So no-dwell costs 2.40%/yr, not 16-33%. The RETURN column is NOISE — no dwell
-# setting ranks consistently across sub-periods, and the 50-58% spread is path
-# luck. Dwell is therefore chosen purely on COST:
-#   * 21 days holds fills to ~102/yr against a 120/yr free allowance, so
-#     COMMISSIONS ARE EFFECTIVELY ZERO (15 billable trades/yr, ~$22).
-#   * drag falls 2.40% -> 0.47%/yr, a real 1.93pp/yr saving.
-#   * no-dwell burns 313 billable trades/yr (~$469) AND churns a 2-day-median
-#     book that reverses 59% of the time.
-# Expect ~50-55% OOS, not 57%; the exact figure is not distinguishable from noise.
+# Final verified model (10 free/mo then $1.50, 5bps slip/side, parked switches
+# free, 6% overlap, monthly component rebalance included):
+#
+#   config      sw/yr  costly  fills/yr  billable  $fees/yr  drag   OOS   Sharpe
+#   no dwell     33.6    20.9       304       239      $358  1.91%  51.6%   1.63
+#   dwell 5      20.4    11.8       187       123      $184  1.03%  58.5%   1.79
+#   dwell 10     13.3     8.2       136        71      $106  0.66%  55.1%   1.71
+#   dwell 21      8.8     5.4       106        42       $63  0.42%  55.6%   1.69
+#   dwell 42      5.2     3.3        82        26       $40  0.26%  57.9%   1.74
+#   month-end     5.3     3.1        70        21       $31  0.23%  51.1%   1.64
+#   XLK B&H         -       -         -         -         -      -  35.1%   1.37
+#
+# The RETURN column is NOISE and this was tested, not asserted:
+#   * dwell5 vs dwell21 paired t on 41 OOS months = +0.42 (need |t|>2)
+#   * block bootstrap: dwell5 wins only 65% of resamples (need >95%)
+#   * NON-MONOTONIC in the parameter (51.3/58.3/54.9/55.4/57.8) — the signature
+#     of noise, since a real effect moves smoothly with the knob
+#
+# COST is the only thing that moves monotonically, so dwell is chosen on cost.
+# 21 days: 106 fills/yr against a 120/yr free allowance, 42 billable (~$63/yr),
+# drag 0.42%. Note fills BUNCH into single months, which is why 106 < 120 still
+# produces billable trades.
+# Honest expectation: 51-56% OOS. Quote the low end.
 MIN_DWELL_DAYS = 21
 
 # regime -> active strategy. FROZEN from IS-only (2016-06..2022-12) mean daily

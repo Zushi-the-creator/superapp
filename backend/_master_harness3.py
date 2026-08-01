@@ -88,7 +88,7 @@ def REGf(i):
     return 'HEALTHY'
 R=[REGf(i) for i in range(ND)]
 qc_=C.columns.get_loc('QQQ');QQ=Cf[:,qc_];SP=Cf[:,C.columns.get_loc('SPY')];XL=Cf[:,C.columns.get_loc('XLK')]
-q200=pd.Series(QQ).rolling(200).mean().values
+q200=pd.Series(QQ).rolling(200,min_periods=180).mean().values  # QQ is ffilled, but keep the invariant uniform
 sig={}
 gr,gc=np.where(mrg)
 for i,c in zip(gr,gc): sig.setdefault(('mr',i),[]).append(c)
