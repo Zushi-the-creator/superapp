@@ -8007,11 +8007,22 @@ async def mix9_decisions(limit: int = 200):
 
 @router.post("/mix9/run")
 async def mix9_run():
-    """Rebuild the snapshot now, in a subprocess. Takes ~2-5 min on prod hardware."""
+    """Rebuild the snapshot now — ONLY works on a machine with enough RAM.
+
+    The job peaks at ~4.5GB and this instance has 1GB, so here it will always be
+    refused by the memory gate. That is deliberate: computing in-process
+    OOM-killed the whole app twice. The real refresh path is the nightly off-box
+    cron, which computes where the RAM is and POSTs to /mix9/snapshot.
+
+    Returns 503 (not 500) when refused — the service is fine, this capability
+    just isn't available on this hardware.
+    """
     try:
         return await _mix9_snapshot_refresh()
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="MIX9 snapshot timed out (>15 min)")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MIX9 snapshot failed: {e}")
 

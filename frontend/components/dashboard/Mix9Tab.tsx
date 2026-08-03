@@ -103,8 +103,6 @@ export function Mix9Tab() {
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [busy, setBusy] = useState(false);
-
   const load = () => {
     setLoading(true);
     api.getMix9State()
@@ -113,15 +111,6 @@ export function Mix9Tab() {
       .finally(() => setLoading(false));
   };
 
-  /** Actually RECOMPUTE, not just re-read the cached snapshot. The old Refresh
-   *  called the GET, so it returned identical data and read as a broken button. */
-  const recompute = () => {
-    setBusy(true);
-    api.runMix9()
-      .then(d => { setS(d); setErr(null); })
-      .catch(e => setErr(String(e)))
-      .finally(() => setBusy(false));
-  };
   useEffect(load, []);
 
   if (loading && !s) return <div className="p-6 text-neutral-400">Loading MIX9…</div>;
@@ -163,14 +152,14 @@ export function Mix9Tab() {
             s?.engine?.enabled ? "bg-emerald-900 text-emerald-200" : "bg-neutral-800 text-neutral-400"}`}>
             {s?.engine?.enabled ? "AUTO ON" : "ADVISORY"}
           </span>
-          <button onClick={load} disabled={busy}
-                  className="rounded bg-neutral-800 px-3 py-1 text-xs text-neutral-200 disabled:opacity-40">
+          <button onClick={load}
+                  className="rounded bg-neutral-800 px-3 py-1 text-xs text-neutral-200">
             Reload
           </button>
-          <button onClick={recompute} disabled={busy}
-                  className="rounded bg-blue-900 px-3 py-1 text-xs text-blue-100 disabled:opacity-40">
-            {busy ? "Recomputing…" : "Recompute"}
-          </button>
+          <span className="rounded bg-neutral-900 px-3 py-1 text-xs text-neutral-500"
+                title="The snapshot job peaks at ~4.5GB and the server has 1GB, so it is computed off-box by the nightly cron and pushed here. There is no in-app recompute.">
+            auto-updates 16:15 ET
+          </span>
         </div>
       </div>
 
@@ -180,8 +169,9 @@ export function Mix9Tab() {
             SNAPSHOT IS {staleDays(t.asof)} TRADING {staleDays(t.asof) === 1 ? "DAY" : "DAYS"} OLD
           </span>
           <p className="mt-1 text-xs text-neutral-400">
-            Last closed bar {t.asof}. The nightly job runs after the US close on weekdays;
-            if it has not run, this is what you are looking at. Press Recompute to rebuild now.
+            Last closed bar {t.asof}. The snapshot is rebuilt off-box by the nightly job at
+            16:15 ET on weekdays and pushed here — the server itself has too little memory to
+            compute it. If this age keeps growing, that job has stopped running.
           </p>
         </div>
       )}
