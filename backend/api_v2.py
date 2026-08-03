@@ -7476,7 +7476,23 @@ async def _sim_earnings(tickers: List[str],
             print(f"[Sim] earnings fetch error: {e}")
             fetched = {}
         for t in fetch:
-            _sim_earnings_cache[t] = ((fetched.get(t) or {}).get("date"), now)
+            new_date = (fetched.get(t) or {}).get("date")
+            prev = _sim_earnings_cache.get(t)
+            # A failed lookup must NEVER erase a known future earnings date.
+            # It did until 2026-08-03: a name flapped between "has earnings"
+            # and "unknown" as partial fetches came back, and each flap was one
+            # more sell/re-buy round trip (SNDK churned 4x on 07-31 even after
+            # entry and exit were made to agree WITHIN a cycle — they still
+            # disagreed ACROSS cycles). Only let None win once the date is past,
+            # which is also what lets us pick up the next quarter's date.
+            if new_date is None and prev and prev[0]:
+                try:
+                    if datetime.strptime(str(prev[0])[:10], "%Y-%m-%d").date() >= now.date():
+                        _sim_earnings_cache[t] = (prev[0], now)
+                        continue
+                except Exception:
+                    pass
+            _sim_earnings_cache[t] = (new_date, now)
         got = sum(1 for t in fetch if _sim_earnings_cache[t][0])
         held_missing = [t for t in prio if not (_sim_earnings_cache.get(t) or (None,))[0]]
         print(f"[Sim] earnings: fetched {len(fetch)}/{len(missing)} due, {got} with a date"
