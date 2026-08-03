@@ -1647,6 +1647,27 @@ def write_daily_log(prices: Optional[Dict[str, float]] = None,
     return get_daily_log(limit=1)[0] if get_daily_log(limit=1) else {}
 
 
+def prune_daily_log() -> int:
+    """Drop log rows for dates the book never marked.
+
+    Guarding write_daily_log stops NEW bad rows; it doesn't remove ones already
+    written. The first backfill left weekend rows reading -100% benchmark and
+    +101pp alpha, and those would keep skewing the cumulative-alpha header
+    forever. A log row is only valid if a sim_equity row backs it.
+    """
+    _ensure()
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            """DELETE FROM sim_daily_log
+               WHERE date NOT IN (SELECT date FROM sim_equity)"""
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
 def get_daily_log(limit: int = 60) -> List[Dict]:
     _ensure()
     conn = _connect()

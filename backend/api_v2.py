@@ -7729,8 +7729,9 @@ async def sim_daily_rebuild(days: int = 10):
             (out if res else skipped).append(d)
         except Exception as e:
             print(f"[Sim] daily log {d} failed: {e}")
+    pruned = await asyncio.to_thread(_sim.prune_daily_log)
     # skipped = no equity snapshot that day (weekend/holiday/pre-reset)
-    return {"rebuilt": out, "skipped_no_snapshot": skipped}
+    return {"rebuilt": out, "skipped_no_snapshot": skipped, "pruned_orphans": pruned}
 
 
 @router.get("/sim/decisions")
