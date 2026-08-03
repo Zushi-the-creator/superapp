@@ -7425,91 +7425,37 @@ async def _sim_rotation_ranks_cached() -> List[str]:
     return ranks
 
 
-_sim_earnings_cache: Dict[str, Tuple[Optional[str], datetime]] = {}  # ticker -> (date|None, fetched_at)
-_SIM_EARN_TTL_HIT = 12 * 3600   # a confirmed date barely moves
-_SIM_EARN_TTL_MISS = 900        # no date usually means the API failed — retry soon
-
-
-_SIM_EARN_MAX_NEW = 15  # non-held tickers fetched per cycle — bounds Finnhub use
-
-
 async def _sim_earnings(tickers: List[str],
                         priority: Optional[List[str]] = None) -> Dict[str, Dict]:
-    """Next-earnings date per ticker, cached PER TICKER (not per ticker-set).
+    """Next-earnings date per ticker, via the redundant persistent calendar.
 
-    next_earnings_batch issues one Finnhub call per ticker. Keying the cache on
-    the whole ticker set (what _portfolio_next_earnings_cached does, fine for a
-    3-name portfolio) means any change to the candidate list re-fetches all ~35
-    names every cycle. That exceeds the 60/min Finnhub budget, the calls come
-    back empty, and the earnings guard silently switches OFF on both the entry
-    and the exit side — which is exactly how AMD/SNDK sat in the book with
-    earnings 4 days out (2026-07-31).
+    Delegates to earnings_calendar, which sweeps Nasdaq BY DATE (~13 calls
+    covers every listed company for 12 days, vs 40+ per-ticker Finnhub calls
+    per cycle for partial coverage) and persists to SQLite so a restart or an
+    outage cannot blind the binary-event guard.
 
-    Stores the DATE, never days_to, so a cached row stays correct as days pass.
-    Misses get a short TTL because a miss is far more often a failed call than
-    a company with no earnings inside 80 days.
-
-    `priority` (the held names) is ALWAYS fetched in full; everything else is
-    capped per cycle. A partial fetch that drops a held name switches its exit
-    guard off, whereas a candidate we haven't priced yet simply gets picked up
-    on a later cycle — so the holdings must never be the ones truncated.
+    `priority` is the held names — logged explicitly when the calendar has
+    nothing for them, because "we don't know" and "nothing due" must never
+    look the same in the logs again.
     """
-    now = datetime.now()
-    today = now.date()
+    import earnings_calendar as _ec
     want = sorted({t for t in tickers if t})
-    missing = [
-        t for t in want
-        if t not in _sim_earnings_cache
-        or (now - _sim_earnings_cache[t][1]).total_seconds() >
-           (_SIM_EARN_TTL_HIT if _sim_earnings_cache[t][0] else _SIM_EARN_TTL_MISS)
-    ]
-    prio = set(priority or [])
-    fetch = [t for t in missing if t in prio] + \
-            [t for t in missing if t not in prio][:_SIM_EARN_MAX_NEW]
-    if fetch:
-        try:
-            from tiingo_earnings import next_earnings_batch
-            async with aiohttp.ClientSession() as ses:
-                fetched = await next_earnings_batch(ses, fetch, forward_days=80,
-                                                    concurrency=4)
-        except Exception as e:
-            print(f"[Sim] earnings fetch error: {e}")
-            fetched = {}
-        for t in fetch:
-            new_date = (fetched.get(t) or {}).get("date")
-            prev = _sim_earnings_cache.get(t)
-            # A failed lookup must NEVER erase a known future earnings date.
-            # It did until 2026-08-03: a name flapped between "has earnings"
-            # and "unknown" as partial fetches came back, and each flap was one
-            # more sell/re-buy round trip (SNDK churned 4x on 07-31 even after
-            # entry and exit were made to agree WITHIN a cycle — they still
-            # disagreed ACROSS cycles). Only let None win once the date is past,
-            # which is also what lets us pick up the next quarter's date.
-            if new_date is None and prev and prev[0]:
-                try:
-                    if datetime.strptime(str(prev[0])[:10], "%Y-%m-%d").date() >= now.date():
-                        _sim_earnings_cache[t] = (prev[0], now)
-                        continue
-                except Exception:
-                    pass
-            _sim_earnings_cache[t] = (new_date, now)
-        got = sum(1 for t in fetch if _sim_earnings_cache[t][0])
-        held_missing = [t for t in prio if not (_sim_earnings_cache.get(t) or (None,))[0]]
-        print(f"[Sim] earnings: fetched {len(fetch)}/{len(missing)} due, {got} with a date"
-              + (f" | HELD WITHOUT A DATE: {held_missing}" if held_missing else ""))
+    if not want:
+        return {}
+    try:
+        found, unknown = await _ec.get_next_earnings(want)
+    except Exception as e:
+        print(f"[Sim] earnings calendar error: {e}")
+        return {}
 
-    out: Dict[str, Dict] = {}
-    for t in want:
-        entry = _sim_earnings_cache.get(t)
-        if not entry or not entry[0]:
-            continue
-        try:
-            d = datetime.strptime(str(entry[0])[:10], "%Y-%m-%d").date()
-        except Exception:
-            continue
-        out[t] = {"date": entry[0], "days_to": (d - today).days}
-    return out
-
+    prio = [t for t in (priority or []) if t in unknown]
+    fresh = _ec.sweep_is_fresh()
+    inside = sum(1 for v in found.values() if 0 <= (v.get("days_to") or 999) <= 7)
+    note = "" if fresh else " | SWEEP STALE — unknowns are NOT authoritative"
+    print(f"[Sim] earnings: {len(found)}/{len(want)} dated, {inside} inside 7d, "
+          f"{len(unknown)} with none in the window{note}"
+          + (f" | held unknown: {prio}" if prio and not fresh else ""))
+    return found
 
 async def _sim_sentiment(tickers: List[str]) -> Dict[str, Dict]:
     """Stock-specific sentiment for held names (exit input, not entry veto)."""
@@ -7682,6 +7628,14 @@ async def sim_state():
     state["market_session"] = _get_market_session()
     state["cycle_running"] = _sim_cycle_running
     state["last_cycle"] = _sim_last_cycle
+    # Surface the health of the binary-event guard. It failed silently twice
+    # (2026-07-31, 08-03) and both times looked identical to "nothing due", so
+    # its freshness belongs in the payload rather than only in the logs.
+    try:
+        import earnings_calendar as _ec
+        state["earnings_calendar"] = {**_ec.stats(), "fresh": _ec.sweep_is_fresh()}
+    except Exception as e:
+        state["earnings_calendar"] = {"error": str(e), "fresh": False}
     return state
 
 
