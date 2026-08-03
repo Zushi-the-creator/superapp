@@ -7603,6 +7603,16 @@ async def sim_engine_loop():
                 # Mark-to-close: no fills (session != REGULAR), but exits get
                 # journalled and the daily equity/benchmark row is written.
                 await _sim_run_cycle()
+                # Then the operator log for the day — written AFTER the mark so
+                # it reads the final equity row, not an intraday one.
+                try:
+                    _pos = _sim.get_open_positions()
+                    _px = await _sim_prices([p["ticker"] for p in _pos])
+                    log = await asyncio.to_thread(
+                        _sim.write_daily_log, _px, _check_market_regime().get("regime", ""))
+                    print(f"[Sim] daily log {today}: {log.get('headline','')}")
+                except Exception as e:
+                    print(f"[Sim] daily log error: {e}")
                 last_close_snapshot = today
                 await asyncio.sleep(1800)
                 continue
@@ -7697,6 +7707,29 @@ async def sim_candidates(limit: int = 40):
     return {"candidates": out, "regime": inp["regime"],
             "rotation_ranks": inp["rotation_ranks"],
             "market_session": inp["session"]}
+
+
+@router.get("/sim/daily")
+async def sim_daily(limit: int = 60):
+    """Daily operator log — what the book did each day, built from the journal."""
+    return {"days": _sim.get_daily_log(limit=limit)}
+
+
+@router.post("/sim/daily/rebuild")
+async def sim_daily_rebuild(days: int = 10):
+    """Recompute the daily log for the last N calendar days from the journal."""
+    open_pos = _sim.get_open_positions()
+    prices = await _sim_prices([p["ticker"] for p in open_pos])
+    regime = _check_market_regime().get("regime", "")
+    out = []
+    for i in range(days):
+        d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        try:
+            await asyncio.to_thread(_sim.write_daily_log, prices, regime, d)
+            out.append(d)
+        except Exception as e:
+            print(f"[Sim] daily log {d} failed: {e}")
+    return {"rebuilt": out}
 
 
 @router.get("/sim/decisions")

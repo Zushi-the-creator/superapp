@@ -250,6 +250,20 @@ CREATE TABLE IF NOT EXISTS sim_equity (
     regime TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS sim_daily_log (
+    date TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    equity_open REAL, equity_close REAL,
+    day_pnl REAL, day_pnl_pct REAL,
+    bench_pct REAL, alpha_pp REAL,
+    entries INTEGER DEFAULT 0, exits INTEGER DEFAULT 0,
+    skips INTEGER DEFAULT 0, cycles INTEGER DEFAULT 0,
+    turnover_usd REAL DEFAULT 0, fees_usd REAL DEFAULT 0,
+    regime TEXT DEFAULT '',
+    headline TEXT DEFAULT '',
+    detail TEXT DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS sim_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1526,6 +1540,122 @@ def _trade_stats(rows: List[Dict]) -> Dict:
         # None = undefined (no losing trades yet), not "zero profit factor"
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
     }
+
+
+def write_daily_log(prices: Optional[Dict[str, float]] = None,
+                    regime_name: str = "", date: Optional[str] = None) -> Dict:
+    """Write/refresh today's operator log — what the book actually did today.
+
+    Built from the journal and the ledger rather than narrated, so it can't
+    drift from what happened. Turnover and fees are first-class because the
+    measured research puts the high-turnover cohort at -3.8 to -6.5 pp/yr:
+    the point of reporting them daily is to make churn visible the day it
+    starts, not a quarter later.
+    """
+    _ensure()
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    book = value_book(prices or {})
+    conn = _connect()
+    try:
+        eq_rows = conn.execute(
+            "SELECT date, equity, bench_equity FROM sim_equity ORDER BY date"
+        ).fetchall()
+        prior = [r for r in eq_rows if r["date"] < day]
+        today_row = next((r for r in eq_rows if r["date"] == day), None)
+
+        eq_open = float(prior[-1]["equity"]) if prior else float(get_config()["starting_capital"])
+        eq_close = float(today_row["equity"]) if today_row else book["equity"]
+        bench_prev = float(prior[-1]["bench_equity"]) if prior and prior[-1]["bench_equity"] else 0.0
+        bench_now = float(today_row["bench_equity"]) if today_row and today_row["bench_equity"] else 0.0
+        bench_pct = ((bench_now - bench_prev) / bench_prev * 100) if bench_prev else 0.0
+        day_pnl = eq_close - eq_open
+        day_pct = (day_pnl / eq_open * 100) if eq_open else 0.0
+
+        dec = conn.execute(
+            "SELECT kind, ticker, strategy, reason FROM sim_decisions WHERE ts LIKE ?",
+            (f"{day}%",),
+        ).fetchall()
+        kinds: Dict[str, int] = {}
+        for r in dec:
+            kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+
+        tx = conn.execute(
+            """SELECT action, ticker, strategy, gross, fee, slippage, realized_pnl, reason
+               FROM sim_transactions WHERE date = ? AND action IN ('BUY','SELL')""",
+            (day,),
+        ).fetchall()
+        turnover = sum(float(t["gross"] or 0) for t in tx)
+        fees = sum(float(t["fee"] or 0) + float(t["slippage"] or 0) for t in tx)
+
+        entries = [dict(r) for r in dec if r["kind"] == "ENTRY"]
+        exits = [dict(r) for r in dec if r["kind"] == "EXIT"]
+        vetoes: Dict[str, int] = {}
+        for r in dec:
+            if r["kind"] == "SKIP" and r["reason"].startswith("VETO:"):
+                key = r["reason"].split("—")[0].replace("VETO:", "").strip()[:44]
+                vetoes[key] = vetoes.get(key, 0) + 1
+
+        alpha = day_pct - bench_pct
+        bits = []
+        if entries:
+            bits.append(f"opened {len(entries)} ({', '.join(sorted({e['ticker'] for e in entries}))[:60]})")
+        if exits:
+            bits.append(f"closed {len(exits)} ({', '.join(sorted({e['ticker'] for e in exits}))[:60]})")
+        if not entries and not exits:
+            bits.append("no trades")
+        bits.append(f"{alpha:+.2f}pp vs {BENCH_TICKER}")
+        if turnover:
+            bits.append(f"turnover ${turnover:,.0f}, cost ${fees:,.2f}")
+        headline = " · ".join(bits)
+
+        detail = {
+            "entries": [{"ticker": e["ticker"], "strategy": e["strategy"],
+                         "reason": e["reason"]} for e in entries],
+            "exits": [{"ticker": e["ticker"], "strategy": e["strategy"],
+                       "reason": e["reason"]} for e in exits],
+            "top_vetoes": sorted(vetoes.items(), key=lambda x: -x[1])[:6],
+            "decision_counts": kinds,
+            "positions_close": [{"ticker": p["ticker"], "strategy": p["strategy"],
+                                 "value": p["value"], "pnl_pct": p["unrealized_pnl_pct"]}
+                                for p in book["positions"]],
+        }
+
+        conn.execute(
+            """INSERT OR REPLACE INTO sim_daily_log
+               (date, ts, equity_open, equity_close, day_pnl, day_pnl_pct, bench_pct,
+                alpha_pp, entries, exits, skips, cycles, turnover_usd, fees_usd,
+                regime, headline, detail)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (day, datetime.now().isoformat(), round(eq_open, 2), round(eq_close, 2),
+             round(day_pnl, 2), round(day_pct, 3), round(bench_pct, 3), round(alpha, 3),
+             len(entries), len(exits), kinds.get("SKIP", 0), kinds.get("CYCLE", 0),
+             round(turnover, 2), round(fees, 2), regime_name, headline,
+             json.dumps(detail, default=str)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_daily_log(limit=1)[0] if get_daily_log(limit=1) else {}
+
+
+def get_daily_log(limit: int = 60) -> List[Dict]:
+    _ensure()
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM sim_daily_log ORDER BY date DESC LIMIT ?", (limit,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["detail"] = json.loads(d.get("detail") or "{}")
+            except Exception:
+                d["detail"] = {}
+            out.append(d)
+        return out
+    finally:
+        conn.close()
 
 
 def get_stats() -> Dict:

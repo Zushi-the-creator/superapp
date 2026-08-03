@@ -15,6 +15,7 @@ import {
   Scale,
   ShieldAlert,
   SlidersHorizontal,
+  CalendarDays,
   TrendingDown,
   TrendingUp,
   X,
@@ -23,6 +24,7 @@ import { api } from "@/lib/api";
 import type {
   SimCandidate,
   SimCandidatesResponse,
+  SimDailyLog,
   SimDecision,
   SimEquityPoint,
   SimHistoryResponse,
@@ -34,7 +36,7 @@ import type {
 import { cn, formatCurrency, formatPercent, pnlColor } from "@/lib/utils";
 import { CardSkeleton, TableSkeleton } from "@/components/shared/Skeleton";
 
-type SubTab = "book" | "strategies" | "candidates" | "journal" | "history" | "policy";
+type SubTab = "daily" | "book" | "strategies" | "candidates" | "journal" | "history" | "policy";
 
 const DECISION_STYLE: Record<string, { icon: React.ElementType; cls: string }> = {
   ENTRY: { icon: TrendingUp, cls: "text-signal-buy" },
@@ -65,7 +67,8 @@ export function SimTab() {
   const [state, setState] = useState<SimState | null>(null);
   const [decisions, setDecisions] = useState<SimDecision[]>([]);
   const [history, setHistory] = useState<SimHistoryResponse | null>(null);
-  const [sub, setSub] = useState<SubTab>("book");
+  const [daily, setDaily] = useState<SimDailyLog[]>([]);
+  const [sub, setSub] = useState<SubTab>("daily");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -73,14 +76,16 @@ export function SimTab() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [s, d, h] = await Promise.all([
+      const [s, d, h, dl] = await Promise.all([
         api.getSimState(),
         api.getSimDecisions(200),
         api.getSimHistory(200),
+        api.getSimDaily(60),
       ]);
       setState(s);
       setDecisions(d.decisions);
       setHistory(h);
+      setDaily(dl.days);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load simulation");
     } finally {
@@ -263,6 +268,7 @@ export function SimTab() {
         <div className="flex flex-wrap gap-1 border-b border-neutral-800">
           {(
             [
+              ["daily", `Daily log (${daily.length})`],
               ["book", `Book (${state.positions.length})`],
               ["strategies", `Strategies (${activeStrats.length}/${state.strategies.length})`],
               ["candidates", "Buy / Switch"],
@@ -286,6 +292,7 @@ export function SimTab() {
           ))}
         </div>
 
+        {sub === "daily" && <DailyLog days={daily} onRebuild={load} />}
         {sub === "book" && <BookTable positions={state.positions} onChanged={load} />}
         {sub === "strategies" && <StrategiesPanel state={state} onSaved={load} />}
         {sub === "candidates" && <CandidatesPanel state={state} onTraded={load} />}
@@ -1366,5 +1373,148 @@ function Toggle({
       </span>
       {label}
     </button>
+  );
+}
+
+/** Daily operator log — one card per trading day: what the book did and what it cost. */
+function DailyLog({ days, onRebuild }: { days: SimDailyLog[]; onRebuild: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  const rebuild = async () => {
+    setBusy(true);
+    try {
+      await api.rebuildSimDaily(10);
+      onRebuild();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!days.length) {
+    return (
+      <div className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-8 text-center">
+        <CalendarDays className="mx-auto mb-3 h-8 w-8 text-neutral-600" />
+        <div className="text-sm text-neutral-400">No daily entries yet</div>
+        <div className="mx-auto mt-1 max-w-md text-xs text-neutral-500">
+          A log is written automatically after each close. You can also backfill the last 10 days
+          from the decision journal.
+        </div>
+        <button
+          onClick={rebuild}
+          disabled={busy}
+          className="mt-4 inline-flex items-center gap-2 rounded-md bg-neutral-800 px-4 py-2 text-xs font-medium text-neutral-200 hover:bg-neutral-700 disabled:opacity-50"
+        >
+          <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} /> Backfill from journal
+        </button>
+      </div>
+    );
+  }
+
+  const cum = days.reduce((a, d) => a + d.alpha_pp, 0);
+  const totalCost = days.reduce((a, d) => a + d.fees_usd, 0);
+  const totalTurnover = days.reduce((a, d) => a + d.turnover_usd, 0);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3">
+        <div className="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-neutral-400">
+          <span>
+            Days logged <span className="text-neutral-200">{days.length}</span>
+          </span>
+          <span>
+            Cumulative alpha{" "}
+            <span className={pnlColor(cum)}>{cum >= 0 ? "+" : ""}{cum.toFixed(2)}pp</span>
+          </span>
+          <span>
+            Turnover <span className="text-neutral-200">{formatCurrency(totalTurnover)}</span>
+          </span>
+          <span>
+            Frictions paid <span className="text-signal-sell">{formatCurrency(totalCost)}</span>
+          </span>
+        </div>
+        <button
+          onClick={rebuild}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 rounded-md bg-neutral-800 px-3 py-1.5 text-[11px] text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+        >
+          <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} /> Rebuild
+        </button>
+      </div>
+
+      {days.map((d) => (
+        <div key={d.date} className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div className="flex items-baseline gap-2">
+              <CalendarDays className="h-4 w-4 shrink-0 text-neutral-500" />
+              <span className="text-sm font-semibold text-neutral-100">{d.date}</span>
+              {d.regime && (
+                <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400">
+                  {d.regime}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-baseline gap-3 text-xs">
+              <span className={pnlColor(d.day_pnl)}>
+                {formatCurrency(d.day_pnl)} ({formatPercent(d.day_pnl_pct)})
+              </span>
+              <span className="text-neutral-500">
+                XLK {formatPercent(d.bench_pct)}
+              </span>
+              <span className={cn("font-medium", pnlColor(d.alpha_pp))}>
+                {d.alpha_pp >= 0 ? "+" : ""}
+                {d.alpha_pp.toFixed(2)}pp
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-1.5 text-xs text-neutral-300">{d.headline}</div>
+
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-neutral-500">
+            <span>equity {formatCurrency(d.equity_open)} → {formatCurrency(d.equity_close)}</span>
+            <span>{d.cycles} cycles</span>
+            <span>{d.entries} in / {d.exits} out</span>
+            <span>{d.skips} skipped</span>
+            {d.turnover_usd > 0 && (
+              <span>
+                turnover {formatCurrency(d.turnover_usd)} · cost{" "}
+                <span className="text-signal-sell">{formatCurrency(d.fees_usd)}</span>
+              </span>
+            )}
+          </div>
+
+          {(d.detail.entries?.length || d.detail.exits?.length) && (
+            <div className="mt-2 flex flex-col gap-1 border-t border-neutral-800 pt-2">
+              {d.detail.entries?.map((e, i) => (
+                <div key={`in${i}`} className="flex items-start gap-2 text-[11px]">
+                  <TrendingUp className="mt-0.5 h-3 w-3 shrink-0 text-signal-buy" />
+                  <span className="font-medium text-neutral-200">{e.ticker}</span>
+                  <span className="text-neutral-500">{e.reason}</span>
+                </div>
+              ))}
+              {d.detail.exits?.map((e, i) => (
+                <div key={`out${i}`} className="flex items-start gap-2 text-[11px]">
+                  <TrendingDown className="mt-0.5 h-3 w-3 shrink-0 text-orange-400" />
+                  <span className="font-medium text-neutral-200">{e.ticker}</span>
+                  <span className="text-neutral-500">{e.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!!d.detail.top_vetoes?.length && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {d.detail.top_vetoes.map(([reason, n]) => (
+                <span
+                  key={reason}
+                  className="rounded bg-neutral-900 px-1.5 py-0.5 text-[10px] text-neutral-500"
+                >
+                  {reason} <span className="text-neutral-400">×{n}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }

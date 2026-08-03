@@ -16,6 +16,7 @@ import type {
   SimHistoryResponse,
   SimConfig,
   SimCandidatesResponse,
+  SimDailyLog,
   Mix9State,
 } from "./types";
 
@@ -126,6 +127,10 @@ export const api = {
     ),
   getSimHistory: (limit = 200) =>
     fetchJson<SimHistoryResponse>(`/api/v2/sim/history?limit=${limit}`),
+  getSimDaily: (limit = 60) =>
+    fetchJson<{ days: SimDailyLog[] }>(`/api/v2/sim/daily?limit=${limit}`),
+  rebuildSimDaily: (days = 10) =>
+    fetchJson<{ rebuilt: string[] }>(`/api/v2/sim/daily/rebuild?days=${days}`, { method: "POST" }),
   getSimCandidates: (limit = 40) =>
     fetchJson<SimCandidatesResponse>(`/api/v2/sim/candidates?limit=${limit}`),
   runSimCycle: (force = false) =>

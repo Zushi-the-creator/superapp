@@ -906,3 +906,29 @@ export interface Mix9State {
   trades?: Mix9Trade[];
   engine?: { core_ticker: string; enabled: boolean; dd_stop_pct: number; note: string };
 }
+
+export interface SimDailyLog {
+  date: string;
+  ts: string;
+  equity_open: number;
+  equity_close: number;
+  day_pnl: number;
+  day_pnl_pct: number;
+  bench_pct: number;
+  alpha_pp: number;
+  entries: number;
+  exits: number;
+  skips: number;
+  cycles: number;
+  turnover_usd: number;
+  fees_usd: number;
+  regime: string;
+  headline: string;
+  detail: {
+    entries?: Array<{ ticker: string; strategy: string; reason: string }>;
+    exits?: Array<{ ticker: string; strategy: string; reason: string }>;
+    top_vetoes?: Array<[string, number]>;
+    decision_counts?: Record<string, number>;
+    positions_close?: Array<{ ticker: string; strategy: string; value: number; pnl_pct: number }>;
+  };
+}
