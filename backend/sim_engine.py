@@ -1563,11 +1563,20 @@ def write_daily_log(prices: Optional[Dict[str, float]] = None,
         prior = [r for r in eq_rows if r["date"] < day]
         today_row = next((r for r in eq_rows if r["date"] == day), None)
 
+        # Only log a day the book actually marked. Without an equity row there
+        # is no close to report, and synthesising one produced nonsense on the
+        # first backfill: a missing bench_equity made bench_pct read -100% and
+        # the alpha column show +101pp on a weekend. A day with no snapshot is
+        # a day with no data, not a day with a huge result.
+        if today_row is None:
+            return {}
+
         eq_open = float(prior[-1]["equity"]) if prior else float(get_config()["starting_capital"])
-        eq_close = float(today_row["equity"]) if today_row else book["equity"]
+        eq_close = float(today_row["equity"])
         bench_prev = float(prior[-1]["bench_equity"]) if prior and prior[-1]["bench_equity"] else 0.0
-        bench_now = float(today_row["bench_equity"]) if today_row and today_row["bench_equity"] else 0.0
-        bench_pct = ((bench_now - bench_prev) / bench_prev * 100) if bench_prev else 0.0
+        bench_now = float(today_row["bench_equity"] or 0)
+        # Both sides must be present, or the comparison is meaningless.
+        bench_pct = ((bench_now - bench_prev) / bench_prev * 100) if (bench_prev and bench_now) else 0.0
         day_pnl = eq_close - eq_open
         day_pct = (day_pnl / eq_open * 100) if eq_open else 0.0
 

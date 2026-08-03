@@ -7721,15 +7721,16 @@ async def sim_daily_rebuild(days: int = 10):
     open_pos = _sim.get_open_positions()
     prices = await _sim_prices([p["ticker"] for p in open_pos])
     regime = _check_market_regime().get("regime", "")
-    out = []
+    out, skipped = [], []
     for i in range(days):
         d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
         try:
-            await asyncio.to_thread(_sim.write_daily_log, prices, regime, d)
-            out.append(d)
+            res = await asyncio.to_thread(_sim.write_daily_log, prices, regime, d)
+            (out if res else skipped).append(d)
         except Exception as e:
             print(f"[Sim] daily log {d} failed: {e}")
-    return {"rebuilt": out}
+    # skipped = no equity snapshot that day (weekend/holiday/pre-reset)
+    return {"rebuilt": out, "skipped_no_snapshot": skipped}
 
 
 @router.get("/sim/decisions")
