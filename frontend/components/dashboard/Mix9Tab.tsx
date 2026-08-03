@@ -82,6 +82,20 @@ function DDTrajectory({ hist, dates, stop, gap, pct }: {
   );
 }
 
+/** Business days between a snapshot date and today. A parked strategy hides
+ *  staleness well — the numbers look plausible for days — so the age has to be
+ *  stated, not implied by a date the reader has to diff themselves. */
+function staleDays(asof?: string): number {
+  if (!asof) return 0;
+  const a = new Date(asof + "T00:00:00"), t = new Date();
+  let d = 0;
+  for (const c = new Date(a); c < t; c.setDate(c.getDate() + 1)) {
+    const w = c.getDay();
+    if (w !== 0 && w !== 6) d++;
+  }
+  return Math.max(0, d - 1);
+}
+
 const money = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
 export function Mix9Tab() {
@@ -89,12 +103,24 @@ export function Mix9Tab() {
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [busy, setBusy] = useState(false);
+
   const load = () => {
     setLoading(true);
     api.getMix9State()
       .then(d => { setS(d); setErr(null); })
       .catch(e => setErr(String(e)))
       .finally(() => setLoading(false));
+  };
+
+  /** Actually RECOMPUTE, not just re-read the cached snapshot. The old Refresh
+   *  called the GET, so it returned identical data and read as a broken button. */
+  const recompute = () => {
+    setBusy(true);
+    api.runMix9()
+      .then(d => { setS(d); setErr(null); })
+      .catch(e => setErr(String(e)))
+      .finally(() => setBusy(false));
   };
   useEffect(load, []);
 
@@ -137,11 +163,28 @@ export function Mix9Tab() {
             s?.engine?.enabled ? "bg-emerald-900 text-emerald-200" : "bg-neutral-800 text-neutral-400"}`}>
             {s?.engine?.enabled ? "AUTO ON" : "ADVISORY"}
           </span>
-          <button onClick={load} className="rounded bg-neutral-800 px-3 py-1 text-xs text-neutral-200">
-            Refresh
+          <button onClick={load} disabled={busy}
+                  className="rounded bg-neutral-800 px-3 py-1 text-xs text-neutral-200 disabled:opacity-40">
+            Reload
+          </button>
+          <button onClick={recompute} disabled={busy}
+                  className="rounded bg-blue-900 px-3 py-1 text-xs text-blue-100 disabled:opacity-40">
+            {busy ? "Recomputing…" : "Recompute"}
           </button>
         </div>
       </div>
+
+      {staleDays(t.asof) >= 1 && (
+        <div className="rounded border border-orange-800 bg-orange-950/30 px-4 py-3">
+          <span className="text-sm font-semibold text-orange-300">
+            SNAPSHOT IS {staleDays(t.asof)} TRADING {staleDays(t.asof) === 1 ? "DAY" : "DAYS"} OLD
+          </span>
+          <p className="mt-1 text-xs text-neutral-400">
+            Last closed bar {t.asof}. The nightly job runs after the US close on weekdays;
+            if it has not run, this is what you are looking at. Press Recompute to rebuild now.
+          </p>
+        </div>
+      )}
 
       {/* state banner — parked is normal, say so */}
       <div className={`rounded border p-4 ${live

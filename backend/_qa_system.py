@@ -101,10 +101,16 @@ def qa_data():
     # suite cry wolf. A QA suite you learn to ignore is worse than none.
     q = pd.read_sql_query("SELECT date,COUNT(*) cnt FROM daily_prices WHERE date>='2016-06-01' "
                           "GROUP BY date ORDER BY date", con)
-    q['yr'] = q.date.str[:4]
-    q['covr'] = q.cnt / q.groupby('yr').cnt.transform('median')
+    # Compare each date to its NEIGHBOURS, not to the calendar-year median. The
+    # universe grows and shrinks over time (it expanded ~15% through 2021 in the
+    # SPAC boom, and adding 3,828 delisted names shifted every year's baseline),
+    # so a year-median test flags healthy early-year dates as sparse. A rolling
+    # local median detects what we actually care about: a date that DROPS
+    # relative to the days around it — a real hole in the feed.
+    q['base'] = q.cnt.rolling(21, center=True, min_periods=5).median()
+    q['covr'] = q.cnt / q['base']
     bad = q[q['covr'] < 0.9]
-    chk(len(bad) == 0, "2.1 every date >=90% universe coverage",
+    chk(len(bad) == 0, "2.1 no date drops >10% vs neighbouring dates",
         f"{len(bad)} bad dates: {list(bad.date[:4])}" if len(bad) else f"{len(q)} dates clean")
 
     last = q.date.iloc[-1]
@@ -114,8 +120,7 @@ def qa_data():
         f"last bar {last}, {lag} business days ago")
 
     # phantom rows: market holidays with a handful of synthetic bars
-    med = q.cnt.median()
-    phantom = q[q.cnt < med * 0.05]
+    phantom = q[q.cnt < q['base'] * 0.05]
     chk(len(phantom) == 0, "2.3 no phantom holiday rows",
         f"{list(phantom.date)}" if len(phantom) else "none")
 

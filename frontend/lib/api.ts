@@ -114,6 +114,9 @@ export const api = {
   // ── Simulator ($100k autonomous multi-strategy paper book) ──
   // MIX9 engine
   getMix9State: () => fetchJson<Mix9State>("/api/v2/mix9/state"),
+  // POST /mix9/run RECOMPUTES (subprocess, minutes). The plain GET only re-reads
+  // the stored snapshot — a "Refresh" button wired to it looks broken because the
+  // data legitimately does not change.
   runMix9: () => fetchJson<Mix9State>("/api/v2/mix9/run", { method: "POST" }),
 
   getSimState: () => fetchJson<SimState>("/api/v2/sim/state"),
