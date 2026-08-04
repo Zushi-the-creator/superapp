@@ -7195,6 +7195,55 @@ async def cache_refresh_loop():
         await asyncio.sleep(_sleep)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# SHADOW TICKET TRACKER (/api/v2/shadow/*)
+# ══════════════════════════════════════════════════════════════════════════
+# Logs every trade ticket the operator delivers (sent / executed / skipped)
+# with entry-day price, then back-fills forward returns and reports the cost
+# of CEO discretion (executed_avg − skipped_avg per horizon). The 2026-07-11
+# audit blamed deviations, not the model — this is the measurement layer for
+# that claim. Bookkeeping only: never on the scan/exit hot path.
+
+class ShadowTicketIn(BaseModel):
+    ticker: str
+    action: str  # sent | executed | skipped
+    price: Optional[float] = None
+    strategy: Optional[str] = None
+    composite: Optional[float] = None
+    size_usd: Optional[float] = None
+    note: Optional[str] = None
+    sent_date: Optional[str] = None       # defaults to today (YYYY-MM-DD)
+    ticket_id: Optional[int] = None       # update an existing ticket's action
+
+
+@router.post("/shadow/ticket")
+async def shadow_log_ticket(t: ShadowTicketIn):
+    """Log a delivered ticket, or update an existing one's action (sent→executed/skipped)."""
+    import shadow_tracker as _sh
+    try:
+        tid = await asyncio.to_thread(
+            _sh.log_ticket, t.ticker, t.action, t.price, t.strategy,
+            t.composite, t.size_usd, t.note, t.sent_date, t.ticket_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "ticket_id": tid}
+
+
+@router.get("/shadow/book")
+async def shadow_book():
+    """Full shadow book + executed-vs-skipped forward-return summary."""
+    import shadow_tracker as _sh
+    return await asyncio.to_thread(_sh.book_summary)
+
+
+@router.post("/shadow/backfill")
+async def shadow_backfill():
+    """Back-fill any now-computable forward returns on logged tickets."""
+    import shadow_tracker as _sh
+    updated = await asyncio.to_thread(_sh.backfill_returns)
+    return {"success": True, "rows_updated": updated}
+
+
 async def signal_tracker_loop():
     """Daily snapshot of top-20 Entries-tab picks + backfill stale forward returns.
 
@@ -7225,6 +7274,17 @@ async def signal_tracker_loop():
                     print(f"[SignalTracker] Backfilled forward returns on {updated} rows")
                 except Exception as _e:
                     print(f"[SignalTracker] Backfill error: {_e}")
+
+                # Shadow ticket book — back-fill forward returns on logged
+                # tickets so the executed-vs-skipped audit stays current. Own
+                # try-block: a shadow-book hiccup must not stall the signal
+                # tracker or the forward journal below it.
+                try:
+                    import shadow_tracker as _sh
+                    _sh_updated = await asyncio.to_thread(_sh.backfill_returns)
+                    print(f"[ShadowTracker] Backfilled forward returns on {_sh_updated} rows")
+                except Exception as _e:
+                    print(f"[ShadowTracker] Backfill error: {_e}")
 
                 # Forward-test journal (2026-07-29): record registered rosters'
                 # picks at the latest completed bar — the authoritative evidence
