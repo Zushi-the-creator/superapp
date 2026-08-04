@@ -264,6 +264,17 @@ CREATE TABLE IF NOT EXISTS sim_daily_log (
     detail TEXT DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS agent_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    job TEXT NOT NULL,
+    status TEXT DEFAULT 'ok',
+    summary TEXT DEFAULT '',
+    detail TEXT DEFAULT '{}',
+    duration_ms INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_agent_log_ts ON agent_log(ts);
+
 CREATE TABLE IF NOT EXISTS sim_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1808,3 +1819,52 @@ def get_state(prices: Optional[Dict[str, float]] = None,
         "regime": regime or {},
         "equity_curve": curve,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Agent work log — what the 24/7 operator jobs did
+# ──────────────────────────────────────────────────────────────────────────
+
+def add_agent_log(*, job: str, summary: str, status: str = "ok",
+                  detail: Optional[Dict] = None, duration_ms: int = 0) -> Dict:
+    """Record one operator-job run. Replaces WhatsApp as the reporting channel:
+    the work lands in the tab where the rest of the book's evidence already is,
+    instead of a chat thread nobody can query later."""
+    _ensure()
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            """INSERT INTO agent_log (ts, job, status, summary, detail, duration_ms)
+               VALUES (?,?,?,?,?,?)""",
+            (datetime.now().isoformat(), job[:120], status[:32], summary,
+             json.dumps(detail or {}, default=str), int(duration_ms or 0)),
+        )
+        conn.commit()
+        return {"id": cur.lastrowid, "job": job, "status": status}
+    finally:
+        conn.close()
+
+
+def get_agent_log(limit: int = 100, job: Optional[str] = None) -> List[Dict]:
+    _ensure()
+    conn = _connect()
+    try:
+        if job:
+            rows = conn.execute(
+                "SELECT * FROM agent_log WHERE job=? ORDER BY id DESC LIMIT ?", (job, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM agent_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["detail"] = json.loads(d.get("detail") or "{}")
+            except Exception:
+                d["detail"] = {}
+            out.append(d)
+        return out
+    finally:
+        conn.close()

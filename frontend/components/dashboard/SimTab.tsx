@@ -25,6 +25,7 @@ import type {
   SimCandidate,
   SimCandidatesResponse,
   SimDailyLog,
+  AgentLogEntry,
   SimDecision,
   SimEquityPoint,
   SimHistoryResponse,
@@ -68,6 +69,7 @@ export function SimTab() {
   const [decisions, setDecisions] = useState<SimDecision[]>([]);
   const [history, setHistory] = useState<SimHistoryResponse | null>(null);
   const [daily, setDaily] = useState<SimDailyLog[]>([]);
+  const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
   const [sub, setSub] = useState<SubTab>("daily");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -76,16 +78,18 @@ export function SimTab() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [s, d, h, dl] = await Promise.all([
+      const [s, d, h, dl, al] = await Promise.all([
         api.getSimState(),
         api.getSimDecisions(200),
         api.getSimHistory(200),
         api.getSimDaily(60),
+        api.getAgentLog(100),
       ]);
       setState(s);
       setDecisions(d.decisions);
       setHistory(h);
       setDaily(dl.days);
+      setAgentLog(al.entries);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load simulation");
     } finally {
@@ -292,7 +296,7 @@ export function SimTab() {
           ))}
         </div>
 
-        {sub === "daily" && <DailyLog days={daily} onRebuild={load} />}
+        {sub === "daily" && <DailyLog days={daily} onRebuild={load} agentLog={agentLog} />}
         {sub === "book" && <BookTable positions={state.positions} onChanged={load} />}
         {sub === "strategies" && <StrategiesPanel state={state} onSaved={load} />}
         {sub === "candidates" && <CandidatesPanel state={state} onTraded={load} />}
@@ -1377,7 +1381,7 @@ function Toggle({
 }
 
 /** Daily operator log — one card per trading day: what the book did and what it cost. */
-function DailyLog({ days, onRebuild }: { days: SimDailyLog[]; onRebuild: () => void }) {
+function DailyLog({ days, onRebuild, agentLog }: { days: SimDailyLog[]; onRebuild: () => void; agentLog: AgentLogEntry[] }) {
   const [busy, setBusy] = useState(false);
 
   const rebuild = async () => {
@@ -1440,6 +1444,8 @@ function DailyLog({ days, onRebuild }: { days: SimDailyLog[]; onRebuild: () => v
           <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} /> Rebuild
         </button>
       </div>
+
+      <AgentWorkLog entries={agentLog} />
 
       {days.map((d) => (
         <div key={d.date} className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-4">
@@ -1515,6 +1521,81 @@ function DailyLog({ days, onRebuild }: { days: SimDailyLog[]; onRebuild: () => v
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Operator work steps — what the 24/7 agent jobs did, reported into the tab
+ *  rather than a chat thread so the record stays queryable next to the book. */
+function AgentWorkLog({ entries }: { entries: AgentLogEntry[] }) {
+  const [open, setOpen] = useState(true);
+
+  if (!entries.length) {
+    return (
+      <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/20 px-4 py-3 text-[11px] text-neutral-500">
+        <span className="font-medium text-neutral-400">Agent work steps</span> — nothing reported
+        yet. The scheduled operator jobs post here once the Claude CLI session is authenticated.
+      </div>
+    );
+  }
+
+  const shown = open ? entries : entries.slice(0, 3);
+  const failed = entries.filter((e) => e.status !== "ok").length;
+
+  return (
+    <div className="rounded-lg border border-neutral-800 bg-neutral-900/40">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left"
+      >
+        <span className="flex items-center gap-2 text-xs font-medium text-neutral-200">
+          <Bot className="h-4 w-4 text-signal-buy" />
+          Agent work steps
+          <span className="text-neutral-500">({entries.length})</span>
+          {failed > 0 && (
+            <span className="rounded bg-signal-sell/15 px-1.5 py-0.5 text-[10px] text-signal-sell">
+              {failed} failed
+            </span>
+          )}
+        </span>
+        <span className="text-[11px] text-neutral-500">{open ? "collapse" : "expand"}</span>
+      </button>
+      <div className="divide-y divide-neutral-800 border-t border-neutral-800">
+        {shown.map((e) => (
+          <div key={e.id} className="flex items-start gap-3 px-4 py-2.5">
+            <span
+              className={cn(
+                "mt-1 h-2 w-2 shrink-0 rounded-full",
+                e.status === "ok" ? "bg-signal-buy" : "bg-signal-sell"
+              )}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="text-xs font-medium text-neutral-100">{e.job}</span>
+                {e.status !== "ok" && (
+                  <span className="text-[10px] text-signal-sell">{e.status}</span>
+                )}
+                {e.duration_ms > 0 && (
+                  <span className="text-[10px] text-neutral-600">
+                    {(e.duration_ms / 1000).toFixed(1)}s
+                  </span>
+                )}
+                <span className="ml-auto text-[10px] tabular-nums text-neutral-600">
+                  {new Date(e.ts).toLocaleString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+              </div>
+              <div className="mt-0.5 whitespace-pre-wrap text-[11px] leading-relaxed text-neutral-400">
+                {e.summary}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

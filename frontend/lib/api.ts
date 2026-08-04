@@ -17,6 +17,7 @@ import type {
   SimConfig,
   SimCandidatesResponse,
   SimDailyLog,
+  AgentLogEntry,
   Mix9State,
 } from "./types";
 
@@ -131,6 +132,8 @@ export const api = {
     fetchJson<{ days: SimDailyLog[] }>(`/api/v2/sim/daily?limit=${limit}`),
   rebuildSimDaily: (days = 10) =>
     fetchJson<{ rebuilt: string[] }>(`/api/v2/sim/daily/rebuild?days=${days}`, { method: "POST" }),
+  getAgentLog: (limit = 100) =>
+    fetchJson<{ entries: AgentLogEntry[] }>(`/api/v2/sim/agent-log?limit=${limit}`),
   getSimCandidates: (limit = 40) =>
     fetchJson<SimCandidatesResponse>(`/api/v2/sim/candidates?limit=${limit}`),
   runSimCycle: (force = false) =>

@@ -899,7 +899,8 @@ export interface Mix9State {
     sleeve: Mix9Pick[]; preview_sleeve?: Mix9Pick[];
     components: Record<string, { dd_pct: number; parked: boolean }>;
     dd_history?: number[]; dd_dates?: string[];
-    gap_to_unpark_pp?: number; pct_of_way_back?: number;
+    gap_to_unpark_pp?: number; required_gain_pct?: number;
+    trend_20d_pp?: number; trend_60d_pp?: number;
     wanted_strategy?: string; dwell_blocked?: boolean;
     dwell_days_left?: number; min_dwell_days?: number;
   };
@@ -931,4 +932,14 @@ export interface SimDailyLog {
     decision_counts?: Record<string, number>;
     positions_close?: Array<{ ticker: string; strategy: string; value: number; pnl_pct: number }>;
   };
+}
+
+export interface AgentLogEntry {
+  id: number;
+  ts: string;
+  job: string;
+  status: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  duration_ms: number;
 }

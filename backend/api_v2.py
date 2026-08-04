@@ -7734,6 +7734,33 @@ async def sim_daily_rebuild(days: int = 10):
     return {"rebuilt": out, "skipped_no_snapshot": skipped, "pruned_orphans": pruned}
 
 
+class AgentLogEntry(BaseModel):
+    job: str
+    summary: str
+    status: str = "ok"
+    detail: Optional[Dict] = None
+    duration_ms: int = 0
+
+
+@router.post("/sim/agent-log")
+async def sim_agent_log_post(entry: AgentLogEntry):
+    """Ingest one operator-job report.
+
+    This is the OpenClaw cron jobs' delivery target, replacing WhatsApp. The
+    reports land next to the book's own evidence so they can be read, filtered
+    and cross-referenced against the decision journal later — a chat thread
+    can't be queried.
+    """
+    return _sim.add_agent_log(job=entry.job, summary=entry.summary,
+                              status=entry.status, detail=entry.detail,
+                              duration_ms=entry.duration_ms)
+
+
+@router.get("/sim/agent-log")
+async def sim_agent_log_get(limit: int = 100, job: str = ""):
+    return {"entries": _sim.get_agent_log(limit=limit, job=job or None)}
+
+
 @router.get("/sim/decisions")
 async def sim_decisions(limit: int = 150, kinds: str = ""):
     """The decision journal — every entry, exit, hold, skip, switch and veto."""
