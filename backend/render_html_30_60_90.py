@@ -222,7 +222,7 @@ ul{max-width:80ch}li{margin:4px 0}
         P("</table></div>")
 
     # Sectors
-    P("<h2>By sector</h2><p>Finnhub industry mapped to GICS-style sectors. All strategies pooled first, then strategy × sector.</p>")
+    P("<h2>By sector</h2><p>Finnhub industry mapped to GICS-style sectors; UNKNOWN is closed-end funds and SPACs that Finnhub does not classify. All strategies pooled first, then strategy × sector.</p>")
     for w in ("90", "60", "30"):
         s = S[w]
         P(f"<h3>{w}-day window · all strategies pooled</h3><div class='wrap'><table><tr><th>Sector</th><th>Trades</th><th>Win rate</th><th>Avg</th><th>Median</th><th>PF</th><th>t</th><th>Sector ETF</th><th>Verdict</th></tr>")

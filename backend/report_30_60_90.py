@@ -207,7 +207,7 @@ def main():
             for r in regs) + " |")
 
     # By sector
-    P("\n## 5. By sector (live exits, marked-to-market)\n")
+    P("\n## 5. By sector (live exits, marked-to-market)\n\nFinnhub industry mapped to GICS-style sectors. UNKNOWN = closed-end funds and SPACs that Finnhub does not classify.\n")
     for w in ("90", "60", "30"):
         s = R["signal"][w]
         P(f"\n### {w}-day window — all strategies pooled\n")
