@@ -97,7 +97,7 @@ td small{color:var(--mute);font-size:.76rem}
 .vgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 18px;margin-top:6px;font-family:"IBM Plex Mono",monospace;font-size:.86rem;font-variant-numeric:tabular-nums}
 @media (max-width:720px){.vgrid{grid-template-columns:1fr}}
 .callout.lose{border-color:var(--lose)}.callout.win{border-color:var(--win)}
-ul{max-width:80ch}li{margin:4px 0}
+ul{max-width:80ch;padding-left:20px}li{margin:6px 0;max-width:80ch}
 .star{color:var(--acc);font-weight:600}
 @media (max-width:720px){.tiles{grid-template-columns:1fr}}
 </style>
@@ -119,6 +119,12 @@ ul{max-width:80ch}li{margin:4px 0}
           f'<div class="s">Best: <b>{best[0]}</b> {num(best[1]["avg"])} avg/trade ({best[1]["wr"]:.0f}% WR, {best[1]["trades"]}t)<br>'
           f'Worst: <b>{worst[0]}</b> {num(worst[1]["avg"])} ({worst[1]["wr"]:.0f}% WR)<br><span class="dim">{regs}</span></div></div>')
     P("</div>")
+
+    # Executive summary (from summary.html next to results, if present)
+    import os as _os
+    sp = _os.path.join(_os.path.dirname(_os.path.abspath(a.results)), "summary.html")
+    if _os.path.exists(sp):
+        P(open(sp).read())
 
     # Verdict callouts
     P("<h2>Verdict</h2>")
